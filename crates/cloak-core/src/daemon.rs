@@ -411,23 +411,23 @@ fn spawn_peer_exit_watcher(
     let watcher = match peer_auth::linux::PidfdWatcher::new(pidfd, pid) {
         Ok(w) => w,
         Err(e) => {
-            // pidfd registration with the tokio reactor failed. Treat
-            // this the same as the macOS ESRCH case: revoke eagerly so
-            // a flaky watcher never leaves a stale token alive.
+            // pidfd registration with the tokio reactor failed. Don't
+            // revoke eagerly — the CLI process is alive (we just opened
+            // its pidfd), and any in-flight handshake/unlock would die
+            // before the first response. Log and skip the watcher; the
+            // session-token revoke-on-disconnect path still runs when
+            // the connection drops, so the worst-case window is bounded
+            // by socket FIN rather than process exit. Strictly weaker
+            // than the watcher-active case but still closes A8 for the
+            // common path (peer exit → socket FIN → revoke).
             tracing::warn!(
                 conn_id,
                 peer_pid = pid,
                 error = %e,
-                "pidfd watcher could not register; revoking eagerly"
+                "pidfd watcher could not register with tokio reactor; \
+                 falling back to socket-FIN-driven revocation"
             );
-            let sessions = ctx.sessions.clone_handle();
-            return Some(tokio::spawn(async move {
-                if let Some(id) = identity.as_ref() {
-                    sessions.revoke_by_identity(id).await;
-                }
-                sessions.revoke_by_conn(conn_id).await;
-                peer_exit.notify_waiters();
-            }));
+            return None;
         }
     };
     let sessions = ctx.sessions.clone_handle();
