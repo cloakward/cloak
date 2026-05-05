@@ -242,8 +242,24 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     let (peer, peer_pidfd) = match peer_auth::peer_info_with_pidfd_linux(&stream) {
         Ok((p, fd)) => (p, Some(fd)),
         Err(e) => {
-            tracing::warn!(error = %e, "peer_info_with_pidfd_linux failed; closing connection");
-            return Ok(());
+            // Pidfd capture failed (older kernel, sandboxed peer, or a
+            // syscall quirk on a particular binary). Fall back to the
+            // plain peer-credential path; the connection still gets
+            // peer-auth and session tokens, we just don't run the
+            // exit-watcher. This is strictly weaker than the watcher-
+            // active case but no weaker than the macOS-no-kqueue path
+            // already documented in the threat model.
+            tracing::warn!(
+                error = %e,
+                "peer_info_with_pidfd_linux failed; falling back to peer_info_from_unix"
+            );
+            match peer_auth::peer_info_from_unix(&stream) {
+                Ok(p) => (p, None),
+                Err(inner) => {
+                    tracing::warn!(error = %inner, "peer_info_from_unix also failed; closing");
+                    return Ok(());
+                }
+            }
         }
     };
     #[cfg(target_os = "macos")]
