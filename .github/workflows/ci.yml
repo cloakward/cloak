@@ -1,0 +1,153 @@
+# W3 — cross-platform CI matrix.
+#
+# Builds, tests, lints, and formats the workspace on every supported
+# (os, target) pair. Plus a TypeScript pass for the MCP shim on
+# non-Windows rows. See PLAN.md §3 W3.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  build:
+    name: build (${{ matrix.os }}, ${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: macos
+            cross: false
+          - os: macos-13
+            target: x86_64-apple-darwin
+            platform: macos
+            cross: false
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            cross: false
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            cross: true
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - name: Install libsodium + bun (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          brew install libsodium bun
+
+      - name: Install libsodium + bun (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev pkg-config
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install bun (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          irm bun.sh/install.ps1 | iex
+          # Bun installs to %USERPROFILE%\.bun\bin
+          "$env:USERPROFILE\.bun\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install cross (musl row)
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # ----- Rust build / test / clippy -----------------------------------
+      # Windows: cloak-cli daemon-unlock uses UnixStream; the W6 workstream
+      # ports the CLI to Named Pipes. Until then we only build/test
+      # cloak-core on the windows row to keep the matrix green.
+      - name: cargo clippy (host targets)
+        if: ${{ !matrix.cross && matrix.platform != 'windows' }}
+        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
+
+      - name: cargo clippy (windows, cloak-core only)
+        if: matrix.platform == 'windows'
+        run: cargo clippy -p cloak-core --all-targets --target ${{ matrix.target }} -- -D warnings
+
+      - name: cross clippy (musl)
+        if: matrix.cross
+        run: cross clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
+
+      - name: cargo build (host targets)
+        if: ${{ !matrix.cross && matrix.platform != 'windows' }}
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: cargo build (windows, cloak-core only)
+        if: matrix.platform == 'windows'
+        run: cargo build --release -p cloak-core --target ${{ matrix.target }}
+
+      - name: cross build (musl)
+        if: matrix.cross
+        run: cross build --release --workspace --target ${{ matrix.target }}
+
+      - name: cargo test (host targets)
+        if: ${{ !matrix.cross && matrix.platform != 'windows' }}
+        run: cargo test --workspace --target ${{ matrix.target }}
+
+      - name: cargo test (windows, cloak-core only)
+        if: matrix.platform == 'windows'
+        run: cargo test -p cloak-core --target ${{ matrix.target }}
+
+      - name: cross test (musl)
+        if: matrix.cross
+        run: cross test --workspace --target ${{ matrix.target }}
+
+      # ----- cloak-mcp (TypeScript) ---------------------------------------
+      # Skipped on Windows for v0.1; W6 brings the MCP shim build online.
+      - name: cloak-mcp install + lint + test + build
+        if: matrix.platform != 'windows'
+        working-directory: packages/cloak-mcp
+        run: |
+          bun install --frozen-lockfile
+          bun run lint:no-http
+          bun test
+          bun build src/server.ts --compile --outfile dist/cloak-mcp
+
+      - name: cloak-mcp lint:no-http only (windows)
+        if: matrix.platform == 'windows'
+        working-directory: packages/cloak-mcp
+        shell: bash
+        run: |
+          bun install --frozen-lockfile
+          bun run lint:no-http

@@ -1,0 +1,59 @@
+# W3 — end-to-end smoke test on macOS arm64 and Linux glibc.
+# Builds the workspace, drives the daemon + CLI + MCP shim through the
+# init/add/list/show/daemon-unlock/mcp-self-test flow under a hermetic
+# HOME, with CLOAK_PEPPER_FILE in lieu of an OS keychain.
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos
+          - os: ubuntu-24.04
+            platform: linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install libsodium + bun (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          brew install libsodium bun
+
+      - name: Install libsodium + bun (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev pkg-config
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: smoke-${{ matrix.os }}
+
+      - name: Run smoke test
+        run: ./scripts/smoke-test.sh

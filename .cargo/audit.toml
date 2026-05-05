@@ -1,0 +1,17 @@
+# cargo-audit configuration. Mirror of the `[advisories.ignore]` block in
+# /deny.toml so the security workflow's two scanners agree.
+#
+# RUSTSEC-2026-0098 / 0099 / 0104 are reachable only when the application
+# parses TLS certificates with name constraints or CRLs through
+# rustls-webpki <0.103.13. They reach Cloak transitively via
+# aws-smithy-http-client v1.1.12 (rustls 0.21.12). Cloak does not parse
+# CRLs and the daemon's first-party egress (cloak-core::egress) uses a
+# patched rustls line. This is tracked under W1 follow-up: bump when
+# aws-smithy-runtime ships a rustls 0.23 build.
+
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0104",
+]
