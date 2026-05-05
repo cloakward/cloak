@@ -34,12 +34,17 @@ mkdir -p "$SOCK_DIR" "$SMOKE_DIR/Library/Application Support" "$SMOKE_DIR/.confi
 export HOME="$SMOKE_DIR"
 export XDG_RUNTIME_DIR="$SOCK_DIR"
 export CLOAK_PEPPER_FILE="$SMOKE_DIR/.cloak-pepper"
-export RUST_LOG="off"
+export RUST_LOG="cloak_core=warn,cloakd=warn"
 
 cleanup() {
+  rc=$?
   if [[ -n "${CLOAKD_PID:-}" ]]; then
     kill -TERM "$CLOAKD_PID" 2>/dev/null || true
     wait "$CLOAKD_PID" 2>/dev/null || true
+  fi
+  if [[ "$rc" -ne 0 && -s "$SMOKE_DIR/cloakd.err" ]]; then
+    echo "==> cloakd stderr (last 60 lines, on failure)"
+    tail -60 "$SMOKE_DIR/cloakd.err" || true
   fi
   echo "cleanup: removing $SMOKE_DIR"
   rm -rf "$SMOKE_DIR"
