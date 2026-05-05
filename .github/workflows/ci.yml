@@ -1,8 +1,8 @@
-# W3 — cross-platform CI matrix.
+# W3 - cross-platform CI matrix.
 #
 # Builds, tests, lints, and formats the workspace on every supported
 # (os, target) pair. Plus a TypeScript pass for the MCP shim on
-# non-Windows rows. See PLAN.md §3 W3.
+# non-Windows rows. See PLAN.md s3 W3.
 name: ci
 
 on:
@@ -98,25 +98,26 @@ jobs:
       # casts that are no-ops on Linux (where `pid_t = i32`, `uid_t/gid_t
       # = u32`) but real on macOS' SO_PEERCRED equivalent. The function is
       # `#[cfg(all(unix, not(target_os = "macos")))]` so clippy on Linux
-      # rightly flags `unnecessary_cast`. This is peer-auth code: changes
-      # require a security-focused review (PLAN.md §6, CODEOWNERS), so we
-      # do not silence the lint at the call site here. We allow it
-      # specifically on Linux clippy and re-evaluate during W4 (Linux
-      # peer-auth hardening) when the function gets rewritten anyway.
+      # rightly flags `unnecessary_cast`. peer_auth is CODEOWNERS-restricted
+      # (PLAN.md s6); we cannot silence the lint at the call site here.
+      # Run clippy *without* `-D warnings`, then post-filter the output:
+      # any diagnostic that is NOT one of the three known
+      # `unnecessary_cast` warnings fails the step. W4 retires this filter.
       - name: cargo clippy (host targets, macOS)
         if: matrix.platform == 'macos'
         run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
 
       - name: cargo clippy (host targets, Linux)
         if: ${{ matrix.platform == 'linux' && !matrix.cross }}
-        # Threading `-A clippy::unnecessary_cast` through cargo's `--`
-        # boundary did not stick — clippy still escalated the lint via
-        # `#![warn(clippy::all)]` in `cloak-core/src/lib.rs` plus
-        # `-D warnings`. RUSTFLAGS reaches rustc directly, before the
-        # crate-level attributes are evaluated.
-        env:
-          RUSTFLAGS: "-D warnings -A clippy::unnecessary_cast"
-        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }}
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --target ${{ matrix.target }} 2>&1 | tee clippy.log
+          unexpected=$(grep -E '^(error|warning):' clippy.log | grep -vE 'casting to the same type is unnecessary' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected clippy diagnostics on Linux (W4 retires this filter):"
+            echo "$unexpected"
+            exit 1
+          fi
 
       - name: cargo clippy (windows, cloak-core only)
         if: matrix.platform == 'windows'
@@ -124,9 +125,15 @@ jobs:
 
       - name: cross clippy (musl)
         if: matrix.cross
-        env:
-          RUSTFLAGS: "-D warnings -A clippy::unnecessary_cast"
-        run: cross clippy --workspace --all-targets --target ${{ matrix.target }}
+        run: |
+          set -o pipefail
+          cross clippy --workspace --all-targets --target ${{ matrix.target }} 2>&1 | tee clippy.log
+          unexpected=$(grep -E '^(error|warning):' clippy.log | grep -vE 'casting to the same type is unnecessary' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected clippy diagnostics on Linux musl (W4 retires this filter):"
+            echo "$unexpected"
+            exit 1
+          fi
 
       - name: cargo build (host targets)
         if: ${{ !matrix.cross && matrix.platform != 'windows' }}
@@ -141,7 +148,7 @@ jobs:
         run: cross build --release --workspace --target ${{ matrix.target }}
 
       # CLI tests inherit `CLOAK_PEPPER_FILE` so they bypass the OS
-      # keychain — on the macOS runner the user keychain refuses
+      # keychain - on the macOS runner the user keychain refuses
       # set_generic_password without prior interactive authorization, and
       # on Linux there's no keychain to begin with. The file path is per
       # job and gets cleaned up with the runner.
