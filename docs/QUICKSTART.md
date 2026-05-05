@@ -2,9 +2,12 @@
 
 > v1.0 ships macOS + Linux. Windows is deferred to v1.0.1
 > ([issue #3](https://github.com/cloakward/cloak/issues/3)). On Linux the
-> desktop pepper uses freedesktop Secret Service (W7); biometric (polkit)
-> remains a v1.x deliverable. The walkthrough below is macOS-flavored —
-> swap `~/Library/Application Support` for the XDG equivalent on Linux.
+> desktop pepper uses freedesktop Secret Service (W7) and `cloak show`
+> gates the reveal on polkit (`dev.cloak.show-secret`; install
+> `scripts/polkit/dev.cloak.policy` under
+> `/usr/share/polkit-1/actions/`). The walkthrough below is
+> macOS-flavored — swap `~/Library/Application Support` for the XDG
+> equivalent on Linux.
 
 ## Gatekeeper note (macOS, unsigned dev builds)
 
