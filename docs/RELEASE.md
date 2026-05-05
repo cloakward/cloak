@@ -35,7 +35,7 @@
    draft, click `Publish release` in the GitHub UI.
 6. **Downstream taps and registries.** Tagging triggers
    `homebrew-bump.yml` (Formula PR to `homebrew-cloak`) and
-   `npm-publish.yml` (`@cloak/mcp` to npm via trusted publishing).
+   `npm-publish.yml` (`@cloak-ward/mcp` to npm via trusted publishing).
 7. **Docker.** `docker-push.yml` builds a multi-arch (`linux/amd64`,
    `linux/arm64`) `cloakd` image and pushes to GHCR with `:X.Y.Z`,
    `:X.Y`, and `:latest` tags.
