@@ -86,6 +86,24 @@ cloak audit tail -n 20
 cloak audit verify ~/Library/Application\ Support/cloak/audit.jsonl
 ```
 
+## Running the daemon in Docker
+
+A multi-arch (`linux/amd64`, `linux/arm64`) image of `cloakd` is published to GHCR on every release. The image ships only the daemon — the CLI and MCP shim are designed for an interactive desktop. Mount the daemon's UDS into the container and connect from the host (or from a sidecar container).
+
+```sh
+# Provide the pepper as a Docker secret (never bake it into the image):
+printf 'YOUR_PEPPER_HEX' | docker secret create cloak-pepper -
+
+docker run -d --name cloakd \
+  -v cloak-data:/var/lib/cloak \
+  --secret cloak-pepper \
+  ghcr.io/cloakward/cloakd:<version>
+```
+
+`<version>` is the release tag without the leading `v` (e.g. `0.1.0`). `:latest` and `:<major>.<minor>` floating tags also exist; pin by digest in production.
+
+The image declares `/var/lib/cloak` as a volume — mount a named volume there so vault state survives restarts. `CLOAK_PEPPER_FILE` defaults to `/run/secrets/cloak-pepper`, which lines up with the Docker / Swarm secret mount path. No ports are exposed; IPC is UDS-only.
+
 ## What's deliberately not here yet
 
 - Linux / Windows installers.

@@ -39,6 +39,7 @@
 - **The model's *output* containing secret material the user pastes back in.** If the user pastes a secret into a Claude prompt, Cloak cannot help. Cloak's value is making that paste unnecessary.
 - **macOS Gatekeeper notarization.** v0.1 binaries are not notarized. Users must run `xattr -d com.apple.quarantine`. v1.0 will notarize.
 - **Cross-platform parity.** v0.1 is macOS-only. Linux and Windows builds compile but biometric, peer auth, and keychain pepper are stubs.
+- **Linux desktop pepper via Secret Service.** v1.0 stores the pepper as a libsecret item in the user's default (or `login`) collection. A malicious local app running as the same UID can call `org.freedesktop.secrets` and read the item once the keyring is unlocked; we do not — and cannot, without a separate broker process with its own ACL — distinguish a request originating from `cloakd` from one originating from any other process owned by the same user. Headless / SSH sessions where no keyring agent is running fall back to `CLOAK_PEPPER_FILE` (file mode 0600 enforced).
 - **Operational compromise of the publishing pipeline.** v0.1 builds are dev builds; SLSA L3 provenance + cosign signatures are deferred to v1.0.
 - **Side-channels: cache timing, EM, power.** Argon2id has timing-safety guarantees; everything else is best-effort.
 

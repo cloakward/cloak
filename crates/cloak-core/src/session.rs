@@ -49,10 +49,17 @@ impl SessionToken {
 pub struct SessionRecord {
     /// Token string (same value the peer sends back over the wire).
     pub token: SessionToken,
-    /// Peer PID at the time of issuance (recorded for audit).
+    /// Peer PID at the time of issuance (recorded for audit only —
+    /// PIDs are recyclable and never used for identity).
     pub peer_pid: i32,
     /// Peer binary basename — used by handlers to route CLI vs MCP.
     pub peer_basename: String,
+    /// Linux only: the inode of the kernel `pidfd` for the peer at
+    /// issuance time. Bound to the session: a token whose record
+    /// carries `Some(inode)` is invalidated by [`SessionStore::revoke_by_pidfd_inode`]
+    /// when the daemon's per-connection pidfd watcher fires. `None`
+    /// on macOS / when no pidfd was available at handshake.
+    pub peer_pidfd_inode: Option<u64>,
     /// Unique per-connection ID assigned by the daemon.
     pub conn_id: u64,
     /// UTC timestamp at issuance.
@@ -94,6 +101,7 @@ impl SessionStore {
             token: token.clone(),
             peer_pid: peer.pid,
             peer_basename: basename,
+            peer_pidfd_inode: peer.pidfd_inode,
             conn_id,
             issued_at: now,
             expires_at: now + ttl,
@@ -152,6 +160,15 @@ impl SessionStore {
         g.retain(|_, v| v.conn_id != conn_id);
     }
 
+    /// Revoke every session whose record carries the given pidfd inode.
+    /// Called by the Linux per-connection pidfd watcher the moment the
+    /// peer task exits — closes the PID-recycle window before a
+    /// recycled PID can present a stale token.
+    pub async fn revoke_by_pidfd_inode(&self, inode: u64) {
+        let mut g = self.inner.write().await;
+        g.retain(|_, v| v.peer_pidfd_inode != Some(inode));
+    }
+
     /// Drop every expired record. Cheap to call periodically.
     pub async fn purge_expired(&self) {
         let mut g = self.inner.write().await;
@@ -184,6 +201,7 @@ mod tests {
             gid: 501,
             binary_path: Some(PathBuf::from(format!("/usr/local/bin/{basename}"))),
             code_sig_hash: Some([0u8; 32]),
+            pidfd_inode: None,
         }
     }
 
