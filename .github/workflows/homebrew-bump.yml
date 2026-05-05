@@ -1,0 +1,211 @@
+name: homebrew-bump
+
+# Bumps the Homebrew formula in cloakward/homebrew-cloak whenever a GitHub
+# release is published. The cred-blocker (HOMEBREW_TAP_TOKEN secret + tap
+# repo creation) is tracked at:
+#   https://github.com/cloakward/cloak/issues/5
+# If the secret is absent we skip cleanly so the release still publishes.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Bump cloakward/homebrew-cloak
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check tap credential
+        id: cred
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "::warning title=homebrew-bump skipped::HOMEBREW_TAP_TOKEN not set; tap repo not yet configured (see cloakward/cloak#5). Release will publish without Homebrew."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Parse release tag
+        if: steps.cred.outputs.skip == 'false'
+        id: tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG}" ]; then
+            echo "::error::release.tag_name is empty"
+            exit 1
+          fi
+          # Strip leading "v" if present.
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release asset URLs and SHA256s
+        if: steps.cred.outputs.skip == 'false'
+        id: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Expected asset filenames produced by the release workflow.
+          # Pattern: cloak-<tag>-<target-triple>.tar.gz
+          MAC_ARM64="cloak-${TAG}-aarch64-apple-darwin.tar.gz"
+          MAC_X86_64="cloak-${TAG}-x86_64-apple-darwin.tar.gz"
+          LINUX_X86_64="cloak-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+          # LINUX_ARM64="cloak-${TAG}-aarch64-unknown-linux-gnu.tar.gz"
+          # ^ uncomment when the release workflow produces a linux/arm64 tarball.
+
+          # Fetch release JSON.
+          RELEASE_JSON="$(gh api "repos/${REPO}/releases/tags/${TAG}")"
+
+          resolve_url() {
+            local name="$1"
+            jq -r --arg n "$name" '.assets[] | select(.name == $n) | .browser_download_url' <<<"$RELEASE_JSON"
+          }
+
+          MAC_ARM64_URL="$(resolve_url "$MAC_ARM64")"
+          MAC_X86_64_URL="$(resolve_url "$MAC_X86_64")"
+          LINUX_X86_64_URL="$(resolve_url "$LINUX_X86_64")"
+
+          for pair in \
+              "macOS arm64:$MAC_ARM64_URL" \
+              "macOS x86_64:$MAC_X86_64_URL" \
+              "linux x86_64:$LINUX_X86_64_URL"; do
+            label="${pair%%:*}"
+            url="${pair#*:}"
+            if [ -z "$url" ] || [ "$url" = "null" ]; then
+              echo "::error::Missing release asset for ${label} (expected one of ${MAC_ARM64} / ${MAC_X86_64} / ${LINUX_X86_64})"
+              exit 1
+            fi
+          done
+
+          mkdir -p dl
+
+          sha_of() {
+            local url="$1"
+            local out
+            out="dl/$(basename "$url")"
+            curl -sSfL "$url" -o "$out"
+            sha256sum "$out" | awk '{print $1}'
+          }
+
+          MAC_ARM64_SHA="$(sha_of "$MAC_ARM64_URL")"
+          MAC_X86_64_SHA="$(sha_of "$MAC_X86_64_URL")"
+          LINUX_X86_64_SHA="$(sha_of "$LINUX_X86_64_URL")"
+
+          {
+            echo "mac_arm64_url=${MAC_ARM64_URL}"
+            echo "mac_arm64_sha=${MAC_ARM64_SHA}"
+            echo "mac_x86_64_url=${MAC_X86_64_URL}"
+            echo "mac_x86_64_sha=${MAC_X86_64_SHA}"
+            echo "linux_x86_64_url=${LINUX_X86_64_URL}"
+            echo "linux_x86_64_sha=${LINUX_X86_64_SHA}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render Formula/cloak.rb
+        if: steps.cred.outputs.skip == 'false'
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          MAC_ARM64_URL: ${{ steps.assets.outputs.mac_arm64_url }}
+          MAC_ARM64_SHA: ${{ steps.assets.outputs.mac_arm64_sha }}
+          MAC_X86_64_URL: ${{ steps.assets.outputs.mac_x86_64_url }}
+          MAC_X86_64_SHA: ${{ steps.assets.outputs.mac_x86_64_sha }}
+          LINUX_X86_64_URL: ${{ steps.assets.outputs.linux_x86_64_url }}
+          LINUX_X86_64_SHA: ${{ steps.assets.outputs.linux_x86_64_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p tap/Formula
+          cat > tap/Formula/cloak.rb <<EOF
+          class Cloak < Formula
+            desc "MCP-native local secrets vault"
+            homepage "https://github.com/cloakward/cloak"
+            version "${VERSION}"
+            license "Apache-2.0"
+
+            on_macos do
+              on_arm do
+                url "${MAC_ARM64_URL}"
+                sha256 "${MAC_ARM64_SHA}"
+              end
+              on_intel do
+                url "${MAC_X86_64_URL}"
+                sha256 "${MAC_X86_64_SHA}"
+              end
+            end
+
+            on_linux do
+              # on_arm do
+              #   url "<linux-arm64-tarball-url>"
+              #   sha256 "<sha>"
+              # end
+              # ^ uncomment when the release workflow produces a linux/arm64 tarball.
+              on_intel do
+                url "${LINUX_X86_64_URL}"
+                sha256 "${LINUX_X86_64_SHA}"
+              end
+            end
+
+            depends_on "libsodium"
+
+            def install
+              bin.install "cloak"
+              bin.install "cloakd"
+              # cloak-mcp is published via npm; do not install here.
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/cloak --version")
+            end
+          end
+          EOF
+
+      - name: Checkout cloakward/homebrew-cloak
+        if: steps.cred.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: cloakward/homebrew-cloak
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-cloak
+
+      - name: Commit formula and open PR
+        if: steps.cred.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        working-directory: homebrew-cloak
+        run: |
+          set -euo pipefail
+          mkdir -p Formula
+          cp ../tap/Formula/cloak.rb Formula/cloak.rb
+
+          git config user.name "cloak-release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+
+          BRANCH="bump/cloak-${VERSION}"
+          git checkout -b "$BRANCH"
+
+          if git diff --quiet -- Formula/cloak.rb; then
+            echo "::notice::Formula/cloak.rb already up to date for ${VERSION}; nothing to do."
+            exit 0
+          fi
+
+          git add Formula/cloak.rb
+          git commit -m "cloak ${VERSION}"
+          git push --set-upstream origin "$BRANCH"
+
+          gh pr create \
+            --repo cloakward/homebrew-cloak \
+            --base main \
+            --head "$BRANCH" \
+            --title "cloak ${VERSION}" \
+            --body "Automated formula bump for [cloak ${TAG}](https://github.com/${{ github.repository }}/releases/tag/${TAG})."
