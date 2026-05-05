@@ -37,18 +37,20 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install libsodium + bun (macOS)
+      - name: Install libsodium (macOS)
         if: matrix.platform == 'macos'
-        run: |
-          brew install libsodium bun
+        run: brew install libsodium
 
-      - name: Install libsodium + bun (Linux)
+      - name: Install libsodium (Linux)
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libsodium-dev pkg-config
-          curl -fsSL https://bun.sh/install | bash
-          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
