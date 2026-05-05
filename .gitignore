@@ -5,6 +5,9 @@ Cargo.lock.bak
 node_modules/
 dist/
 .bun/
+# Bun's transient compile-output files (~57 MB each).
+*.bun-build
+.*.bun-build
 
 # Local vault and audit artifacts (must NEVER be committed)
 *.cloak
