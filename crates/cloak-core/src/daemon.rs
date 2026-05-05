@@ -298,9 +298,20 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     let peer_exit = Arc::new(Notify::new());
     #[cfg(target_os = "macos")]
     let exit_watcher_task = spawn_peer_exit_watcher(&ctx, &peer, conn_id, peer_exit.clone());
+    // Linux: the pidfd watcher path tripped over a tokio AsyncFd
+    // registration EEXIST on GitHub Actions runners that we couldn't
+    // reproduce locally and that proved correlated with cloak-mcp
+    // connections being closed before any frame was read. The kqueue
+    // path on macOS already provides full A8 coverage; the Linux
+    // session-on-disconnect path closes the same window for the common
+    // case (peer exit → socket FIN → revoke_by_conn). Re-enable the
+    // pidfd watcher in a follow-up once the registration interaction
+    // is understood.
     #[cfg(all(unix, not(target_os = "macos")))]
-    let exit_watcher_task =
-        spawn_peer_exit_watcher(&ctx, &peer, peer_pidfd, conn_id, peer_exit.clone());
+    let exit_watcher_task: Option<tokio::task::JoinHandle<()>> = {
+        drop(peer_pidfd); // close the captured pidfd; it's not used in v0.9.0-rc1.
+        None
+    };
 
     // 2. Split the stream so we can read & write concurrently if we
     //    ever need to. v0.1 is request/response, so we just borrow.
