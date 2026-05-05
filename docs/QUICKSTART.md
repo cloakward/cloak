@@ -2,6 +2,18 @@
 
 > v0.1 is macOS-only. Linux/Windows compile but key OS integrations (Keychain, Touch ID, peer auth) are stubs in this drop.
 
+## Gatekeeper note (macOS, unsigned dev builds)
+
+Cloak v1.0 binaries are not Apple-notarized. After downloading a release artifact, macOS Gatekeeper will refuse to run it until you clear the quarantine attribute:
+
+```sh
+xattr -d com.apple.quarantine ./cloak ./cloakd ./cloak-mcp
+```
+
+Apple notarization is a v1.x deliverable. The cosign + SLSA L3 attestations on every release are sufficient to verify that the binary you have is the one CI built; notarization adds Apple's pre-execution scan on top of that. We chose to ship without notarization for v1.0 to avoid the Apple Developer Program enrollment and signing-cert renewal treadmill while the project is small.
+
+If you build from source there is no Gatekeeper friction — your local toolchain produces an ad-hoc-signed binary that runs immediately.
+
 ## 1. Build
 
 ```sh
