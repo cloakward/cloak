@@ -18,7 +18,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  RUSTFLAGS: "-D warnings"
+  # `-D warnings` is passed explicitly to clippy via `--` rather than
+  # globally via RUSTFLAGS so per-row clippy invocations can opt into
+  # `-A` overrides (see the Linux row).
 
 jobs:
   build:
@@ -129,16 +131,31 @@ jobs:
         if: matrix.cross
         run: cross build --release --workspace --target ${{ matrix.target }}
 
+      # CLI tests inherit `CLOAK_PEPPER_FILE` so they bypass the OS
+      # keychain — on the macOS runner the user keychain refuses
+      # set_generic_password without prior interactive authorization, and
+      # on Linux there's no keychain to begin with. The file path is per
+      # job and gets cleaned up with the runner.
       - name: cargo test (host targets)
         if: ${{ !matrix.cross && matrix.platform != 'windows' }}
+        env:
+          CLOAK_PEPPER_FILE: ${{ runner.temp }}/cloak-ci-pepper
         run: cargo test --workspace --target ${{ matrix.target }}
 
       - name: cargo test (windows, cloak-core only)
         if: matrix.platform == 'windows'
+        env:
+          CLOAK_PEPPER_FILE: ${{ runner.temp }}\cloak-ci-pepper
         run: cargo test -p cloak-core --target ${{ matrix.target }}
 
+      # `cross` runs the test binary inside a Docker container; the
+      # pepper file path must live inside the mounted project tree
+      # (Cross mounts `/project` to the workspace). `CLOAK_PEPPER_FILE`
+      # is passed through via `Cross.toml`.
       - name: cross test (musl)
         if: matrix.cross
+        env:
+          CLOAK_PEPPER_FILE: target/cloak-ci-pepper
         run: cross test --workspace --target ${{ matrix.target }}
 
       # ----- cloak-mcp (TypeScript) ---------------------------------------
