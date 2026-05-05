@@ -1,6 +1,10 @@
-# Cloak Quickstart (v0.1, macOS)
+# Cloak Quickstart (v1.0, macOS)
 
-> v0.1 is macOS-only. Linux/Windows compile but key OS integrations (Keychain, Touch ID, peer auth) are stubs in this drop.
+> v1.0 ships macOS + Linux. Windows is deferred to v1.0.1
+> ([issue #3](https://github.com/cloakward/cloak/issues/3)). On Linux the
+> desktop pepper uses freedesktop Secret Service (W7); biometric (polkit)
+> remains a v1.x deliverable. The walkthrough below is macOS-flavored —
+> swap `~/Library/Application Support` for the XDG equivalent on Linux.
 
 ## Gatekeeper note (macOS, unsigned dev builds)
 
@@ -53,7 +57,22 @@ cloak show OPENAI_API_KEY   # Touch ID prompt → prints to TTY
 
 `cloak show` only writes to a TTY by default. To pipe, you must add `--allow-redirect` (and accept that it leaves your shell history).
 
-## 5. Wire into Claude Desktop
+## 5. Unlock the running daemon
+
+`cloak init` / `cloak add` operate on the vault file directly. The running
+`cloakd` (the process MCP talks to) keeps its master key in memory and
+must be told the passphrase exactly once per boot:
+
+```sh
+cloak daemon-unlock              # prompts for the passphrase, pushes it
+                                 # to the running cloakd over the UDS
+```
+
+The daemon stays unlocked for the rest of the session. `cloak status` will
+show whether it's locked or unlocked. If you skip this step, MCP tool
+calls that need to read a secret will return `vault-locked`.
+
+## 6. Wire into Claude Desktop
 
 Add to your `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -79,7 +98,7 @@ To make an authenticated call without ever handling the key:
 
 The model will call `proxy_authenticated_http_request`. The daemon attaches the key, makes the request, returns status + body. The key never leaves the daemon.
 
-## 6. Inspect the audit log
+## 7. Inspect the audit log
 
 ```sh
 cloak audit tail -n 20

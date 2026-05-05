@@ -16,17 +16,19 @@ cargo build --workspace
 
 ## Workflow
 
-1. Read [`PLAN.md`](PLAN.md). Pick the lowest-numbered open workstream that is
-   unblocked. Cite it in your branch name (`feat/w3-ci-matrix`) and PR title.
+1. Pick the lowest-numbered open workstream that is unblocked (the
+   workstream tracker lives in the project's GitHub Projects board). Cite
+   the ID in your branch name (`feat/w3-ci-matrix`) and PR title.
 2. One workstream per PR. Smaller is better. If a workstream is two days of
    work, it's two PRs.
 3. Tests first. The PR template asks which security invariant your change
-   touches; you must answer before merge.
+   touches; you must answer before merge. The canonical list is
+   `docs/SECURITY_INVARIANTS.md`.
 
 ## Hard rules (non-negotiable)
 
 - **No MCP tool returns plaintext secret material.** New tools require a
-  Discussion + varun approval (see PLAN.md §6).
+  Discussion + varun approval.
 - **Daemon owns all outbound HTTP.** `packages/cloak-mcp` imports zero HTTP
   clients. The grep gate in `scripts/check-no-http.mjs` enforces this.
 - **libsodium is the only crypto primitive in the secret-protection path.**
@@ -59,8 +61,11 @@ aws-sigv4`. Body explains *why* and any non-obvious tradeoff.
 
 ## Escalation
 
-When in doubt, stop and ask. The triggers are listed in PLAN.md §6. Cost of
-asking: one hour. Cost of a wrong silent decision: the project's
-trustworthiness.
+When in doubt, stop and ask. Cost of asking: one hour. Cost of a wrong
+silent decision: the project's trustworthiness. The escalation triggers
+are: introducing a new MCP tool, introducing a new outbound-HTTP module,
+introducing `unsafe` Rust outside `crypto/`, and any change that weakens
+or broadens a documented security invariant
+(`docs/SECURITY_INVARIANTS.md`).
 
 License: Apache-2.0. By contributing, you license your work under the same.

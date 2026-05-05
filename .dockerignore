@@ -1,0 +1,29 @@
+# Build artefacts and editor noise — these would balloon the build
+# context (and thus the time spent shipping it to the daemon) without
+# contributing to the image.
+target/
+**/target/
+**/node_modules/
+**/dist/
+.git/
+.github/
+.idea/
+.vscode/
+*.log
+.DS_Store
+
+# Unrelated workspaces — the Dockerfile only builds `cloak-core`'s
+# `cloakd` binary, so packaging the bun-compiled MCP shim, docs, and
+# install scripts would be wasted I/O. (The `crates/cloak-core/tests/`
+# directory stays in context because Cargo enumerates the workspace
+# during `cargo build`; we just don't compile them via `--bin cloakd`.)
+packages/
+docs/
+scripts/
+Dockerfile
+.dockerignore
+
+# Compiler / linker scratch files
+*.swp
+*.swo
+*~
