@@ -1,0 +1,90 @@
+# W9d - publish @cloak/mcp to npm via OIDC trusted publishing.
+#
+# Fires when a GitHub Release is published. The workflow runs npm publish
+# from packages/cloak-mcp/ using a short-lived OIDC token (no static
+# NPM_TOKEN secret in this repo). Trusted-publishing config on npmjs.com
+# and the @cloak scope are tracked at cloakward/cloak#6; until that lands
+# the publish step exits 0 with a warning so the GitHub release still
+# ships.
+name: npm-publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    name: publish @cloak/mcp
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Verify package.json version matches release tag
+        working-directory: packages/cloak-mcp
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          tag_version="${RELEASE_TAG#v}"
+          pkg_version=$(node -p "require('./package.json').version")
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Release tag ${RELEASE_TAG} (version ${tag_version}) does not match packages/cloak-mcp/package.json version ${pkg_version}. Bump packages/cloak-mcp/package.json before tagging."
+            exit 1
+          fi
+          echo "version sync ok: ${pkg_version}"
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install, lint, typecheck, test
+        working-directory: packages/cloak-mcp
+        run: |
+          bun install --frozen-lockfile
+          bun run lint:no-http
+          bun run typecheck
+          bun test
+
+      - name: Build standalone binary
+        working-directory: packages/cloak-mcp
+        run: bun build src/server.ts --compile --outfile dist/cloak-mcp
+
+      # Trusted publishing: npm 9.5+ picks up the OIDC token from
+      # ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN
+      # which the runner exposes when `id-token: write` is set. No
+      # NODE_AUTH_TOKEN is configured on purpose. Until the npm-side
+      # trusted-publisher policy is configured (cloakward/cloak#6),
+      # publish returns 403; we treat that as a non-fatal skip so the
+      # GitHub release still ships.
+      - name: Publish to npm (trusted publishing)
+        working-directory: packages/cloak-mcp
+        run: |
+          set +e
+          publish_log=$(mktemp)
+          npm publish --provenance --access public 2>&1 | tee "$publish_log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "npm publish succeeded"
+            exit 0
+          fi
+          if grep -qE '(^|[^0-9])403([^0-9]|$)|E403|Forbidden' "$publish_log"; then
+            echo "::warning::npm publish skipped: trusted publishing not configured (#6)"
+            exit 0
+          fi
+          echo "::error::npm publish failed with status ${status} for a reason other than 403"
+          exit "$status"
