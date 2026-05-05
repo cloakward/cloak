@@ -1,0 +1,9 @@
+# Cross.toml — used only for the W3 musl row in .github/workflows/ci.yml.
+# Pass through the test-environment knobs so cargo test inside the cross
+# container behaves the same as on the host.
+[build.env]
+passthrough = [
+  "CLOAK_PEPPER_FILE",
+  "CLOAK_PASSPHRASE",
+  "RUST_LOG",
+]

@@ -1,0 +1,76 @@
+# cargo-deny configuration. See https://embarkstudios.github.io/cargo-deny/.
+# Tightened over time as W-series workstreams land.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# RUSTSEC-2026-0098 / 0099 / 0104 are panics + name-constraint mishandling
+# in rustls-webpki <0.103.13, reachable only when the application uses
+# rustls TLS / CRL parsing. They are pulled in transitively by
+# aws-smithy-http-client v1.1.12 (rustls 0.21.12 -> rustls-webpki 0.101.7),
+# which is on W1's AWS SDK. Cloak does not parse CRLs and the daemon's own
+# egress uses reqwest+rustls 0.23 (the patched line). Tracking under W1
+# follow-up; revisit when aws-smithy-runtime ships a rustls 0.23 build.
+ignore = [
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0104",
+]
+
+[licenses]
+version = 2
+# License allowlist for the v0.1+ workspace. Add to this list only with a
+# PR comment justifying why a new license is acceptable for our distribution.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MPL-2.0",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "OpenSSL",     # ring transitively
+  "CC0-1.0",
+  "Zlib",
+  # webpki-roots ships the Mozilla CA bundle under CDLA-Permissive-2.0.
+  # The license is OSI-aligned and explicitly intended for redistribution.
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+# `ring` ships under a non-SPDX license that is functionally ISC + OpenSSL.
+# Help cargo-deny see the OpenSSL part by clarifying the crate.
+[[licenses.clarify]]
+name = "ring"
+expression = "ISC AND MIT AND OpenSSL"
+license-files = [
+  { path = "LICENSE", hash = 0xbd0eed23 },
+]
+
+[bans]
+# Multiple versions are normal in a workspace this size (windows-sys 0.48
+# and 0.61 coexist via tokio + libsodium-sys + reqwest). Surface them as
+# warnings so we can reduce churn over time.
+multiple-versions = "warn"
+# Wildcard external deps are forbidden, but `cloak-core` and `cloak-cli`
+# reference each other via path = "..". cargo-deny treats those as
+# wildcards and `allow-wildcard-paths` does not apply to crates with
+# default `publish = true`. Until W2/W9 decide on publish-to-crates.io,
+# downgrade to a warning. The aws-lc-rs ban below is the load-bearing rule.
+wildcards = "warn"
+allow-wildcard-paths = true
+deny = [
+  # PLAN.md R2: keep the daemon on a single crypto stack (libsodium +
+  # rustls/ring). aws-lc-rs would double the surface and the binary.
+  { name = "aws-lc-rs" },
+  { name = "aws-lc-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

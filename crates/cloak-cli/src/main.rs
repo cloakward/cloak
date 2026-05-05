@@ -3,7 +3,10 @@
 //! Implementation lives in modules under `src/`. This file is just the
 //! `main()` shim that builds the clap command and dispatches.
 
-#[cfg(target_os = "macos")]
+// `biometric_macos` ships both a real macOS impl and a non-macOS stub
+// inside the same file (gated internally), so the module is declared
+// unconditionally; gating it at the `mod` line breaks the Linux build
+// because `commands::show` imports it on every target.
 mod biometric_macos;
 mod commands;
 mod prompt;

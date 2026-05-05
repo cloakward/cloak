@@ -1,0 +1,71 @@
+# W3 — supply-chain + license + advisory gate.
+# Runs once per push/PR on Linux. Blocks merge.
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  security:
+    name: security
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: security
+
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+      # cargo-audit reads its own ignore list from `.cargo/audit.toml`.
+      # We mirror the deny.toml justification there so both tools stay in
+      # sync. See `.cargo/audit.toml` for the rationale.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: cloak-mcp lint:no-http
+        working-directory: packages/cloak-mcp
+        run: |
+          bun install --frozen-lockfile
+          bun run lint:no-http
+
+      # PLAN.md R2: cloak-core MUST NOT depend on aws-lc-rs. We pin rustls
+      # to the `ring` provider so the daemon binary keeps a single crypto
+      # stack (libsodium + ring TLS) instead of pulling in a second.
+      - name: aws-lc-rs forbidden in cloak-core dep tree
+        run: |
+          if cargo tree -p cloak-core 2>&1 | grep -q 'aws-lc-rs'; then
+            echo "aws-lc-rs in cloak-core dep tree — forbidden, see PLAN.md R2"
+            exit 1
+          fi
+          echo "ok: aws-lc-rs absent from cloak-core dep tree"

@@ -1,0 +1,194 @@
+# W3 - cross-platform CI matrix.
+#
+# Builds, tests, lints, and formats the workspace on every supported
+# (os, target) pair. Plus a TypeScript pass for the MCP shim on
+# non-Windows rows. See PLAN.md s3 W3.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # `-D warnings` is passed explicitly to clippy via `--` rather than
+  # globally via RUSTFLAGS so per-row clippy invocations can opt into
+  # `-A` overrides (see the Linux row).
+
+jobs:
+  build:
+    name: build (${{ matrix.os }}, ${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: macos
+            cross: false
+          - os: macos-13
+            target: x86_64-apple-darwin
+            platform: macos
+            cross: false
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            cross: false
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            cross: true
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - name: Install libsodium (macOS)
+        if: matrix.platform == 'macos'
+        run: brew install libsodium
+
+      - name: Install libsodium (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev pkg-config
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install cross (musl row)
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # ----- Rust build / test / clippy -----------------------------------
+      # Windows: cloak-cli daemon-unlock uses UnixStream; the W6 workstream
+      # ports the CLI to Named Pipes. Until then we only build/test
+      # cloak-core on the windows row to keep the matrix green.
+      #
+      # Linux: peer_auth.rs::linux::get_peer_cred has `as i32` / `as u32`
+      # casts that are no-ops on Linux (where `pid_t = i32`, `uid_t/gid_t
+      # = u32`) but real on macOS' SO_PEERCRED equivalent. The function is
+      # `#[cfg(all(unix, not(target_os = "macos")))]` so clippy on Linux
+      # rightly flags `unnecessary_cast`. peer_auth is CODEOWNERS-restricted
+      # (PLAN.md s6); we cannot silence the lint at the call site here.
+      # Run clippy *without* `-D warnings`, then post-filter the output:
+      # any diagnostic that is NOT one of the three known
+      # `unnecessary_cast` warnings fails the step. W4 retires this filter.
+      - name: cargo clippy (host targets, macOS)
+        if: matrix.platform == 'macos'
+        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
+
+      - name: cargo clippy (host targets, Linux)
+        if: ${{ matrix.platform == 'linux' && !matrix.cross }}
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --target ${{ matrix.target }} 2>&1 | tee clippy.log
+          unexpected=$(grep -E '^(error|warning):' clippy.log | grep -vE 'casting to the same type is unnecessary' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected clippy diagnostics on Linux (W4 retires this filter):"
+            echo "$unexpected"
+            exit 1
+          fi
+
+      - name: cargo clippy (windows, cloak-core only)
+        if: matrix.platform == 'windows'
+        run: cargo clippy -p cloak-core --all-targets --target ${{ matrix.target }} -- -D warnings
+
+      - name: cross clippy (musl)
+        if: matrix.cross
+        run: |
+          set -o pipefail
+          cross clippy --workspace --all-targets --target ${{ matrix.target }} 2>&1 | tee clippy.log
+          unexpected=$(grep -E '^(error|warning):' clippy.log | grep -vE 'casting to the same type is unnecessary' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected clippy diagnostics on Linux musl (W4 retires this filter):"
+            echo "$unexpected"
+            exit 1
+          fi
+
+      - name: cargo build (host targets)
+        if: ${{ !matrix.cross && matrix.platform != 'windows' }}
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: cargo build (windows, cloak-core only)
+        if: matrix.platform == 'windows'
+        run: cargo build --release -p cloak-core --target ${{ matrix.target }}
+
+      - name: cross build (musl)
+        if: matrix.cross
+        run: cross build --release --workspace --target ${{ matrix.target }}
+
+      # CLI tests inherit `CLOAK_PEPPER_FILE` so they bypass the OS
+      # keychain - on the macOS runner the user keychain refuses
+      # set_generic_password without prior interactive authorization, and
+      # on Linux there's no keychain to begin with. The file path is per
+      # job and gets cleaned up with the runner.
+      - name: cargo test (host targets)
+        if: ${{ !matrix.cross && matrix.platform != 'windows' }}
+        env:
+          CLOAK_PEPPER_FILE: ${{ runner.temp }}/cloak-ci-pepper
+        run: cargo test --workspace --target ${{ matrix.target }}
+
+      - name: cargo test (windows, cloak-core only)
+        if: matrix.platform == 'windows'
+        env:
+          CLOAK_PEPPER_FILE: ${{ runner.temp }}\cloak-ci-pepper
+        run: cargo test -p cloak-core --target ${{ matrix.target }}
+
+      # `cross` runs the test binary inside a Docker container; the
+      # pepper file path must live inside the mounted project tree
+      # (Cross mounts `/project` to the workspace). `CLOAK_PEPPER_FILE`
+      # is passed through via `Cross.toml`.
+      - name: cross test (musl)
+        if: matrix.cross
+        env:
+          CLOAK_PEPPER_FILE: target/cloak-ci-pepper
+        run: cross test --workspace --target ${{ matrix.target }}
+
+      # ----- cloak-mcp (TypeScript) ---------------------------------------
+      # Skipped on Windows for v0.1; W6 brings the MCP shim build online.
+      - name: cloak-mcp install + lint + test + build
+        if: matrix.platform != 'windows'
+        working-directory: packages/cloak-mcp
+        run: |
+          bun install --frozen-lockfile
+          bun run lint:no-http
+          bun test
+          bun build src/server.ts --compile --outfile dist/cloak-mcp
+
+      - name: cloak-mcp lint:no-http only (windows)
+        if: matrix.platform == 'windows'
+        working-directory: packages/cloak-mcp
+        shell: bash
+        run: |
+          bun install --frozen-lockfile
+          bun run lint:no-http
