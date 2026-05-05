@@ -14,7 +14,19 @@
 //!   every session bound to that connection before any other process
 //!   can inherit the freed PID.
 //!
-//! On Linux we use `SO_PEERCRED` (PID/UID/GID) and `/proc/<pid>/exe`.
+//! On Linux we use:
+//! - `SO_PEERCRED` (PID/UID/GID) and `/proc/<pid>/exe`.
+//! - `SO_PEERPIDFD` (Linux 6.5+) for a race-free kernel `pidfd` for
+//!   the peer, with a `pidfd_open(SO_PEERCRED.pid)` fallback on
+//!   older kernels. The pidfd's inode (`fstat(pidfd).st_ino`) is the
+//!   non-recycling identity bytes we record on the [`PeerInfo`] —
+//!   it is stable for the life of the underlying task and the
+//!   kernel allocates a fresh inode for any later task that
+//!   inherits the recycled PID.
+//! - [`PeerExitWatcher`] (the same type the macOS arm exports) wraps
+//!   that pidfd in `tokio::io::unix::AsyncFd`; `POLLIN` on a pidfd
+//!   means the referenced task has exited, which closes the
+//!   PID-recycle window the same way the macOS kqueue arm does.
 //!
 //! Full mach-o code-directory hashing via `SecStaticCodeCopyInformation`
 //! is deferred to v1.0 (see RFC 0001). For v0.1 the **on-disk basename
@@ -76,7 +88,11 @@ pub enum PeerIdentityKind {
     /// macOS `audit_token_t` (32 bytes, 8 × `u32` as returned by
     /// `getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)`).
     MacAuditToken,
-    /// Linux pidfd inode bytes (reserved for the Linux work).
+    /// Linux pidfd inode bytes — `u64::to_le_bytes(fstat(pidfd).st_ino)`
+    /// (8 bytes). The kernel allocates a unique inode per task; the
+    /// value is stable for the life of the referenced task and any
+    /// later task that inherits the recycled PID gets a different
+    /// inode, so the bytes are a sound non-recycling identity key.
     LinuxPidfdInode,
 }
 
@@ -211,6 +227,33 @@ fn peer_info_from_raw_fd(fd: std::os::fd::RawFd) -> Result<PeerInfo> {
         code_sig_hash,
         identity: None,
     })
+}
+
+/// Linux only: open a pidfd for the peer of `stream`, populate
+/// [`PeerInfo::identity`] with the pidfd's inode bytes (tagged
+/// [`PeerIdentityKind::LinuxPidfdInode`]), and return both the
+/// `PeerInfo` and the owned pidfd. The caller passes the pidfd to
+/// [`PeerExitWatcher::new`] to wire up the per-connection
+/// process-death watcher; when that fires the daemon revokes every
+/// session bound to the connection.
+///
+/// Tries `SO_PEERPIDFD` (Linux 6.5+, race-free) first, then falls
+/// back to `pidfd_open(SO_PEERCRED.pid)` on older kernels. Mirrors
+/// the shape of the macOS path that consumes `LOCAL_PEERTOKEN`.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn peer_info_with_pidfd_linux(
+    stream: &tokio::net::UnixStream,
+) -> Result<(PeerInfo, std::os::fd::OwnedFd)> {
+    use std::os::fd::AsRawFd;
+    let sock_fd = stream.as_raw_fd();
+    let mut peer = peer_info_from_raw_fd(sock_fd)?;
+    let pidfd = linux::acquire_peer_pidfd(sock_fd, peer.pid)?;
+    let inode = linux::pidfd_inode(pidfd.as_raw_fd())?;
+    peer.identity = Some(PeerIdentity {
+        kind: PeerIdentityKind::LinuxPidfdInode,
+        bytes: inode.to_le_bytes().to_vec(),
+    });
+    Ok((peer, pidfd))
 }
 
 /// SHA-256 the contents of a file. Used as a v0.1 stand-in for a true
@@ -549,16 +592,30 @@ impl PeerExitWatcher {
 // Linux impl
 // -------------------------------------------------------------------------
 
+/// Linux peer-auth helpers — `SO_PEERCRED` / `SO_PEERPIDFD` /
+/// `pidfd_open` syscalls plus the [`linux::PidfdWatcher`] over
+/// `tokio::io::unix::AsyncFd`. Public so the integration tests in
+/// `tests/peer_auth_linux.rs` can exercise the primitives directly.
 #[cfg(all(unix, not(target_os = "macos")))]
-mod linux {
+pub mod linux {
     use std::ffi::c_void;
-    use std::os::fd::RawFd;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
     use crate::error::{Error, Result};
 
+    /// `SO_PEERPIDFD` socket option (Linux 6.5+). Returns a kernel
+    /// `pidfd` for the connected peer with no PID-recycle race.
+    /// Defined in `<asm-generic/socket.h>` as `0x4b`.
+    const SO_PEERPIDFD: libc::c_int = 0x4b;
+
+    /// Linux peer credentials triple — PID/UID/GID at the moment the
+    /// kernel snapshotted the connection.
     pub struct LinuxPeerCred {
+        /// Peer process ID (recyclable; do not trust past handshake).
         pub pid: i32,
+        /// Peer effective UID.
         pub uid: u32,
+        /// Peer effective GID.
         pub gid: u32,
     }
 
@@ -592,11 +649,183 @@ mod linux {
         if rc != 0 {
             return Err(Error::Io(std::io::Error::last_os_error()));
         }
+        // On Linux, `libc::pid_t == i32` and `libc::{uid_t, gid_t} ==
+        // u32`, so these are no-op casts. Other unix-but-not-macos
+        // targets (FreeBSD etc.) may differ, hence the `as` casts
+        // remain — clippy's `unnecessary_cast` is silenced because
+        // the cast is a portability hedge.
+        #[allow(clippy::unnecessary_cast)]
         Ok(LinuxPeerCred {
             pid: cred.pid as i32,
             uid: cred.uid as u32,
             gid: cred.gid as u32,
         })
+    }
+
+    /// Try `getsockopt(SOL_SOCKET, SO_PEERPIDFD)` to obtain a kernel
+    /// pidfd for the peer. Available on Linux 6.5+. Returns the new
+    /// pidfd as an `OwnedFd` on success, or an `io::Error`
+    /// (`ENOPROTOOPT` on older kernels) so the caller can fall back.
+    pub fn get_peer_pidfd_via_sockopt(fd: RawFd) -> Result<OwnedFd> {
+        let mut pidfd: libc::c_int = -1;
+        let mut size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `fd` is borrowed for the duration of this call. The
+        // out parameter is a local `c_int` of the size advertised in
+        // `size`. The kernel writes a freshly-allocated fd or returns
+        // an error. We do not retain either pointer past return.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                SO_PEERPIDFD,
+                &mut pidfd as *mut _ as *mut c_void,
+                &mut size,
+            )
+        };
+        if rc != 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        if pidfd < 0 {
+            return Err(Error::Io(std::io::Error::other(
+                "SO_PEERPIDFD returned a negative fd",
+            )));
+        }
+        // SAFETY: the kernel just allocated `pidfd` for us; it is
+        // owned by this thread and not aliased anywhere else.
+        Ok(unsafe { OwnedFd::from_raw_fd(pidfd) })
+    }
+
+    /// Fallback: open a pidfd by PID via the `pidfd_open(2)` syscall.
+    /// This races against PID reuse — by the time the syscall runs,
+    /// `pid` may already refer to a different process — but the
+    /// caller's `SO_PEERCRED` snapshot was atomic with `accept(2)`,
+    /// and we never reach this path on Linux 6.5+ where
+    /// `SO_PEERPIDFD` succeeds.
+    pub fn pidfd_open_by_pid(pid: i32) -> Result<OwnedFd> {
+        // SAFETY: `pidfd_open` is a thin syscall wrapper. Arguments
+        // are a `pid_t` and a `u32` flags word, both passed by value;
+        // no pointers are involved. The kernel either returns a
+        // freshly-allocated fd or `-1` with `errno` set.
+        let raw = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_open,
+                pid as libc::pid_t,
+                0u32 as libc::c_uint,
+            )
+        };
+        if raw < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        // SAFETY: the kernel just allocated this fd; nothing else
+        // owns it.
+        Ok(unsafe { OwnedFd::from_raw_fd(raw as RawFd) })
+    }
+
+    /// Acquire a pidfd for the peer of a connected socket. Tries the
+    /// race-free `SO_PEERPIDFD` first, then falls back to
+    /// `pidfd_open(SO_PEERCRED.pid)` on older kernels.
+    pub fn acquire_peer_pidfd(fd: RawFd, peer_pid: i32) -> Result<OwnedFd> {
+        match get_peer_pidfd_via_sockopt(fd) {
+            Ok(p) => Ok(p),
+            Err(_) => pidfd_open_by_pid(peer_pid),
+        }
+    }
+
+    /// `fstat(pidfd).st_ino`. The kernel allocates a unique inode for
+    /// every pidfd; the value is stable for the life of the underlying
+    /// task. If the task exits and the PID is recycled, a fresh pidfd
+    /// for the new task carries a different inode. That makes the
+    /// inode a sound identity key for binding session tokens.
+    pub fn pidfd_inode(pidfd: RawFd) -> Result<u64> {
+        // SAFETY: `libc::stat` is a POD whose layout matches the
+        // platform `struct stat`; zero-init is a valid initial value.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `pidfd` is a borrowed fd valid for the duration of
+        // this call. `&mut st` points to local stack storage of the
+        // correct size. `fstat` writes the struct and returns 0 on
+        // success.
+        let rc = unsafe { libc::fstat(pidfd, &mut st) };
+        if rc != 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        // st_ino is `ino_t` which is `u64` on glibc/musl and `u32` on
+        // some other unix-but-not-macos targets — same portability
+        // hedge as the `LinuxPeerCred` casts above.
+        #[allow(clippy::unnecessary_cast)]
+        Ok(st.st_ino as u64)
+    }
+
+    /// Async watcher over a pidfd. Awaiting [`PidfdWatcher::wait`]
+    /// resolves the moment the kernel marks the peer task as exited
+    /// (`POLLIN` on the pidfd). The fd is owned by the watcher and is
+    /// closed on drop. Companion to the macOS [`super::PeerExitWatcher`].
+    pub struct PidfdWatcher {
+        inner: tokio::io::unix::AsyncFd<OwnedFd>,
+        pid: i32,
+    }
+
+    impl PidfdWatcher {
+        /// Wrap an owned pidfd in a tokio `AsyncFd`. Fails if the fd
+        /// cannot be registered with the runtime's reactor (e.g. it
+        /// is not a pollable kernel fd, or the runtime has shut down).
+        pub fn new(pidfd: OwnedFd, pid: i32) -> Result<Self> {
+            let inner =
+                tokio::io::unix::AsyncFd::with_interest(pidfd, tokio::io::Interest::READABLE)
+                    .map_err(Error::Io)?;
+            Ok(Self { inner, pid })
+        }
+
+        /// PID this watcher is bound to (recorded for diagnostic logs).
+        pub fn pid(&self) -> i32 {
+            self.pid
+        }
+
+        /// Resolves `Ok(())` once the peer task has exited. The kernel
+        /// signals `POLLIN` on a pidfd when the referenced task
+        /// reaches `do_exit()`; there is nothing to read off the fd,
+        /// we only care about the readiness edge. We confirm every
+        /// wakeup with a non-blocking `poll(2)` for `POLLIN` and only
+        /// resolve when the kernel itself reports the bit set —
+        /// AsyncFd has been observed to deliver spurious early-ready
+        /// wakeups for freshly-registered pidfds on some kernels, so
+        /// we re-check rather than treat any wakeup as exit.
+        pub async fn wait(self) -> Result<()> {
+            let raw = self.inner.get_ref().as_raw_fd();
+            loop {
+                let mut guard = self.inner.readable().await.map_err(Error::Io)?;
+                let mut pfd = libc::pollfd {
+                    fd: raw,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: `pfd` is a single local `pollfd` and the
+                // pointer is borrowed for the duration of the call.
+                // Timeout 0 = non-blocking poll. `poll` does not
+                // retain the pointer past return.
+                let rc = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, 0) };
+                if rc < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        guard.clear_ready();
+                        continue;
+                    }
+                    return Err(Error::Io(err));
+                }
+                if (pfd.revents & libc::POLLIN) != 0 {
+                    return Ok(());
+                }
+                // Spurious wakeup — kernel says the pidfd is not yet
+                // readable. Acknowledge to tokio that the readiness
+                // didn't actually fire and re-arm.
+                guard.clear_ready();
+            }
+        }
+
+        /// Borrow the underlying pidfd for diagnostic syscalls (e.g.
+        /// fetching the inode again).
+        pub fn as_raw_fd(&self) -> RawFd {
+            self.inner.get_ref().as_raw_fd()
+        }
     }
 }
 
