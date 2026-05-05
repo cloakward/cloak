@@ -109,7 +109,14 @@ jobs:
 
       - name: cargo clippy (host targets, Linux)
         if: ${{ matrix.platform == 'linux' && !matrix.cross }}
-        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings -A clippy::unnecessary_cast
+        # Threading `-A clippy::unnecessary_cast` through cargo's `--`
+        # boundary did not stick — clippy still escalated the lint via
+        # `#![warn(clippy::all)]` in `cloak-core/src/lib.rs` plus
+        # `-D warnings`. RUSTFLAGS reaches rustc directly, before the
+        # crate-level attributes are evaluated.
+        env:
+          RUSTFLAGS: "-D warnings -A clippy::unnecessary_cast"
+        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }}
 
       - name: cargo clippy (windows, cloak-core only)
         if: matrix.platform == 'windows'
@@ -117,7 +124,9 @@ jobs:
 
       - name: cross clippy (musl)
         if: matrix.cross
-        run: cross clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings -A clippy::unnecessary_cast
+        env:
+          RUSTFLAGS: "-D warnings -A clippy::unnecessary_cast"
+        run: cross clippy --workspace --all-targets --target ${{ matrix.target }}
 
       - name: cargo build (host targets)
         if: ${{ !matrix.cross && matrix.platform != 'windows' }}

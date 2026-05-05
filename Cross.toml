@@ -6,4 +6,5 @@ passthrough = [
   "CLOAK_PEPPER_FILE",
   "CLOAK_PASSPHRASE",
   "RUST_LOG",
+  "RUSTFLAGS",
 ]
