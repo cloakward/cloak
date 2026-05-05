@@ -239,26 +239,19 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     //    on macOS the kqueue watcher is registered by PID directly so
     //    we just take the standard `peer_info_from_unix` path.
     #[cfg(all(unix, not(target_os = "macos")))]
-    let (peer, peer_pidfd) = match peer_auth::peer_info_with_pidfd_linux(&stream) {
-        Ok((p, fd)) => (p, Some(fd)),
-        Err(e) => {
-            // Pidfd capture failed (older kernel, sandboxed peer, or a
-            // syscall quirk on a particular binary). Fall back to the
-            // plain peer-credential path; the connection still gets
-            // peer-auth and session tokens, we just don't run the
-            // exit-watcher. This is strictly weaker than the watcher-
-            // active case but no weaker than the macOS-no-kqueue path
-            // already documented in the threat model.
-            tracing::warn!(
-                error = %e,
-                "peer_info_with_pidfd_linux failed; falling back to peer_info_from_unix"
-            );
-            match peer_auth::peer_info_from_unix(&stream) {
-                Ok(p) => (p, None),
-                Err(inner) => {
-                    tracing::warn!(error = %inner, "peer_info_from_unix also failed; closing");
-                    return Ok(());
-                }
+    let (peer, peer_pidfd): (PeerInfo, Option<std::os::fd::OwnedFd>) = {
+        // Linux: bypass SO_PEERPIDFD / pidfd_open entirely for v0.9.0-rc1.
+        // The Bun-driven cloak-mcp connection on the runner kernel was
+        // closing immediately after our getsockopt(SO_PEERPIDFD) call —
+        // we couldn't reproduce locally, but a clean peer_info_from_unix
+        // path with no pidfd touch makes Linux smoke pass. The pidfd
+        // watcher is also disabled below; re-enable both together once
+        // the syscall interaction is understood (issue #21).
+        match peer_auth::peer_info_from_unix(&stream) {
+            Ok(p) => (p, None),
+            Err(e) => {
+                tracing::warn!(error = %e, "peer_info_from_unix failed; closing connection");
+                return Ok(());
             }
         }
     };
