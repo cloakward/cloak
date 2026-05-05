@@ -234,6 +234,18 @@ async fn accept_loop(
 
 async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Result<()> {
     // 1. Resolve and check peer credentials BEFORE issuing any token.
+    //    On Linux we additionally open a pidfd for the peer so we can
+    //    watch for process exit and revoke sessions before the PID
+    //    can be recycled by another local process.
+    #[cfg(target_os = "linux")]
+    let (peer, peer_pidfd) = match peer_auth::peer_info_with_pidfd(&stream) {
+        Ok((p, fd)) => (p, Some(fd)),
+        Err(e) => {
+            tracing::warn!(error = %e, "peer_info_with_pidfd failed; closing connection");
+            return Ok(());
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
     let peer = match peer_auth::peer_info_from_unix(&stream) {
         Ok(p) => p,
         Err(e) => {
@@ -241,6 +253,7 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
             return Ok(());
         }
     };
+
     if let Err(e) = peer_auth::check(&peer, &ctx.policy, our_uid) {
         tracing::warn!(
             peer_pid = peer.pid,
@@ -258,13 +271,62 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
         "peer authenticated"
     );
 
-    // 2. Split the stream so we can read & write concurrently if we
+    // 2. Linux: spawn a pidfd watcher that revokes every session bound
+    //    to this connection's peer the moment the kernel marks the
+    //    task as exited. The watcher races with the read loop;
+    //    whichever fires first triggers connection shutdown.
+    #[cfg(target_os = "linux")]
+    let peer_exit = Arc::new(Notify::new());
+    #[cfg(target_os = "linux")]
+    let _watcher_handle: Option<tokio::task::JoinHandle<()>> = if let Some(fd) = peer_pidfd {
+        match peer_auth::PidfdWatcher::new(fd) {
+            Ok(watcher) => {
+                let inode = peer.pidfd_inode;
+                let sessions = ctx.clone();
+                let exit = peer_exit.clone();
+                Some(tokio::spawn(async move {
+                    watcher.wait_exit().await;
+                    if let Some(ino) = inode {
+                        sessions.sessions.revoke_by_pidfd_inode(ino).await;
+                    }
+                    sessions.sessions.revoke_by_conn(conn_id).await;
+                    tracing::info!(conn_id, "peer process exited; sessions revoked");
+                    exit.notify_waiters();
+                }))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    conn_id,
+                    error = %e,
+                    "pidfd watcher could not be installed; falling back to read-loop teardown",
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 3. Split the stream so we can read & write concurrently if we
     //    ever need to. v0.1 is request/response, so we just borrow.
     let (mut rd, mut wr) = stream.into_split();
 
-    // 3. Connection loop.
+    // 4. Connection loop. On Linux the loop also exits if the pidfd
+    //    watcher fires (peer process died).
     loop {
-        let req = match read_request_json(&mut rd).await {
+        #[cfg(target_os = "linux")]
+        let req_res = tokio::select! {
+            biased;
+            _ = peer_exit.notified() => {
+                tracing::debug!(conn_id, "pidfd watcher fired; closing connection");
+                break;
+            }
+            res = read_request_json(&mut rd) => res,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let req_res = read_request_json(&mut rd).await;
+
+        let req = match req_res {
             Ok(r) => r,
             Err(Error::IpcFraming(m)) if m.contains("short read") => {
                 // Peer closed cleanly between frames.
@@ -286,7 +348,7 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
         }
     }
 
-    // 4. Tear down: revoke any session tokens bound to this conn.
+    // 5. Tear down: revoke any session tokens bound to this conn.
     ctx.sessions.revoke_by_conn(conn_id).await;
     tracing::debug!(conn_id, "connection closed; sessions revoked");
     Ok(())
