@@ -210,6 +210,27 @@ impl SessionStore {
         g.retain(|_, v| v.conn_id != conn_id);
     }
 
+    /// Revoke every session bound to the given non-recycling peer
+    /// identity. Called by the per-connection peer-exit watcher
+    /// (kqueue on macOS, pidfd on Linux) the moment the kernel reports
+    /// the peer task has exited — closes the PID-recycle window before
+    /// any other process at the same UID can present a stale token.
+    /// The compare is constant-time on the bytes; identities of a
+    /// different `kind` or length never match.
+    pub async fn revoke_by_identity(&self, identity: &PeerIdentity) {
+        let mut g = self.inner.write().await;
+        g.retain(|_, v| {
+            let Some(stored) = v.peer_identity.as_ref() else {
+                return true;
+            };
+            if stored.kind != identity.kind || stored.bytes.len() != identity.bytes.len() {
+                return true;
+            }
+            let eq: bool = stored.bytes.ct_eq(&identity.bytes).into();
+            !eq
+        });
+    }
+
     /// Drop every expired record. Cheap to call periodically.
     pub async fn purge_expired(&self) {
         let mut g = self.inner.write().await;

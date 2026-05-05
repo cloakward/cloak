@@ -234,6 +234,19 @@ async fn accept_loop(
 
 async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Result<()> {
     // 1. Resolve and check peer credentials BEFORE issuing any token.
+    //    On Linux we additionally open a pidfd for the peer here so we
+    //    can wire up the per-connection process-death watcher below;
+    //    on macOS the kqueue watcher is registered by PID directly so
+    //    we just take the standard `peer_info_from_unix` path.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (peer, peer_pidfd) = match peer_auth::peer_info_with_pidfd_linux(&stream) {
+        Ok((p, fd)) => (p, Some(fd)),
+        Err(e) => {
+            tracing::warn!(error = %e, "peer_info_with_pidfd_linux failed; closing connection");
+            return Ok(());
+        }
+    };
+    #[cfg(target_os = "macos")]
     let peer = match peer_auth::peer_info_from_unix(&stream) {
         Ok(p) => p,
         Err(e) => {
@@ -258,20 +271,37 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
         "peer authenticated"
     );
 
-    // 1b. (macOS) Spawn a kqueue NOTE_EXIT watcher for the peer. If the
-    //     peer dies — even before its socket FIN reaches us — we revoke
-    //     every session bound to this conn-id immediately, closing the
-    //     PID-recycle window (threat model A8). The task is aborted in
-    //     the connection-teardown path below.
-    let exit_watcher_task = spawn_peer_exit_watcher(&ctx, &peer, conn_id);
+    // 1b. Spawn a per-connection peer-exit watcher (kqueue NOTE_EXIT on
+    //     macOS, pidfd POLLIN on Linux). If the peer dies — even before
+    //     its socket FIN reaches us — we revoke every session bound to
+    //     this peer's identity AND every session bound to this conn-id
+    //     immediately, closing the PID-recycle window (threat model
+    //     A8). `peer_exit` lets the read loop break out of `read` the
+    //     instant the watcher fires. The task is aborted in the
+    //     teardown path below if the read loop wins the race.
+    let peer_exit = Arc::new(Notify::new());
+    #[cfg(target_os = "macos")]
+    let exit_watcher_task = spawn_peer_exit_watcher(&ctx, &peer, conn_id, peer_exit.clone());
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let exit_watcher_task =
+        spawn_peer_exit_watcher(&ctx, &peer, peer_pidfd, conn_id, peer_exit.clone());
 
     // 2. Split the stream so we can read & write concurrently if we
     //    ever need to. v0.1 is request/response, so we just borrow.
     let (mut rd, mut wr) = stream.into_split();
 
-    // 3. Connection loop.
+    // 3. Connection loop. The loop also exits if the peer-exit watcher
+    //    fires — a `biased` select means the watcher always wins ties.
     loop {
-        let req = match read_request_json(&mut rd).await {
+        let req_res = tokio::select! {
+            biased;
+            _ = peer_exit.notified() => {
+                tracing::debug!(conn_id, "peer-exit watcher fired; closing connection");
+                break;
+            }
+            res = read_request_json(&mut rd) => res,
+        };
+        let req = match req_res {
             Ok(r) => r,
             Err(Error::IpcFraming(m)) if m.contains("short read") => {
                 // Peer closed cleanly between frames.
@@ -304,17 +334,19 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
 }
 
 /// macOS: spawn a [`peer_auth::PeerExitWatcher`] that revokes every
-/// session bound to `conn_id` the moment the kernel reports the peer
-/// has exited. Returns the task handle so the connection-teardown
-/// path can abort it on normal close. On other Unixes this is a
-/// no-op (W4 supplies the Linux equivalent).
+/// session bound to `conn_id` (and the captured peer identity) the
+/// moment the kernel reports the peer has exited. Returns the task
+/// handle so the connection-teardown path can abort it on normal
+/// close. The Linux companion below mirrors this shape with a pidfd.
 #[cfg(target_os = "macos")]
 fn spawn_peer_exit_watcher(
     ctx: &Arc<DaemonCtx>,
     peer: &PeerInfo,
     conn_id: u64,
+    peer_exit: Arc<Notify>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let pid = peer.pid;
+    let identity = peer.identity.clone();
     let watcher = match peer_auth::PeerExitWatcher::new(pid) {
         Ok(w) => w,
         Err(e) => {
@@ -328,7 +360,11 @@ fn spawn_peer_exit_watcher(
             );
             let sessions = ctx.sessions.clone_handle();
             return Some(tokio::spawn(async move {
+                if let Some(id) = identity.as_ref() {
+                    sessions.revoke_by_identity(id).await;
+                }
                 sessions.revoke_by_conn(conn_id).await;
+                peer_exit.notify_waiters();
             }));
         }
     };
@@ -351,17 +387,77 @@ fn spawn_peer_exit_watcher(
                 );
             }
         }
+        if let Some(id) = identity.as_ref() {
+            sessions.revoke_by_identity(id).await;
+        }
         sessions.revoke_by_conn(conn_id).await;
+        peer_exit.notify_waiters();
     }))
 }
 
+/// Linux: spawn a [`peer_auth::linux::PidfdWatcher`] that revokes every
+/// session bound to `conn_id` (and the captured pidfd-inode identity)
+/// the moment the kernel signals `POLLIN` on the peer's pidfd. Mirrors
+/// the macOS arm above: same identity-then-conn-id revocation order,
+/// same `peer_exit` notify so the read loop unblocks immediately.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_peer_exit_watcher(
-    _ctx: &Arc<DaemonCtx>,
-    _peer: &PeerInfo,
-    _conn_id: u64,
+    ctx: &Arc<DaemonCtx>,
+    peer: &PeerInfo,
+    peer_pidfd: Option<std::os::fd::OwnedFd>,
+    conn_id: u64,
+    peer_exit: Arc<Notify>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    None
+    let pid = peer.pid;
+    let identity = peer.identity.clone();
+    let pidfd = peer_pidfd?;
+    let watcher = match peer_auth::linux::PidfdWatcher::new(pidfd, pid) {
+        Ok(w) => w,
+        Err(e) => {
+            // pidfd registration with the tokio reactor failed. Treat
+            // this the same as the macOS ESRCH case: revoke eagerly so
+            // a flaky watcher never leaves a stale token alive.
+            tracing::warn!(
+                conn_id,
+                peer_pid = pid,
+                error = %e,
+                "pidfd watcher could not register; revoking eagerly"
+            );
+            let sessions = ctx.sessions.clone_handle();
+            return Some(tokio::spawn(async move {
+                if let Some(id) = identity.as_ref() {
+                    sessions.revoke_by_identity(id).await;
+                }
+                sessions.revoke_by_conn(conn_id).await;
+                peer_exit.notify_waiters();
+            }));
+        }
+    };
+    let sessions = ctx.sessions.clone_handle();
+    Some(tokio::spawn(async move {
+        match watcher.wait().await {
+            Ok(()) => {
+                tracing::info!(
+                    conn_id,
+                    peer_pid = pid,
+                    "peer exited; revoking sessions for this connection"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    conn_id,
+                    peer_pid = pid,
+                    error = %e,
+                    "pidfd watcher errored; revoking sessions defensively"
+                );
+            }
+        }
+        if let Some(id) = identity.as_ref() {
+            sessions.revoke_by_identity(id).await;
+        }
+        sessions.revoke_by_conn(conn_id).await;
+        peer_exit.notify_waiters();
+    }))
 }
 
 // =========================================================================
