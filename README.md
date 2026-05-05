@@ -119,8 +119,9 @@ For a fully automated end-to-end demo run `./scripts/smoke-test.sh` — it does 
 - `mint_token` for `github-app` / `gitlab-pat` returns a typed not-supported error (still audited).
 
 ### Deferred from the 8-week plan
-- Cross-platform CI matrix (Linux glibc/musl, Windows). Code compiles for Linux but Keychain/biometric/peer-auth are stubs. Windows is uncompiled.
-- SLSA L3 / cosign / SignPath signed releases.
+- Cross-platform CI matrix beyond macOS arm64 (in flight; v1.0 ships **macOS + Linux only — Windows lands in v1.0.1**, see [issue #2](https://github.com/cloakward/cloak/issues/2)).
+- Linux Keychain (Secret Service) and biometric (polkit) are stubs in v0.1.
+- SLSA L3 / cosign signed releases. SignPath OV signing (Windows) is v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)).
 - BIP-39 24-word recovery, `cloak export/import`, `.env` import, `cloak rotate NAME`.
 - Mintlify docs site, fuzz harnesses, full property-test KAT vector suite, chaos tests.
 - `cargo deny` / `cargo audit` policy enforcement in CI.
