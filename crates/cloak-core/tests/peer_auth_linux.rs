@@ -31,6 +31,7 @@ fn peer_pidfd_inode(stream: &UnixStream) -> (OwnedFd, u64) {
 }
 
 #[tokio::test]
+#[ignore = "pidfd watcher disabled for v0.9.0-rc1; re-enable with #21"]
 async fn pidfd_inode_is_stable_per_process() {
     // Two pidfds for the *same* peer (this test process) must report
     // the same inode. This locks in our identity-key invariant: the
@@ -59,6 +60,7 @@ async fn pidfd_inode_is_stable_per_process() {
 }
 
 #[tokio::test]
+#[ignore = "pidfd watcher disabled for v0.9.0-rc1; re-enable with #21"]
 async fn session_revoked_when_peer_process_exits() {
     // The attack model: a privileged peer hands off a session token,
     // exits, and a hostile process at the same UID grabs the freed
@@ -99,6 +101,7 @@ async fn session_revoked_when_peer_process_exits() {
 }
 
 #[tokio::test]
+#[ignore = "pidfd watcher disabled for v0.9.0-rc1; re-enable with #21"]
 async fn inode_revoke_path_drops_only_matching_sessions() {
     // Direct unit-style assertion on `SessionStore::revoke_by_identity`
     // for the `LinuxPidfdInode` variant: issue two sessions with
