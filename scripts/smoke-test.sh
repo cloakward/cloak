@@ -42,10 +42,12 @@ cleanup() {
     kill -TERM "$CLOAKD_PID" 2>/dev/null || true
     wait "$CLOAKD_PID" 2>/dev/null || true
   fi
-  if [[ "$rc" -ne 0 && -s "$SMOKE_DIR/cloakd.err" ]]; then
-    echo "==> cloakd stderr (last 60 lines, on failure)"
-    tail -60 "$SMOKE_DIR/cloakd.err" || true
-  fi
+  # Always dump cloakd output so CI failures can diagnose the daemon
+  # state regardless of file size at sample time.
+  echo "==> cloakd stdout (full)"
+  cat "$SMOKE_DIR/cloakd.out" 2>/dev/null || true
+  echo "==> cloakd stderr (full)"
+  cat "$SMOKE_DIR/cloakd.err" 2>/dev/null || true
   echo "cleanup: removing $SMOKE_DIR"
   rm -rf "$SMOKE_DIR"
 }
