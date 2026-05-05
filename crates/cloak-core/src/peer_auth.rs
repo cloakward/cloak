@@ -592,6 +592,10 @@ impl PeerExitWatcher {
 // Linux impl
 // -------------------------------------------------------------------------
 
+/// Linux peer-auth helpers — `SO_PEERCRED` / `SO_PEERPIDFD` /
+/// `pidfd_open` syscalls plus the [`linux::PidfdWatcher`] over
+/// `tokio::io::unix::AsyncFd`. Public so the integration tests in
+/// `tests/peer_auth_linux.rs` can exercise the primitives directly.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub mod linux {
     use std::ffi::c_void;
