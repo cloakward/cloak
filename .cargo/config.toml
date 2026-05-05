@@ -1,0 +1,25 @@
+# Workspace-level cargo config.
+#
+# `[env]` here applies to every `cargo build / run / test` invocation rooted
+# in this workspace. We use it to keep local dev and `cargo test` off the
+# real OS keychain.
+#
+# WHY: macOS pops a "cloak wants to use your confidential information"
+# dialog every time a non-codesigned binary touches the `dev.cloak`
+# keychain item. That blocks `cargo test` (the test binary tries to read
+# the pepper), blocks `cargo run`, and is generally a terrible dev UX.
+#
+# Setting CLOAK_PEPPER_FILE here routes pepper access to a repo-local file
+# under `target/` (which is already gitignored). The file is created with
+# mode 0600 on first use; subsequent runs read it back. CI does the same on
+# every platform, so dev behavior matches CI behavior.
+#
+# `force = false` means a real `CLOAK_PEPPER_FILE` set in the shell wins,
+# which is useful for the smoke test's hermetic-tempdir setup.
+#
+# Production (downloaded release binary, run outside the repo) is
+# unaffected: this env var only applies to cargo subprocesses started from
+# the workspace.
+
+[env]
+CLOAK_PEPPER_FILE = { value = "target/.cloak-dev-pepper", relative = true, force = false }
