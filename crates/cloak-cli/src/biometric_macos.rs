@@ -1,12 +1,21 @@
-//! macOS Touch ID authentication via the `LocalAuthentication` framework.
+//! Per-platform user-presence / biometric gate for `cloak show`.
+//!
+//! The filename is historical (this used to be macOS-only). It now
+//! also hosts the Linux polkit gate; the macOS arm is unchanged. Each
+//! platform exposes the same [`authenticate`] entry point:
+//!
+//! - **macOS** — Touch ID via the `LocalAuthentication` framework.
+//! - **Linux** — polkit's `org.freedesktop.PolicyKit1.Authority`
+//!   `CheckAuthorization` D-Bus method against the `dev.cloak.show-secret`
+//!   action (default policy `auth_self_keep`, see
+//!   `scripts/polkit/dev.cloak.policy`).
+//! - **Other** — a stub that returns `Ok(false)`; `cloak show` then
+//!   refuses unless the caller passes `--no-biometric`.
 //!
 //! `cloak show NAME` calls [`authenticate`] *after* the user has typed
 //! their passphrase, as a second factor that the human is physically
 //! present at the device. Failure / cancel returns `Ok(false)` so the
-//! caller can decide whether to fall back (today: refuse).
-//!
-//! On non-macOS targets we ship a pure stub that always succeeds — the
-//! biometric story on Linux/Windows is a later-week deliverable.
+//! caller can refuse the reveal.
 
 use anyhow::Result;
 
@@ -143,9 +152,177 @@ pub fn authenticate(reason: &str) -> Result<bool> {
     imp::authenticate(reason)
 }
 
-/// Stub for non-macOS targets: always succeeds. Linux / Windows
-/// biometric integration is deferred to a later week per the build plan.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod imp {
+    //! Linux user-presence gate via polkit.
+    //!
+    //! We invoke `org.freedesktop.PolicyKit1.Authority.CheckAuthorization`
+    //! over the system D-Bus, with a `unix-process` subject describing the
+    //! current process (`pid` + `start-time` + `uid`) and the action
+    //! `dev.cloak.show-secret`. The `AllowUserInteraction` flag lets the
+    //! user's session polkit agent prompt for confirmation.
+    //!
+    //! Outcomes:
+    //! - polkit reports `is_authorized = true`  -> `Ok(true)`
+    //! - polkit reports `is_authorized = false`,
+    //!   either because the user dismissed/cancelled the prompt
+    //!   (`details["polkit.dismissed"]` set) or because no polkit
+    //!   authentication agent is registered for this session
+    //!   (`is_challenge = true`, no agent picked it up) — both are
+    //!   treated as "user presence not confirmed" -> `Ok(false)`.
+    //! - the system bus is unreachable or polkit is not running on this
+    //!   host -> log a one-shot warning and fail closed with `Ok(false)`.
+    //!
+    //! No `unsafe`, no syscalls, no shelling out. The `reason` string is
+    //! only carried in tracing output; it never contains secret material.
+    use anyhow::Result;
+    use std::collections::HashMap;
+    use zbus::blocking::Connection;
+    use zbus_polkit::policykit1::{AuthorityProxyBlocking, CheckAuthorizationFlags, Subject};
+
+    /// Polkit action ID. Must match the `<action id="...">` in
+    /// `scripts/polkit/dev.cloak.policy`.
+    pub(super) const ACTION_ID: &str = "dev.cloak.show-secret";
+
+    pub fn authenticate(reason: &str) -> Result<bool> {
+        // Build the unix-process subject for *this* process. polkit will
+        // recheck pid+start-time against /proc to defeat PID-recycle on
+        // its end. uid=None lets zbus_polkit fill in the real UID via
+        // /proc, which is what polkit expects.
+        let subject = match Subject::new_for_owner(std::process::id(), None, None) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    %e,
+                    "polkit unavailable, falling back to refusal — pass --no-biometric to bypass"
+                );
+                return Ok(false);
+            }
+        };
+
+        // Connect to the system bus (where polkit lives).
+        let conn = match Connection::system() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    %e,
+                    "polkit unavailable, falling back to refusal — pass --no-biometric to bypass"
+                );
+                return Ok(false);
+            }
+        };
+
+        let proxy = match AuthorityProxyBlocking::new(&conn) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    %e,
+                    "polkit unavailable, falling back to refusal — pass --no-biometric to bypass"
+                );
+                return Ok(false);
+            }
+        };
+
+        // The `details` map can carry `polkit.message` to override the
+        // prompt copy in the agent dialog. We pass the caller-supplied
+        // reason verbatim — it's a fixed-format human string, not the
+        // secret value.
+        let mut details: HashMap<&str, &str> = HashMap::new();
+        details.insert("polkit.message", reason);
+
+        let result = proxy.check_authorization(
+            &subject,
+            ACTION_ID,
+            &details,
+            CheckAuthorizationFlags::AllowUserInteraction.into(),
+            "",
+        );
+
+        match result {
+            Ok(auth) if auth.is_authorized => Ok(true),
+            Ok(_auth) => {
+                // Either the user dismissed the prompt, no auth agent
+                // was registered, or polkit's policy denied us. We do
+                // not propagate `auth.details` to the user; treat as
+                // "user presence not confirmed".
+                Ok(false)
+            }
+            Err(e) => {
+                // Most commonly: the action is not registered (policy
+                // file not installed) or polkit itself is not running.
+                tracing::warn!(
+                    %e,
+                    "polkit unavailable, falling back to refusal — pass --no-biometric to bypass"
+                );
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// Trigger a polkit confirmation prompt with the given reason string.
+/// See [`imp::authenticate`] on Linux for semantics.
+#[cfg(target_os = "linux")]
+pub fn authenticate(reason: &str) -> Result<bool> {
+    imp::authenticate(reason)
+}
+
+/// Stub for targets that aren't macOS or Linux: refuse the reveal so
+/// `cloak show` fails closed. The user can opt out of the biometric
+/// gate entirely with `--no-biometric` if they accept the trade-off.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn authenticate(_reason: &str) -> Result<bool> {
-    Ok(true)
+    Ok(false)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    //! Shape-only tests for the polkit subject we'd send. Real
+    //! interaction with polkit is interactive and only runs when
+    //! `RUN_POLKIT_TEST=1` is set in the environment, hence `#[ignore]`.
+
+    use super::imp::ACTION_ID;
+    use zbus_polkit::policykit1::Subject;
+
+    #[test]
+    fn action_id_matches_policy_file() {
+        // The Rust-side action ID must match the `<action id="...">`
+        // declared in scripts/polkit/dev.cloak.policy. Keep this string
+        // pinned — changing it requires repackaging the policy file.
+        assert_eq!(ACTION_ID, "dev.cloak.show-secret");
+    }
+
+    #[test]
+    fn subject_for_current_process_has_required_keys() {
+        // `Subject::new_for_owner` populates pid / start-time / uid by
+        // reading /proc when the optional args are `None`. /proc is
+        // always present on Linux test runners, so this is safe in CI.
+        let subject = Subject::new_for_owner(std::process::id(), None, None)
+            .expect("subject construction should succeed on Linux with /proc");
+
+        assert_eq!(subject.subject_kind, "unix-process");
+        for key in ["pid", "start-time", "uid"] {
+            assert!(
+                subject.subject_details.contains_key(key),
+                "unix-process subject must carry `{key}`",
+            );
+        }
+    }
+
+    /// Real polkit round-trip. Interactive — requires a logged-in
+    /// session with a polkit agent and the policy file installed at
+    /// `/usr/share/polkit-1/actions/dev.cloak.policy`. Skipped unless
+    /// `RUN_POLKIT_TEST=1` is set; even then, `#[ignore]` keeps it out
+    /// of the default `cargo test` run.
+    #[test]
+    #[ignore]
+    fn live_polkit_round_trip() {
+        if std::env::var_os("RUN_POLKIT_TEST").is_none() {
+            eprintln!("skipping: set RUN_POLKIT_TEST=1 to run");
+            return;
+        }
+        let result = super::authenticate("Cloak polkit round-trip test")
+            .expect("authenticate() must not return Err on a live system");
+        eprintln!("polkit returned: {result}");
+    }
 }

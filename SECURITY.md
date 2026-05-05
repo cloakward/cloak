@@ -24,7 +24,6 @@ If we cannot meet these timelines we will tell you in writing and explain why.
 - Macros / shell aliases that wrap `cloak show`.
 - Side channels (cache timing, EM, power) — best-effort only.
 - Windows: deferred to v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)). Issues against the Windows code paths in v1.0 are not in-scope.
-- Linux biometric (polkit) is still a stub in v1.0; reports of biometric bypass are out of scope until that lands.
 
 ## Safe harbor
 We follow the [disclose.io](https://disclose.io) safe-harbor model. Good-faith research, clearly within scope, will not be pursued legally.
