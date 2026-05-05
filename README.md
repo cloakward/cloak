@@ -178,6 +178,16 @@ See `docs/THREAT_MODEL.md` for the full adversary model and `docs/IPC_WIRE.md` f
 
 ---
 
+## A note on macOS Gatekeeper
+
+Cloak v1.0 binaries are not Apple-notarized. If you download a release artifact (rather than building from source), macOS Gatekeeper will block it until you clear the quarantine attribute:
+
+```sh
+xattr -d com.apple.quarantine ./cloak ./cloakd ./cloak-mcp
+```
+
+Every release is cosign-signed with SLSA L3 provenance, which lets you verify the binary is the exact artifact CI built. Notarization adds Apple's pre-execution scan on top and is a v1.x deliverable. See `docs/QUICKSTART.md` for the full Gatekeeper walkthrough.
+
 ## License
 
 Apache-2.0.
