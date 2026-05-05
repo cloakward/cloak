@@ -75,6 +75,17 @@ security-framework = "3.0"
 security-framework-sys = "2.12"
 core-foundation = "0.10"
 
+# Linux desktop pepper via Secret Service (libsecret over D-Bus). We use
+# the blocking API: the pepper fetch happens once at unlock, never on the
+# hot path. The `crypto-rust` half of the feature pair compiles in pure-
+# Rust DH session code that the wire protocol can use; we deliberately
+# pass `EncryptionType::Plain` since the session bus is a UID-local
+# AF_UNIX socket where there is no MITM to defeat. The only "primitive
+# on the secret-protection path" remains libsodium. See
+# `crates/cloak-core/src/keychain.rs` (Linux arm).
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "5.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
+
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
