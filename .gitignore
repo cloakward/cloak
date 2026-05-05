@@ -1,0 +1,25 @@
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+node_modules/
+dist/
+.bun/
+
+# Local vault and audit artifacts (must NEVER be committed)
+*.cloak
+*.cloak-bundle
+audit.jsonl
+.cloak-state/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Internal planning / process docs — local only, not for the public repo.
+PLAN.md
+PLAN_V1.md
+compass_artifact_*.md
+/docs/internal/

@@ -1,0 +1,90 @@
+[package]
+name = "cloak-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cloak — secure local secrets vault. Core library."
+
+[lib]
+name = "cloak_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cloakd"
+path = "src/bin/cloakd.rs"
+
+[features]
+default = []
+# `test-util` exposes hooks (e.g. `handlers::set_test_sts_factory`) used
+# by integration tests to inject a mocked AWS STS client. Production
+# builds never enable this feature.
+test-util = []
+
+[dependencies]
+libsodium-sys-stable = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+rusqlite = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_jcs = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+fs2 = { workspace = true }
+once_cell = { workspace = true }
+dirs = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+
+# AWS — pinned narrow feature surface to keep the daemon binary small and
+# avoid pulling aws-lc-rs (we keep libsodium as the only crypto primitive in
+# the secret-protection path; rustls/ring is fine for AWS TLS).
+#
+# `aws-sigv4` provides V4 signing for `tool.sign_request`. The `http-1`
+# feature gives us http 1.x compatible request types (matches reqwest 0.12).
+aws-sigv4 = { version = "1.2", default-features = false, features = ["http1", "sign-http"] }
+
+# `aws-sdk-sts` for `tool.mint_token` kind=aws-sts. We deliberately skip
+# `aws-config` (its `rustls` feature pulls aws-lc-rs via
+# `aws-smithy-runtime/default-https-client`) and build the SdkConfig
+# ourselves via `aws_sdk_sts::config::Config::builder()`. The `rustls`
+# feature on aws-sdk-sts pulls `aws-smithy-runtime/tls-rustls` which uses
+# `legacy-rustls-ring` (ring, NOT aws-lc-rs).
+aws-sdk-sts = { version = "1.40", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
+aws-credential-types = { version = "1.2", default-features = false, features = ["hardcoded-credentials"] }
+aws-smithy-runtime-api = { version = "1.7", default-features = false, features = ["client"] }
+aws-smithy-types = { version = "1.2", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.0"
+security-framework-sys = "2.12"
+core-foundation = "0.10"
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+# Mock the STS API surface for integration tests so we never hit AWS.
+# Requires aws-sdk-sts to be built with `test-util` for `mock_client!`.
+aws-smithy-mocks = { version = "0.2", default-features = false }
+aws-sdk-sts = { version = "1.40", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest", "test-util"] }
+aws-smithy-types = { version = "1.2", default-features = false }
+http = "1"
+# Re-import the cloak-core crate with the `test-util` feature enabled so
+# integration tests under `tests/` can inject a mocked STS client into
+# the daemon-bound `tool.mint_token` path.
+cloak-core = { path = ".", features = ["test-util"] }

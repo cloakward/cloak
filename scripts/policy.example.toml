@@ -1,0 +1,51 @@
+# Cloak policy — default deny-by-default with a few common allow rules.
+#
+# Reload: `cloak policy reload` (daemon hot-reloads on SIGHUP too).
+# Validate: `cloak policy validate ./policy.toml`.
+
+[default]
+# What happens when no rule matches.
+action = "deny"
+
+# Token-bucket rate limit applied per (peer, secret, tool) tuple.
+[default.rate_limit]
+burst = 10
+refill_per_minute = 30
+
+# Per-tool defaults — can be overridden by [[secrets]] rules below.
+[tools.proxy_authenticated_http_request]
+allowed_hosts = []  # empty = deny all; populate per-secret instead
+require_confirmation = false
+
+[tools.sign_request]
+require_confirmation = false
+
+[tools.mint_short_lived_token]
+require_confirmation = true
+confirmation_timeout_seconds = 30
+
+[tools.query_audit]
+# Reading the audit log is always allowed for any authenticated peer.
+allow = true
+
+# Per-secret rules (most specific wins; glob match on `name`).
+[[secrets]]
+name = "GITHUB_TOKEN"
+kind = "api_key"
+[secrets.tools.proxy_authenticated_http_request]
+allowed_hosts = ["api.github.com", "uploads.github.com"]
+
+[[secrets]]
+name = "OPENAI_API_KEY"
+kind = "api_key"
+[secrets.tools.proxy_authenticated_http_request]
+allowed_hosts = ["api.openai.com"]
+
+[[secrets]]
+name = "AWS_*"
+kind = "api_key"
+[secrets.tools.proxy_authenticated_http_request]
+allowed_hosts = ["*.amazonaws.com"]
+[secrets.tools.mint_short_lived_token]
+allow = true
+require_confirmation = true

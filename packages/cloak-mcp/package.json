@@ -1,0 +1,27 @@
+{
+  "name": "@cloak/mcp",
+  "version": "0.1.0",
+  "description": "Cloak MCP server — model surface that never sees plaintext secrets.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/server.ts",
+  "bin": {
+    "cloak-mcp": "src/server.ts"
+  },
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "build": "bun build src/server.ts --compile --outfile dist/cloak-mcp",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "self-test": "bun run src/self-test.ts",
+    "lint:no-http": "node scripts/check-no-http.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  }
+}

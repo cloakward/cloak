@@ -1,0 +1,43 @@
+[package]
+name = "cloak-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cloak CLI — human surface for the local secrets vault."
+
+[[bin]]
+name = "cloak"
+path = "src/main.rs"
+
+[dependencies]
+cloak-core = { path = "../cloak-core" }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+rpassword = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+dirs = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSString", "NSError"] }
+objc2-local-authentication = { version = "0.2", features = ["LAContext", "LAError", "block2"] }
+block2 = "0.5"
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+insta = { workspace = true }
+tempfile = { workspace = true }

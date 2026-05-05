@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.cloak.cloakd</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__CLOAKD_BIN__</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RUST_LOG</key>
+    <string>cloakd=info,cloak_core=info</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/cloakd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/cloakd.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,16 @@
+# Default reviewer.
+*                                       @varun
+
+# Load-bearing security paths — varun reviews every change.
+crates/cloak-core/src/crypto.rs         @varun
+crates/cloak-core/src/peer_auth.rs      @varun
+crates/cloak-core/src/handlers.rs       @varun
+crates/cloak-core/src/ipc.rs            @varun
+crates/cloak-core/src/session.rs        @varun
+crates/cloak-core/src/vault.rs          @varun
+crates/cloak-core/src/keychain.rs       @varun
+crates/cloak-core/src/audit.rs          @varun
+crates/cloak-core/src/policy.rs         @varun
+docs/IPC_WIRE.md                        @varun
+docs/THREAT_MODEL.md                    @varun
+PLAN.md                                 @varun
