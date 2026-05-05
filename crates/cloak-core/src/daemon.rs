@@ -439,21 +439,27 @@ fn spawn_peer_exit_watcher(
                     peer_pid = pid,
                     "peer exited; revoking sessions for this connection"
                 );
+                if let Some(id) = identity.as_ref() {
+                    sessions.revoke_by_identity(id).await;
+                }
+                sessions.revoke_by_conn(conn_id).await;
+                peer_exit.notify_waiters();
             }
             Err(e) => {
+                // The watcher itself errored — we can't tell whether
+                // the peer actually exited. Don't revoke proactively;
+                // a false-positive revoke kills a live session. The
+                // socket-FIN-driven revoke_by_conn at serve_conn
+                // teardown still runs when the peer eventually
+                // disconnects.
                 tracing::warn!(
                     conn_id,
                     peer_pid = pid,
                     error = %e,
-                    "pidfd watcher errored; revoking sessions defensively"
+                    "pidfd watcher errored; deferring revocation to socket-FIN path"
                 );
             }
         }
-        if let Some(id) = identity.as_ref() {
-            sessions.revoke_by_identity(id).await;
-        }
-        sessions.revoke_by_conn(conn_id).await;
-        peer_exit.notify_waiters();
     }))
 }
 
