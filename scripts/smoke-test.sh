@@ -34,7 +34,7 @@ mkdir -p "$SOCK_DIR" "$SMOKE_DIR/Library/Application Support" "$SMOKE_DIR/.confi
 export HOME="$SMOKE_DIR"
 export XDG_RUNTIME_DIR="$SOCK_DIR"
 export CLOAK_PEPPER_FILE="$SMOKE_DIR/.cloak-pepper"
-export RUST_LOG="cloak_core=warn,cloakd=warn"
+export RUST_LOG="cloak_core=debug,cloakd=debug"
 
 cleanup() {
   rc=$?
