@@ -783,10 +783,42 @@ pub mod linux {
         /// Resolves `Ok(())` once the peer task has exited. The kernel
         /// signals `POLLIN` on a pidfd when the referenced task
         /// reaches `do_exit()`; there is nothing to read off the fd,
-        /// we only care about the readiness edge.
+        /// we only care about the readiness edge. We confirm every
+        /// wakeup with a non-blocking `poll(2)` for `POLLIN` and only
+        /// resolve when the kernel itself reports the bit set —
+        /// AsyncFd has been observed to deliver spurious early-ready
+        /// wakeups for freshly-registered pidfds on some kernels, so
+        /// we re-check rather than treat any wakeup as exit.
         pub async fn wait(self) -> Result<()> {
-            let _guard = self.inner.readable().await.map_err(Error::Io)?;
-            Ok(())
+            let raw = self.inner.get_ref().as_raw_fd();
+            loop {
+                let mut guard = self.inner.readable().await.map_err(Error::Io)?;
+                let mut pfd = libc::pollfd {
+                    fd: raw,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: `pfd` is a single local `pollfd` and the
+                // pointer is borrowed for the duration of the call.
+                // Timeout 0 = non-blocking poll. `poll` does not
+                // retain the pointer past return.
+                let rc = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, 0) };
+                if rc < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        guard.clear_ready();
+                        continue;
+                    }
+                    return Err(Error::Io(err));
+                }
+                if (pfd.revents & libc::POLLIN) != 0 {
+                    return Ok(());
+                }
+                // Spurious wakeup — kernel says the pidfd is not yet
+                // readable. Acknowledge to tokio that the readiness
+                // didn't actually fire and re-arm.
+                guard.clear_ready();
+            }
         }
 
         /// Borrow the underlying pidfd for diagnostic syscalls (e.g.
