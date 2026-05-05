@@ -258,6 +258,13 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
         "peer authenticated"
     );
 
+    // 1b. (macOS) Spawn a kqueue NOTE_EXIT watcher for the peer. If the
+    //     peer dies — even before its socket FIN reaches us — we revoke
+    //     every session bound to this conn-id immediately, closing the
+    //     PID-recycle window (threat model A8). The task is aborted in
+    //     the connection-teardown path below.
+    let exit_watcher_task = spawn_peer_exit_watcher(&ctx, &peer, conn_id);
+
     // 2. Split the stream so we can read & write concurrently if we
     //    ever need to. v0.1 is request/response, so we just borrow.
     let (mut rd, mut wr) = stream.into_split();
@@ -286,10 +293,75 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
         }
     }
 
-    // 4. Tear down: revoke any session tokens bound to this conn.
+    // 4. Tear down: revoke any session tokens bound to this conn, and
+    //    abort the exit-watcher task if it's still alive.
+    if let Some(handle) = exit_watcher_task {
+        handle.abort();
+    }
     ctx.sessions.revoke_by_conn(conn_id).await;
     tracing::debug!(conn_id, "connection closed; sessions revoked");
     Ok(())
+}
+
+/// macOS: spawn a [`peer_auth::PeerExitWatcher`] that revokes every
+/// session bound to `conn_id` the moment the kernel reports the peer
+/// has exited. Returns the task handle so the connection-teardown
+/// path can abort it on normal close. On other Unixes this is a
+/// no-op (W4 supplies the Linux equivalent).
+#[cfg(target_os = "macos")]
+fn spawn_peer_exit_watcher(
+    ctx: &Arc<DaemonCtx>,
+    peer: &PeerInfo,
+    conn_id: u64,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let pid = peer.pid;
+    let watcher = match peer_auth::PeerExitWatcher::new(pid) {
+        Ok(w) => w,
+        Err(e) => {
+            // ESRCH at registration means the peer is already gone.
+            // Either way: refuse to issue any session for this conn.
+            tracing::warn!(
+                conn_id,
+                peer_pid = pid,
+                error = %e,
+                "kqueue exit watcher could not register; revoking eagerly"
+            );
+            let sessions = ctx.sessions.clone_handle();
+            return Some(tokio::spawn(async move {
+                sessions.revoke_by_conn(conn_id).await;
+            }));
+        }
+    };
+    let sessions = ctx.sessions.clone_handle();
+    Some(tokio::spawn(async move {
+        match watcher.wait().await {
+            Ok(()) => {
+                tracing::info!(
+                    conn_id,
+                    peer_pid = pid,
+                    "peer exited; revoking sessions for this connection"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    conn_id,
+                    peer_pid = pid,
+                    error = %e,
+                    "kqueue exit watcher errored; revoking sessions defensively"
+                );
+            }
+        }
+        sessions.revoke_by_conn(conn_id).await;
+    }))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn spawn_peer_exit_watcher(
+    _ctx: &Arc<DaemonCtx>,
+    _peer: &PeerInfo,
+    _conn_id: u64,
+) -> Option<tokio::task::JoinHandle<()>> {
+    None
 }
 
 // =========================================================================

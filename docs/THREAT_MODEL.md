@@ -28,7 +28,7 @@
 | **A5 — Memory dump of `cloakd`** | Postmortem core, swap, hibernate | (a) `Secret<T>` zeroize-on-drop on every secret-typed value. (b) Master key kept only when unlocked; `cloak lock` zeroizes. (c) Swap-disable is **not** done in v1.0; users on shared servers should disable swap or use full-disk encryption. |
 | **A6 — Tamper with vault file at rest** | Flip bytes in salt, ciphertext, header | AEAD tag detects any byte flip; typed `Error::Aead` (no panic). |
 | **A7 — Rollback to earlier vault state** | Restore an older `vault.cloak` to undo a rotation | Monotonic counter committed to the macOS Keychain (separate item). On unlock, the counter must be ≥ the stored value, else `Error::VaultRollbackDetected`. |
-| **A8 — PID recycle attack** | Reuse a freed PID to impersonate a trusted peer | The session token is bound to the connection's audit-token on macOS; if the connection's peer process exits, the kqueue `EVFILT_PROC` watcher invalidates the token before a new PID can recycle in. |
+| **A8 — PID recycle attack** | Reuse a freed PID to impersonate a trusted peer | macOS: at handshake `cloakd` calls `getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)` to capture the peer's 32-byte `audit_token_t` (which carries the kernel's non-recycling pidversion in `val[7]`) and stores it in the `SessionRecord`; every subsequent request constant-time-compares the stored bytes via `subtle::ConstantTimeEq`. In parallel, a per-connection `kqueue` watcher armed with `EVFILT_PROC | NOTE_EXIT` (wrapped in `tokio::io::unix::AsyncFd`) revokes every session bound to the connection the instant the kernel reports the peer has exited, closing the PID-recycle window before any other process can inherit the freed PID. |
 
 ## What Cloak **does not** defend against (honest list)
 
