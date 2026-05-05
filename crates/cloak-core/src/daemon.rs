@@ -328,10 +328,11 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
         let req = match read_request_json(&mut rd).await {
             Ok(r) => r,
             Err(Error::IpcFraming(m)) if m.contains("short read") => {
-                // Peer closed cleanly between frames.
+                tracing::debug!(conn_id, "peer closed before sending a frame; short read");
                 break;
             }
             Err(e) => {
+                tracing::debug!(conn_id, error = %e, "read_request_json error; closing");
                 let resp = Response::err(
                     "0",
                     rpc_error("invalid-params", format!("frame error: {e}")),
