@@ -290,18 +290,15 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     //    ever need to. v0.1 is request/response, so we just borrow.
     let (mut rd, mut wr) = stream.into_split();
 
-    // 3. Connection loop. The loop also exits if the peer-exit watcher
-    //    fires — a `biased` select means the watcher always wins ties.
+    // 3. Connection loop. The peer-exit watcher revokes session tokens
+    //    immediately on peer death; the connection itself closes
+    //    naturally when the CLI's socket sees FIN. Forcing the read
+    //    loop to break on watcher-fire raced with in-flight responses
+    //    on slow handlers (e.g. vault.unlock's Argon2id KDF), so we
+    //    let the read return EOF do the teardown instead.
+    let _ = peer_exit; // keep the channel alive for the watcher signal path
     loop {
-        let req_res = tokio::select! {
-            biased;
-            _ = peer_exit.notified() => {
-                tracing::debug!(conn_id, "peer-exit watcher fired; closing connection");
-                break;
-            }
-            res = read_request_json(&mut rd) => res,
-        };
-        let req = match req_res {
+        let req = match read_request_json(&mut rd).await {
             Ok(r) => r,
             Err(Error::IpcFraming(m)) if m.contains("short read") => {
                 // Peer closed cleanly between frames.
