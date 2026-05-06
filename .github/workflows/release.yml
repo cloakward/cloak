@@ -408,31 +408,37 @@ jobs:
   # -------------------------------------------------------------------
   # 6. Verification gate.
   #
-  # Fresh runner — pulls assets from the draft release, verifies cosign
-  # signatures and SLSA provenance. If anything fails, the workflow
-  # fails and the release stays in DRAFT (never published).
+  # Fresh runner — verifies the same signed-bundle + SLSA provenance
+  # artifacts that were attached to the draft release. We pull them
+  # from the workflow's artifact storage rather than `gh release
+  # download`, because gh cannot fetch from a release that is still
+  # in DRAFT (the design intent is for the release to remain in DRAFT
+  # until this verify gate passes). The bytes are identical to those
+  # uploaded to the draft.
   # -------------------------------------------------------------------
   verify:
     name: verify signatures + provenance
-    needs: release
+    needs: [sign, provenance, release]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
     steps:
-      - name: Download release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download signed bundle (from sign job)
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-bundle
+          path: verify
+
+      - name: Download SLSA provenance (from provenance job)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.provenance.outputs.provenance-name }}
+          path: verify
+
+      - name: List verify payload
         shell: bash
-        run: |
-          set -euo pipefail
-          tag="${{ needs.release.outputs.tag_name }}"
-          mkdir -p verify
-          # The verify job has no actions/checkout, so `gh` cannot
-          # auto-discover the repo from a working .git tree. Pass --repo
-          # explicitly so `gh release download` knows where to fetch from.
-          gh release download "$tag" --repo "${{ github.repository }}" --dir verify --pattern '*'
-          find verify -maxdepth 1 -type f -print
+        run: find verify -maxdepth 1 -type f -print
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
