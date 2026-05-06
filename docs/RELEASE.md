@@ -17,9 +17,14 @@
    The tag must point at a commit on `beta` (or `main`, once `beta` has
    been fast-forwarded).
 4. **Watch `release.yml`.** The workflow:
-   - Builds the release artifacts in a matrix (macOS arm64/x64, Linux musl
-     amd64/arm64; Windows is deferred to v1.0.1 — see
-     [issue #3](https://github.com/cloakward/cloak/issues/3)).
+   - Builds the release artifacts in a 5-row matrix:
+     macOS arm64 (`macos-26`),
+     macOS x86_64 (`macos-26-intel`, best-effort),
+     Linux glibc x86_64 (`x86_64-unknown-linux-gnu`),
+     Linux musl x86_64 (`x86_64-unknown-linux-musl`),
+     Linux glibc arm64 (`aarch64-unknown-linux-gnu`).
+     Windows is deferred to v1.0.1 — see
+     [issue #2](https://github.com/cloakward/cloak/issues/2).
    - Tarballs each row as `cloak-X.Y.Z-<target>.tar.gz`.
    - Aggregates `sha256sums.txt`.
    - Cosign-keyless-signs every tarball and the checksum file (OIDC token
@@ -28,8 +33,12 @@
      (`multiple.intoto.jsonl`) via the `slsa-framework/slsa-github-generator`
      reusable workflow.
    - Re-runs `cosign verify-blob` and `slsa-verifier verify-artifact`
-     against the drafted artifacts in a separate verification job. If
-     either fails, the release is not published.
+     in a separate verification job. The verify job pulls the
+     `signed-bundle` and SLSA provenance artifacts directly from the
+     workflow's artifact storage (not from the draft release, since
+     `gh release download` cannot see drafts). The bytes verified are
+     identical to those uploaded to the draft. If either check fails,
+     the workflow fails and the release stays in DRAFT.
    - Drafts the GitHub Release with all artifacts attached.
 5. **Promote.** Once the verification job is green and you've eyeballed the
    draft, click `Publish release` in the GitHub UI.
@@ -37,8 +46,12 @@
    `homebrew-bump.yml` (Formula PR to `homebrew-cloak`) and
    `npm-publish.yml` (`@cloak-ward/mcp` to npm via trusted publishing).
 7. **Docker.** `docker-push.yml` builds a multi-arch (`linux/amd64`,
-   `linux/arm64`) `cloakd` image and pushes to GHCR with `:X.Y.Z`,
-   `:X.Y`, and `:latest` tags.
+   `linux/arm64`) `cloakd` image and pushes to GHCR. `:X.Y.Z` and
+   `:X.Y` tags are always pushed; `:latest` is appended only when the
+   release event flags `prerelease == false` (so a tag like
+   `v0.9.0-rc1` does not advance `:latest` past production). The
+   `prerelease` bit comes from `release.yml` passing `--prerelease`
+   to `gh release create` whenever the tag matches `-rc*|-beta*|-alpha*`.
 
 ## What a release publishes
 

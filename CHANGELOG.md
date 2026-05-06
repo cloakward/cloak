@@ -4,6 +4,13 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+### Fixed (release-engineering follow-ups, post-tag)
+- `release.yml` verify job now downloads the `signed-bundle` and SLSA provenance artifacts via `actions/download-artifact` instead of `gh release download`, because `gh release download` cannot see DRAFT releases (and the workflow design keeps the release in DRAFT until verify passes). The bytes verified are identical to those uploaded to the draft.
+- `release.yml` `gh release create` now passes `--prerelease` whenever the tag matches `-rc*|-beta*|-alpha*|-pre*|-dev*`, so downstream workflows can gate production-only side-effects on the release event's `prerelease` flag.
+- `docker-push.yml` no longer pushes `:latest` for pre-release tags. `:VERSION` and `:MAJOR_MINOR` always go; `:latest` is appended only when `github.event.release.prerelease == false`.
+- `release.yml` SLSA-provenance download steps now hard-code the artifact name `multiple.intoto.jsonl` rather than reading it from `${{ needs.provenance.outputs.provenance-name }}`, defending against a historical SLSA-reusable-workflow footgun where that output is intermittently empty.
+- `packages/cloak-mcp/package.json` adds `repository`, `homepage`, `bugs`, and `publishConfig` fields so npm `--provenance` accepts the publish.
+
 ## [0.9.0-rc1] — 2026-05-06
 
 First release candidate for v1.0. Ships macOS arm64/x86_64 + Linux glibc/musl; Windows is deferred to v1.0.1 ([#2](https://github.com/cloakward/cloak/issues/2)). All 11 v1.0 critical-path workstreams (W1, W3–W10, W9b/c/d/e/f) are on `beta`.
@@ -12,7 +19,7 @@ First release candidate for v1.0. Ships macOS arm64/x86_64 + Linux glibc/musl; W
 
 - **Linux pidfd peer-exit watcher** is implemented in source but disabled at the daemon's `serve_conn` call site for this RC; the captured pidfd path tripped a tokio `AsyncFd` registration error on the GitHub Actions runner kernel that we couldn't reproduce locally. Re-enable tracked in [#21](https://github.com/cloakward/cloak/issues/21). macOS kqueue + audit-token path is fully wired and gives full A8 coverage; Linux falls back to socket-FIN-driven session revocation, same surface as v0.1.
 - **npm publish two-leg fallback.** OIDC trusted publishing is preferred and attaches `--provenance`. If the npm-side trusted-publisher relationship for `@cloak-ward/mcp` is not yet configured (tracked in [#6](https://github.com/cloakward/cloak/issues/6)), the workflow falls back to a static `NPM_TOKEN` and publishes WITHOUT provenance, with a `::warning::` flagging the gap. Migration to trusted-publishing-only is a v1.0.x follow-up.
-- **macos-13 (x86_64) release row is best-effort.** A 30-min runner-allocation timeout drops the row with a workflow warning instead of failing the release. macOS arm64 always ships; macOS x86_64 ships when GitHub allocates a free-tier runner in time.
+- **macos-26-intel (x86_64) release row is best-effort.** macOS x86_64 free-tier runners can take a long time to allocate; the row carries `continue-on-error: true` so a missed allocation drops the row with a workflow warning instead of failing the release. The `macos-guard` job fails the workflow only when BOTH macOS rows are missing. macOS arm64 (`macos-26`) is required and always ships. (Matrix replaces the v0.9.0-rc1-pre macos-13 / macos-14 split.)
 - **Biometric (Touch ID / polkit) is enforced by the `cloak` CLI binary, not by `cloakd`.** A same-UID attacker who calls the daemon directly via the IPC socket — bypassing the CLI — gets through with no biometric prompt. v1.0.1 moves the LocalAuthentication / polkit calls into `cloakd` itself so the prompt fires regardless of which peer requested `vault.show`.
 - **Rollback counter lives in the vault file only**, not the OS keychain. Read-side rollback (`cloak show` against a restored older snapshot) is not detected; write-side is. v1.0.1 mirrors the counter into the keychain so reads also detect rollback.
 - **No passphrase recovery.** v0.9.0-rc1 ships without BIP-39 24-word recovery — if you lose your passphrase, every secret in the vault is permanently unrecoverable. Back up your passphrase out-of-band before adding any secret.

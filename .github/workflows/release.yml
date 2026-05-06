@@ -370,7 +370,11 @@ jobs:
       - name: Download SLSA provenance
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.provenance.outputs.provenance-name }}
+          # Hard-coded to match `provenance-name: multiple.intoto.jsonl`
+          # passed to the SLSA reusable workflow's `with:` block above.
+          # The reusable workflow's `outputs.provenance-name` has been a
+          # historical footgun (intermittent empty values); pin literally.
+          name: multiple.intoto.jsonl
           path: dist
 
       - name: List release payload
@@ -387,16 +391,31 @@ jobs:
           tag="${GITHUB_REF#refs/tags/}"
           echo "tag_name=${tag}" >> "$GITHUB_OUTPUT"
 
+          # Detect pre-release tags (rc/beta/alpha) so the draft is
+          # marked `prerelease=true`. Downstream workflows
+          # (docker-push, npm-publish, homebrew-bump) gate
+          # production-only side-effects (e.g. the docker `:latest`
+          # tag, formula bump) on this flag.
+          prerelease_flag=""
+          case "$tag" in
+            *-rc*|*-beta*|*-alpha*|*-pre*|*-dev*)
+              prerelease_flag="--prerelease"
+              echo "Tag ${tag} matches pre-release pattern; will mark draft as prerelease."
+              ;;
+          esac
+
           # If the draft already exists (re-run), reuse it. Otherwise
           # create with `--notes-from-tag` first; fall back to
           # `--generate-notes` for lightweight tags.
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" \
               --draft \
+              ${prerelease_flag} \
               --title "Cloak ${tag}" \
               --notes-from-tag \
               || gh release create "$tag" \
                 --draft \
+                ${prerelease_flag} \
                 --title "Cloak ${tag}" \
                 --generate-notes
           fi
@@ -433,7 +452,11 @@ jobs:
       - name: Download SLSA provenance (from provenance job)
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.provenance.outputs.provenance-name }}
+          # Hard-coded to match `provenance-name: multiple.intoto.jsonl`
+          # passed to the SLSA reusable workflow's `with:` block above.
+          # The reusable workflow's `outputs.provenance-name` has been a
+          # historical footgun (intermittent empty values); pin literally.
+          name: multiple.intoto.jsonl
           path: verify
 
       - name: List verify payload

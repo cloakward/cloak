@@ -42,9 +42,14 @@ jobs:
         uses: actions/checkout@v4
 
       # Strip the leading `v` so a tag of `v1.2.3` becomes `1.2.3`, and
-      # derive the major.minor floating tag (`1.2`). `latest` is added
-      # unconditionally because the `release.published` trigger only
-      # fires for non-prerelease tags by default in our release flow.
+      # derive the major.minor floating tag (`1.2`). `latest` is gated
+      # on `github.event.release.prerelease == false` so that
+      # release-candidate tags (e.g. `v0.9.0-rc1`) get the immutable
+      # `:VERSION` and `:MAJOR_MINOR` tags but do NOT advance `:latest`
+      # past production. release.yml passes `--prerelease` to
+      # `gh release create` whenever the tag matches `-rc*|-beta*|-alpha*`,
+      # so the `prerelease` bit on the published-release event is
+      # reliable for this gate.
       - name: Compute version tags
         id: ver
         run: |
@@ -67,6 +72,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Build the tag list. `:VERSION` and `:MAJOR_MINOR` always go;
+      # `:latest` is appended only when the release event flags this
+      # tag as a non-prerelease. A pre-release like v0.9.0-rc1 thus
+      # publishes `:0.9.0-rc1` and `:0.9` but does not move `:latest`.
+      - name: Compose tag list
+        id: tags
+        run: |
+          set -euo pipefail
+          tags="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.major_minor }}"
+          if [ "${{ github.event.release.prerelease }}" != "true" ]; then
+            tags="${tags}
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            echo "Including :latest tag (release is non-prerelease)."
+          else
+            echo "Skipping :latest tag (release is a pre-release)."
+          fi
+          {
+            echo "list<<EOF"
+            echo "${tags}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
@@ -75,10 +103,7 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.major_minor }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.tags.outputs.list }}
           provenance: true
           sbom: true
 
