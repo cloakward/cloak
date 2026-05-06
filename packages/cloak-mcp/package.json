@@ -14,9 +14,16 @@
   },
   "publishConfig": {
     "access": "public",
-    "registry": "https://registry.npmjs.org/",
-    "provenance": true
+    "registry": "https://registry.npmjs.org/"
   },
+  "files": [
+    "src/**/*.ts",
+    "scripts/check-no-http.mjs",
+    "tsconfig.json",
+    "package.json",
+    "README.md",
+    "LICENSE*"
+  ],
   "type": "module",
   "main": "src/server.ts",
   "bin": {

@@ -31,6 +31,16 @@ name: npm-publish
 on:
   release:
     types: [published]
+  # Manual dispatch lets us re-run against an existing release tag —
+  # useful when a publish failed for a transient/auth reason and we
+  # want to retry without un-publishing and re-publishing the GitHub
+  # release. Pass the release tag in the input.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Release tag to publish (e.g. v0.9.0-rc1)"
+        required: true
+        type: string
 
 permissions:
   id-token: write
@@ -44,12 +54,13 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          # Honor either the release event's tag or the manual dispatch input.
+          ref: ${{ github.event.release.tag_name || inputs.ref }}
 
       - name: Verify package.json version matches release tag
         working-directory: packages/cloak-mcp
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.ref }}
         run: |
           set -euo pipefail
           tag_version="${RELEASE_TAG#v}"
@@ -109,8 +120,13 @@ jobs:
           fi
 
           # Leg 2: classic NPM_TOKEN fallback (only if the secret is set).
-          if [ -n "${NPM_TOKEN:-}" ] && grep -qE '(^|[^0-9])403([^0-9]|$)|E403|Forbidden|EOTP|EAUTHIP|need auth' "$publish_log"; then
-            echo "==> OIDC leg returned 403/auth error; falling back to NPM_TOKEN"
+          # We also catch 404 because the first publish of a brand-new
+          # scoped package (no existing package on the registry, no
+          # trusted-publisher relationship yet) returns 404 PUT rather
+          # than 403. After that first publish the package exists and
+          # subsequent failures collapse to 403/auth errors.
+          if [ -n "${NPM_TOKEN:-}" ] && grep -qE '(^|[^0-9])40[34]([^0-9]|$)|E40[34]|Forbidden|EOTP|EAUTHIP|need auth|Not found|is not in this registry' "$publish_log"; then
+            echo "==> OIDC leg returned 403/404 auth error; falling back to NPM_TOKEN"
             export NODE_AUTH_TOKEN="$NPM_TOKEN"
             publish_log2=$(mktemp)
             # NOTE: --provenance is intentionally omitted here. The npm
@@ -125,17 +141,17 @@ jobs:
               echo "::warning::published @cloak-ward/mcp without --provenance via NPM_TOKEN; configure trusted publishing to restore provenance (#6)"
               exit 0
             fi
-            if grep -qE '(^|[^0-9])403([^0-9]|$)|E403|Forbidden' "$publish_log2"; then
-              echo "::error::npm publish failed: both OIDC and NPM_TOKEN legs returned 403; finish trusted-publisher config (cloakward/cloak#6) or rotate NPM_TOKEN"
+            if grep -qE '(^|[^0-9])40[34]([^0-9]|$)|E40[34]|Forbidden|Not found|is not in this registry' "$publish_log2"; then
+              echo "::error::npm publish failed: both OIDC and NPM_TOKEN legs hit 403/404; rotate NPM_TOKEN (granular access token with publish + bypass-2fa on @cloak-ward) or finish trusted-publisher config (cloakward/cloak#6)"
               exit 1
             fi
-            echo "::error::npm publish (NPM_TOKEN fallback) failed with status ${status2} for a reason other than 403"
+            echo "::error::npm publish (NPM_TOKEN fallback) failed with status ${status2} for a reason other than 403/404"
             exit "$status2"
           fi
 
-          if grep -qE '(^|[^0-9])403([^0-9]|$)|E403|Forbidden' "$publish_log"; then
-            echo "::error::npm publish failed: OIDC returned 403 and no NPM_TOKEN secret is configured; finish trusted-publisher config (cloakward/cloak#6) or set NPM_TOKEN"
+          if grep -qE '(^|[^0-9])40[34]([^0-9]|$)|E40[34]|Forbidden|Not found|is not in this registry' "$publish_log"; then
+            echo "::error::npm publish failed: OIDC returned 403/404 and no NPM_TOKEN secret is configured; finish trusted-publisher config (cloakward/cloak#6) or set NPM_TOKEN (granular access token with publish + bypass-2fa on @cloak-ward)"
             exit 1
           fi
-          echo "::error::npm publish failed with status ${status} for a reason other than 403"
+          echo "::error::npm publish failed with status ${status} for a reason other than 403/404"
           exit "$status"
