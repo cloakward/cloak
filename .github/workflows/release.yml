@@ -9,9 +9,9 @@
 # stays in draft and is never published.
 #
 # Action versions are pinned. Standing call from the maintainer:
-# macOS 13 (x86_64) is best-effort — if its runner doesn't allocate it
-# fails open via `continue-on-error`, but a downstream guard job fails
-# the workflow if BOTH macOS rows go missing.
+# macos-26-intel (x86_64) is best-effort — if its runner doesn't
+# allocate, the row fails open via `continue-on-error`, but a downstream
+# guard job fails the workflow if BOTH macOS rows go missing.
 #
 # Out of scope for this workstream:
 #   - npm publish
@@ -50,12 +50,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-26
             target: aarch64-apple-darwin
             platform: macos
             cross: false
             best_effort: false
-          - os: macos-13
+          - os: macos-26-intel
             target: x86_64-apple-darwin
             platform: macos
             cross: false
@@ -70,6 +70,16 @@ jobs:
             platform: linux
             cross: true
             best_effort: false
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            cross: true
+            best_effort: false
+
+    env:
+      # Pin the macOS deployment floor on the macos-26 (Tahoe) runners so
+      # the produced arm64/x86_64 tarballs still load on macOS 13+.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -178,8 +188,9 @@ jobs:
   # -------------------------------------------------------------------
   # 2. macOS coverage guard.
   #
-  # macOS 13 has `continue-on-error: true` above. This job runs after
-  # `build` and fails the workflow only when BOTH macOS rows are missing
+  # macos-26-intel has `continue-on-error: true` above (free-tier x86
+  # macOS runners can be slow to allocate). This job runs after `build`
+  # and fails the workflow only when BOTH macOS rows are missing
   # (indicates a deeper macOS regression, not a runner allocation blip).
   # Logs the dropped row clearly either way.
   # -------------------------------------------------------------------
@@ -207,10 +218,10 @@ jobs:
           [ -d "$x86" ] && x86_present=1
 
           if [ "$x86_present" -eq 0 ]; then
-            echo "::warning::macos-13 (x86_64-apple-darwin) tarball absent — best-effort row dropped, possibly runner allocation > 30 min."
+            echo "::warning::macos-26-intel (x86_64-apple-darwin) tarball absent — best-effort row dropped, possibly runner allocation > 30 min."
           fi
           if [ "$arm_present" -eq 0 ]; then
-            echo "::warning::macos-14 (aarch64-apple-darwin) tarball absent — required row failed."
+            echo "::warning::macos-26 (aarch64-apple-darwin) tarball absent — required row failed."
           fi
           if [ "$arm_present" -eq 0 ] && [ "$x86_present" -eq 0 ]; then
             echo "::error::Both macOS rows missing. Refusing to ship a release with zero macOS coverage."
