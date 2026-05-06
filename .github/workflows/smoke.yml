@@ -26,10 +26,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-26
             platform: macos
           - os: ubuntu-24.04
             platform: linux
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
       - uses: actions/checkout@v4
