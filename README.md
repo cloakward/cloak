@@ -61,6 +61,20 @@ Three processes, one trust boundary. The MCP shim translates MCP tool calls to I
 
 ---
 
+## Install for Claude Desktop (no terminal)
+
+If you only want to use Cloak inside Claude Desktop and would rather skip the build steps below:
+
+1. Download `Cloak-0.9.0-rc1-<your-platform>.dxt` from the [latest release](https://github.com/cloakward/cloak/releases).
+2. Drag the `.dxt` onto Claude Desktop's **Settings → Extensions** panel (or double-click it).
+3. On first activation, Cloak's setup wizard runs in a native dialog — it walks you through vault init, daemon launch, and the biometric / passphrase prompts. No terminal commands required.
+
+The `.dxt` bundles only the `cloak-mcp` shim. The privileged `cloak` CLI + `cloakd` daemon ship via Homebrew / `.deb` / install script — the wizard checks for them and points you at <https://cloakward.dev/install> if they're missing. Windows `.dxt` is deferred to v1.0.1.
+
+For everything else (development, server-side install, custom policy), use the quickstart below.
+
+---
+
 ## Quickstart (macOS)
 
 ```sh

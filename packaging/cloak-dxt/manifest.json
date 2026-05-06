@@ -1,0 +1,60 @@
+{
+  "mcpb_version": "0.1",
+  "name": "cloak",
+  "display_name": "Cloak",
+  "version": "0.9.0-rc1",
+  "description": "MCP-native secrets vault. The model never sees plaintext secrets.",
+  "long_description": "Cloak replaces the anti-pattern of pasting API keys into prompts with a hardened local daemon that never exposes raw secret material to the model. Agents call action-shaped MCP tools (sign_request, proxy_authenticated_http_request, mint_short_lived_token) and the daemon performs the privileged operation on the agent's behalf. Reveal is a deliberate biometric-gated CLI act, not a tool call.\n\nThis extension bundles the cloak-mcp shim. It requires the cloak CLI + cloakd daemon to be installed separately (see https://cloakward.dev/install). On first activation the extension runs `cloak setup` which walks you through vault init, daemon launch, and biometric/passphrase prompts via your OS-native dialog flow — no terminal commands required.",
+  "author": {
+    "name": "cloakward",
+    "url": "https://cloakward.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cloakward/cloak"
+  },
+  "homepage": "https://cloakward.dev",
+  "documentation": "https://github.com/cloakward/cloak#readme",
+  "support": "https://github.com/cloakward/cloak/issues",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "secrets",
+    "vault",
+    "security",
+    "claude",
+    "credentials"
+  ],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/binaries/cloak-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/server/binaries/cloak-mcp",
+      "args": [],
+      "env": {
+        "CLOAK_DXT_FIRST_RUN": "${__dirname}/server/first-run.js"
+      },
+      "platforms": {
+        "darwin": {
+          "command": "${__dirname}/server/binaries/cloak-mcp"
+        },
+        "linux": {
+          "command": "${__dirname}/server/binaries/cloak-mcp"
+        }
+      }
+    }
+  },
+  "tools": [
+    { "name": "vault.list", "description": "List secret names. Never returns secret values." },
+    { "name": "tool.sign_request", "description": "HMAC-SHA256 / AWS SigV4 signing. Returns only the signature header." },
+    { "name": "tool.proxy_http", "description": "Authenticated HTTP request via the daemon, allowlisted hosts only." },
+    { "name": "tool.mint_token", "description": "Short-lived token mint (e.g. AWS STS GetSessionToken)." },
+    { "name": "tool.query_audit", "description": "Filter the hash-chained audit log. Never returns secret values." },
+    { "name": "tool.policy_check", "description": "Dry-run a tool invocation against the policy engine." }
+  ],
+  "tools_generated": false,
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "linux"]
+  }
+}
