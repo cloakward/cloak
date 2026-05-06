@@ -46,22 +46,33 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Install cosign
+        if: steps.cred.outputs.skip == 'false'
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
+
       - name: Resolve release asset URLs and SHA256s
         if: steps.cred.outputs.skip == 'false'
         id: assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
           REPO: ${{ github.repository }}
+          COSIGN_EXPERIMENTAL: "1"
+          # Workflow ref must match release.yml on the tagged commit.
+          EXPECTED_ISSUER: "https://token.actions.githubusercontent.com"
+          EXPECTED_IDENTITY_REGEX: "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.event.release.tag_name }}$"
         run: |
           set -euo pipefail
 
           # Expected asset filenames produced by the release workflow.
-          # Pattern: cloak-<tag>-<target-triple>.tar.gz
-          MAC_ARM64="cloak-${TAG}-aarch64-apple-darwin.tar.gz"
-          MAC_X86_64="cloak-${TAG}-x86_64-apple-darwin.tar.gz"
-          LINUX_X86_64="cloak-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
-          # LINUX_ARM64="cloak-${TAG}-aarch64-unknown-linux-gnu.tar.gz"
+          # Pattern: cloak-<version>-<target-triple>.tar.gz (version without the leading "v").
+          MAC_ARM64="cloak-${VERSION}-aarch64-apple-darwin.tar.gz"
+          MAC_X86_64="cloak-${VERSION}-x86_64-apple-darwin.tar.gz"
+          LINUX_X86_64="cloak-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          # LINUX_ARM64="cloak-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
           # ^ uncomment when the release workflow produces a linux/arm64 tarball.
 
           # Fetch release JSON.
@@ -90,11 +101,35 @@ jobs:
 
           mkdir -p dl
 
+          # Download the tarball + its cosign signature/cert and verify the
+          # signature against the release.yml workflow identity BEFORE we
+          # compute the sha that gets baked into the Homebrew formula. This
+          # gives Homebrew users supply-chain parity with `gh release
+          # download` users (who would otherwise be the only ones to detect
+          # tampering via cosign verify-blob).
+          verify_blob() {
+            local url="$1"
+            local out
+            out="dl/$(basename "$url")"
+            curl -sSfL "$url"        -o "${out}"
+            curl -sSfL "${url}.sig"  -o "${out}.sig"
+            curl -sSfL "${url}.cert" -o "${out}.cert"
+            if ! cosign verify-blob \
+                --certificate "${out}.cert" \
+                --signature "${out}.sig" \
+                --certificate-oidc-issuer "$EXPECTED_ISSUER" \
+                --certificate-identity-regexp "$EXPECTED_IDENTITY_REGEX" \
+                "${out}" >&2; then
+              echo "::error::cosign verify-blob FAILED for $(basename "$url"); refusing to bump Homebrew formula."
+              exit 1
+            fi
+          }
+
           sha_of() {
             local url="$1"
             local out
             out="dl/$(basename "$url")"
-            curl -sSfL "$url" -o "$out"
+            verify_blob "$url"
             sha256sum "$out" | awk '{print $1}'
           }
 
