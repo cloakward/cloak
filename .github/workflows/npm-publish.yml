@@ -1,11 +1,13 @@
-# W9d - publish @cloak-ward/mcp to npm via OIDC trusted publishing.
+# W9d - publish @cloak-ward/mcp to npm.
 #
-# Fires when a GitHub Release is published. The workflow runs npm publish
-# from packages/cloak-mcp/ using a short-lived OIDC token (no static
-# NPM_TOKEN secret in this repo). Trusted-publishing config on npmjs.com
-# and the @cloak-ward scope are tracked at cloakward/cloak#6; until that lands
-# the publish step exits 0 with a warning so the GitHub release still
-# ships.
+# Fires when a GitHub Release is published. The workflow tries OIDC
+# trusted publishing first (npm 9.5+ picks up the token from
+# ACTIONS_ID_TOKEN_REQUEST_URL when `id-token: write` is set). If that
+# fails with a 403 — which is the normal state until npm exposes the
+# trusted-publishers UI for a fresh org/scope, see cloakward/cloak#6 —
+# the workflow falls back to a classic NPM_TOKEN repository secret so
+# v0.9.0-rc1 can ship today. Migrating fully to trusted publishing is
+# tracked in cloakward/cloak#6 as a v1.0.x follow-up.
 name: npm-publish
 
 on:
@@ -63,27 +65,52 @@ jobs:
         working-directory: packages/cloak-mcp
         run: bun build src/server.ts --compile --outfile dist/cloak-mcp
 
-      # Trusted publishing: npm 9.5+ picks up the OIDC token from
-      # ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN
-      # which the runner exposes when `id-token: write` is set. No
-      # NODE_AUTH_TOKEN is configured on purpose. Until the npm-side
-      # trusted-publisher policy is configured (cloakward/cloak#6),
-      # publish returns 403; we treat that as a non-fatal skip so the
-      # GitHub release still ships.
-      - name: Publish to npm (trusted publishing)
+      # Two-stage publish: OIDC trusted publishing first; classic
+      # NPM_TOKEN fallback if it fails with 403 (the normal state on
+      # a fresh org until npm exposes the trusted-publishers UI). If
+      # both legs fail, we treat 403 as a non-fatal skip so the GitHub
+      # release still ships.
+      - name: Publish to npm (OIDC trusted publishing, then NPM_TOKEN fallback)
         working-directory: packages/cloak-mcp
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set +e
           publish_log=$(mktemp)
+
+          # Leg 1: OIDC trusted publishing. No NODE_AUTH_TOKEN env, so
+          # npm reaches for the OIDC token from the GitHub Actions
+          # runner directly.
+          echo "==> Attempting OIDC trusted-publishing leg"
+          unset NODE_AUTH_TOKEN
           npm publish --provenance --access public 2>&1 | tee "$publish_log"
           status=${PIPESTATUS[0]}
-          set -e
           if [ "$status" -eq 0 ]; then
-            echo "npm publish succeeded"
+            echo "npm publish succeeded via OIDC trusted publishing"
             exit 0
           fi
+
+          # Leg 2: classic NPM_TOKEN fallback (only if the secret is set).
+          if [ -n "${NPM_TOKEN:-}" ] && grep -qE '(^|[^0-9])403([^0-9]|$)|E403|Forbidden|EOTP|EAUTHIP|need auth' "$publish_log"; then
+            echo "==> OIDC leg returned 403/auth error; falling back to NPM_TOKEN"
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+            publish_log2=$(mktemp)
+            npm publish --provenance --access public 2>&1 | tee "$publish_log2"
+            status2=${PIPESTATUS[0]}
+            if [ "$status2" -eq 0 ]; then
+              echo "npm publish succeeded via NPM_TOKEN fallback"
+              exit 0
+            fi
+            if grep -qE '(^|[^0-9])403([^0-9]|$)|E403|Forbidden' "$publish_log2"; then
+              echo "::warning::npm publish skipped: both OIDC and NPM_TOKEN returned 403 (see cloakward/cloak#6)"
+              exit 0
+            fi
+            echo "::error::npm publish (NPM_TOKEN fallback) failed with status ${status2} for a reason other than 403"
+            exit "$status2"
+          fi
+
           if grep -qE '(^|[^0-9])403([^0-9]|$)|E403|Forbidden' "$publish_log"; then
-            echo "::warning::npm publish skipped: trusted publishing not configured (#6)"
+            echo "::warning::npm publish skipped: OIDC returned 403 and no NPM_TOKEN secret is configured (see cloakward/cloak#6)"
             exit 0
           fi
           echo "::error::npm publish failed with status ${status} for a reason other than 403"
