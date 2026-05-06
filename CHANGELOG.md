@@ -4,12 +4,17 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+### Added
+- release tarballs include cloak-mcp at bin/cloak-mcp on macOS arm64, macOS x64, and Linux gnu amd64; brew/curl installs ship all three binaries with no npm dependency. (Linux musl + Linux arm64 ship cloak + cloakd only because bun --compile can't cross-target those triples — track in a follow-up issue if needed.)
+
 ### Fixed (release-engineering follow-ups, post-tag)
 - `release.yml` verify job now downloads the `signed-bundle` and SLSA provenance artifacts via `actions/download-artifact` instead of `gh release download`, because `gh release download` cannot see DRAFT releases (and the workflow design keeps the release in DRAFT until verify passes). The bytes verified are identical to those uploaded to the draft.
 - `release.yml` `gh release create` now passes `--prerelease` whenever the tag matches `-rc*|-beta*|-alpha*|-pre*|-dev*`, so downstream workflows can gate production-only side-effects on the release event's `prerelease` flag.
-- `docker-push.yml` no longer pushes `:latest` for pre-release tags. `:VERSION` and `:MAJOR_MINOR` always go; `:latest` is appended only when `github.event.release.prerelease == false`.
+- `docker-push.yml` no longer pushes `:latest` for pre-release tags. `:VERSION` and `:MAJOR_MINOR` always go; `:latest` is appended only when the tag is not a pre-release (derived from the tag-name pattern so it works on both `release.published` and `workflow_dispatch`).
 - `release.yml` SLSA-provenance download steps now hard-code the artifact name `multiple.intoto.jsonl` rather than reading it from `${{ needs.provenance.outputs.provenance-name }}`, defending against a historical SLSA-reusable-workflow footgun where that output is intermittently empty.
-- `packages/cloak-mcp/package.json` adds `repository`, `homepage`, `bugs`, and `publishConfig` fields so npm `--provenance` accepts the publish.
+- `packages/cloak-mcp/package.json` adds `repository`, `homepage`, `bugs`, and `publishConfig` (no provenance) fields, plus a `files` allowlist so the published tarball is ~30 KB instead of 192 MB.
+- `npm-publish.yml` now triggers the NPM_TOKEN fallback on 404 (not just 403), which is the response code for the very first publish of a brand-new scoped package; adds `workflow_dispatch` for manual re-runs.
+- `Dockerfile` cargo cache mounts are scoped per `TARGETARCH` so the linux/amd64 and linux/arm64 buildx builds don't race on a shared registry; `docker-push.yml` adds `workflow_dispatch` and derives the prerelease bit from the tag name (works on both triggers).
 
 ## [0.9.0-rc1] — 2026-05-06
 

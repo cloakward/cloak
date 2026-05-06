@@ -192,9 +192,12 @@ jobs:
             depends_on "libsodium"
 
             def install
-              bin.install "cloak"
-              bin.install "cloakd"
-              # cloak-mcp is published via npm; do not install here.
+              bin.install "bin/cloak"
+              bin.install "bin/cloakd"
+              # cloak-mcp is bundled in the macOS arm64, macOS x64, and Linux
+              # gnu amd64 tarballs (the platforms `bun --compile` can target
+              # from the release runners). Install if present.
+              bin.install "bin/cloak-mcp" if File.exist?("bin/cloak-mcp")
             end
 
             test do
