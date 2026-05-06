@@ -333,6 +333,89 @@ jobs:
           retention-days: 7
 
   # -------------------------------------------------------------------
+  # 3b. Cloak.dxt — Claude Desktop Extension package.
+  #
+  # Builds one .dxt per platform (macOS arm64/x64, Linux x64/arm64) by
+  # reusing the cloak-mcp binary from the same tarball the build job
+  # produced. No second build of cloak-mcp — the bytes inside the .dxt
+  # are byte-identical to those inside the signed tarball. Windows is
+  # deferred to v1.0.1.
+  #
+  # This job is intentionally NOT in `sign` — Cloak.dxt is a v0.9.0-rc1
+  # convenience asset, not part of the SLSA-signed core. v1.0.x will
+  # fold .dxt artifacts into the cosign + SLSA provenance scope.
+  # -------------------------------------------------------------------
+  dxt-package:
+    name: dxt package (${{ matrix.platform_tag }})
+    needs: [build, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            platform_tag: macos-arm64
+          - target: x86_64-apple-darwin
+            platform_tag: macos-x64
+          - target: x86_64-unknown-linux-gnu
+            platform_tag: linux-x64
+          - target: aarch64-unknown-linux-gnu
+            platform_tag: linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download tarball for ${{ matrix.target }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        id: dl
+        with:
+          name: tarball-${{ matrix.target }}
+          path: incoming
+
+      - name: Skip if upstream tarball missing (best-effort row)
+        if: steps.dl.outcome != 'success'
+        shell: bash
+        run: |
+          echo "::warning::tarball-${{ matrix.target }} not produced; skipping .dxt for ${{ matrix.platform_tag }}."
+          exit 0
+
+      - name: Extract cloak-mcp from tarball
+        if: steps.dl.outcome == 'success'
+        id: extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.sign.outputs.version }}"
+          stage="cloak-${version}-${{ matrix.target }}"
+          tarball="incoming/${stage}.tar.gz"
+          test -f "$tarball" || { echo "::error::expected $tarball"; exit 1; }
+          mkdir -p extracted
+          tar -C extracted -xzf "$tarball"
+          # PR #40 changed the tarball layout to nest binaries under `bin/`.
+          mcp="extracted/${stage}/bin/cloak-mcp"
+          test -f "$mcp" || { echo "::error::cloak-mcp not at $mcp inside tarball"; exit 1; }
+          chmod +x "$mcp"
+          echo "mcp=$mcp" >> "$GITHUB_OUTPUT"
+
+      - name: Build .dxt
+        if: steps.dl.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.sign.outputs.version }}"
+          ./scripts/build-dxt.sh "$version" "${{ matrix.platform_tag }}" "${{ steps.extract.outputs.mcp }}"
+
+      - name: Upload .dxt artifact
+        if: steps.dl.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxt-${{ matrix.platform_tag }}
+          path: dist/Cloak-*.dxt
+          if-no-files-found: error
+          retention-days: 7
+
+  # -------------------------------------------------------------------
   # 4. SLSA L3 provenance via the official reusable workflow.
   # Pinned to the v2.0.0 release tag (semver). The generator expects
   # the base64-encoded sha256-list output from the sign job.
@@ -362,7 +445,7 @@ jobs:
   # -------------------------------------------------------------------
   release:
     name: draft release
-    needs: [sign, provenance]
+    needs: [sign, provenance, dxt-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -387,6 +470,21 @@ jobs:
           # historical footgun (intermittent empty values); pin literally.
           name: multiple.intoto.jsonl
           path: dist
+
+      - name: Download .dxt artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dxt-incoming
+          pattern: dxt-*
+
+      - name: Flatten .dxt artifacts into dist/
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d dxt-incoming ]; then
+            find dxt-incoming -type f -name '*.dxt' -exec cp {} dist/ \;
+          fi
+          find dist -maxdepth 1 -type f -name '*.dxt' -print || true
 
       - name: List release payload
         shell: bash
