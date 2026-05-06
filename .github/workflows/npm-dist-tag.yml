@@ -1,0 +1,85 @@
+# One-shot dist-tag operations on @cloak-ward/mcp.
+#
+# npm requires 2FA-or-bypass-token for dist-tag changes regardless of
+# whether the maintainer has 2FA configured locally. Running the
+# operation here uses the repo's NPM_TOKEN secret (a granular access
+# token with bypass-2FA enabled), so the maintainer does not need to
+# wrangle tokens or OTP codes on their laptop.
+#
+# Trigger via GitHub UI (Actions → npm-dist-tag → Run workflow) or:
+#   gh workflow run npm-dist-tag.yml --repo cloakward/cloak \
+#     -f action=add -f version=0.9.0-rc1 -f tag=beta
+#   gh workflow run npm-dist-tag.yml --repo cloakward/cloak \
+#     -f action=rm -f tag=latest
+#
+# `version` is required for `add` and ignored for `rm` (npm's CLI uses
+# only the package name + dist-tag for removal).
+
+name: npm-dist-tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "add | rm"
+        required: true
+        type: choice
+        options:
+          - add
+          - rm
+      tag:
+        description: "Dist-tag (e.g. beta, latest, next)"
+        required: true
+        type: string
+      version:
+        description: "Package version (e.g. 0.9.0-rc1) — required for `add`, ignored for `rm`"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  dist-tag:
+    name: ${{ inputs.action }} ${{ inputs.tag }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Run dist-tag op
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          ACTION: ${{ inputs.action }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is not configured on this repo."
+            exit 1
+          fi
+          case "$ACTION" in
+            add)
+              if [ -z "${VERSION:-}" ]; then
+                echo "::error::version input is required for `add`"
+                exit 1
+              fi
+              echo "==> npm dist-tag add @cloak-ward/mcp@${VERSION} ${TAG}"
+              npm dist-tag add "@cloak-ward/mcp@${VERSION}" "${TAG}"
+              ;;
+            rm)
+              echo "==> npm dist-tag rm @cloak-ward/mcp ${TAG}"
+              npm dist-tag rm "@cloak-ward/mcp" "${TAG}"
+              ;;
+            *)
+              echo "::error::unknown action: ${ACTION}"
+              exit 1
+              ;;
+          esac
+          echo "---"
+          echo "Current dist-tags for @cloak-ward/mcp:"
+          npm dist-tag ls "@cloak-ward/mcp"

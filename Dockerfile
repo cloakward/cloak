@@ -61,15 +61,16 @@ COPY . .
 # invocation; the workspace `Cargo.lock` is committed so we get a
 # reproducible build.
 #
-# Cache mounts are scoped per `TARGETARCH` so the linux/amd64 and
-# linux/arm64 buildx builds — which `docker buildx` runs concurrently
-# by default — don't race on a shared registry/target cache. Without
-# the per-arch `id=`, both arches try to extract the same crate
-# tarball into the same path and one fails with `File exists (os
-# error 17)` mid-download. The default `--mount=type=cache` sharing
-# mode is `shared`, which is the bug source.
-RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-target-${TARGETARCH},target=/src/target \
+# Cache mounts use `sharing=locked` so the linux/amd64 and linux/arm64
+# buildx builds — which `docker buildx` runs concurrently by default —
+# serialize access to the cache instead of racing. The earlier attempt
+# to partition by `id=cargo-{registry,target}-${TARGETARCH}` cleared
+# the EEXIST race but somehow interfered with rustc's discovery of the
+# target std libs (`error[E0463]: can't find crate for core`). Locked
+# sharing keeps a single shared cache and mutex-serializes the writes
+# — marginally slower than parallel but rock-solid for cross-compile.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
     set -eux; \
     RUST_TARGET="$(cat /tmp/rust-target)"; \
     cargo build --release \
