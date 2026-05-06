@@ -1,6 +1,6 @@
 {
   "name": "@cloak-ward/mcp",
-  "version": "0.1.0",
+  "version": "0.9.0-rc1",
   "description": "Cloak MCP server — model surface that never sees plaintext secrets.",
   "license": "Apache-2.0",
   "type": "module",
