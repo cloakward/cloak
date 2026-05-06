@@ -559,7 +559,11 @@ async fn dispatch(ctx: &Arc<DaemonCtx>, peer: &PeerInfo, conn_id: u64, req: Requ
             return Response::err(id, rpc_error("session-expired", "missing session token"));
         }
     };
-    let session = match ctx.sessions.validate(token, conn_id).await {
+    let session = match ctx
+        .sessions
+        .validate_with_identity(token, conn_id, peer.identity.as_ref())
+        .await
+    {
         Ok(rec) => rec,
         Err(_) => {
             return Response::err(
