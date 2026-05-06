@@ -48,6 +48,38 @@ fn default_socket_path() -> PathBuf {
 
 pub fn run(_ctx: &Context) -> Result<()> {
     let sock = default_socket_path();
+
+    // Before sending any passphrase: verify the socket file is actually owned by us
+    // and not group/world-writable. Defense against a same-UID stale-socket race
+    // where a malicious process unlinks /tmp/cloakd-$UID.sock after cloakd crashes
+    // and binds its own listener at the same path.
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(&sock).map_err(|e| {
+            SystemError::boxed(format!(
+                "could not stat cloakd socket {}: {e}",
+                sock.display()
+            ))
+        })?;
+        let mode = meta.mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(SystemError::boxed(format!(
+                "cloakd socket {} has unsafe mode {:o} (group/world bits set); refusing to send passphrase",
+                sock.display(),
+                mode
+            )));
+        }
+        let our_uid = unsafe { libc::geteuid() };
+        if meta.uid() != our_uid {
+            return Err(SystemError::boxed(format!(
+                "cloakd socket {} is owned by uid {} not us ({}); refusing to send passphrase",
+                sock.display(),
+                meta.uid(),
+                our_uid
+            )));
+        }
+    }
+
     let mut stream = UnixStream::connect(&sock).map_err(|e| {
         SystemError::boxed(format!(
             "could not connect to cloakd at {}: {e} (is the daemon running?)",
