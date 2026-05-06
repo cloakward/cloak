@@ -13,8 +13,11 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 - `docker-push.yml` no longer pushes `:latest` for pre-release tags. `:VERSION` and `:MAJOR_MINOR` always go; `:latest` is appended only when the tag is not a pre-release (derived from the tag-name pattern so it works on both `release.published` and `workflow_dispatch`).
 - `release.yml` SLSA-provenance download steps now hard-code the artifact name `multiple.intoto.jsonl` rather than reading it from `${{ needs.provenance.outputs.provenance-name }}`, defending against a historical SLSA-reusable-workflow footgun where that output is intermittently empty.
 - `packages/cloak-mcp/package.json` adds `repository`, `homepage`, `bugs`, and `publishConfig` (no provenance) fields, plus a `files` allowlist so the published tarball is ~30 KB instead of 192 MB.
-- `npm-publish.yml` now triggers the NPM_TOKEN fallback on 404 (not just 403), which is the response code for the very first publish of a brand-new scoped package; adds `workflow_dispatch` for manual re-runs.
-- `Dockerfile` cargo cache mounts are scoped per `TARGETARCH` so the linux/amd64 and linux/arm64 buildx builds don't race on a shared registry; `docker-push.yml` adds `workflow_dispatch` and derives the prerelease bit from the tag name (works on both triggers).
+- `npm-publish.yml` triggers the NPM_TOKEN fallback on 404 (not just 403), the response code for the very first publish of a brand-new scoped package; adds `workflow_dispatch` for manual re-runs.
+- `Dockerfile` cache mounts use `sharing=locked` on a single shared cargo cache. An earlier attempt to partition by `id=cargo-{registry,target}-${TARGETARCH}` cleared the EEXIST race between the linux/amd64 and linux/arm64 buildx invocations but somehow interfered with rustc's discovery of the target std libs (`error[E0463]: can't find crate for core`); locked sharing serializes access on a single cache.
+- `docker-push.yml` adds `workflow_dispatch` for manual re-runs against a release tag; derives the prerelease bit from the tag-name pattern so the `:latest` gate works on both `release.published` and `workflow_dispatch`.
+- `npm-publish.yml` derives the npm dist-tag from the tag pattern: prereleases (`-rc*` / `-beta*` / `-alpha*` / `-pre*` / `-dev*`) ship to the `beta` dist-tag; stable tags ship to `latest`. So `npm install @cloak-ward/mcp` (no `@beta`) does not pull a pre-release.
+- New `npm-dist-tag.yml` workflow: server-side dist-tag operations using the repo's `NPM_TOKEN` secret. Lets the operator move the dist-tag of an already-published version (e.g. demote rc1 from `latest` to `beta`) without having to wrangle 2FA / token state on their laptop.
 
 ## [0.9.0-rc1] — 2026-05-06
 

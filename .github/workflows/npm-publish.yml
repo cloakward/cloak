@@ -103,16 +103,27 @@ jobs:
         working-directory: packages/cloak-mcp
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Resolve dist-tag from the release/dispatch tag pattern.
+          # Pre-release tags (-rc / -beta / -alpha / -pre / -dev) ship
+          # to the `beta` dist-tag so `npm install @cloak-ward/mcp`
+          # (no @<tag>) does NOT pull a pre-release. Stable tags ship
+          # to `latest` (npm's default).
+          REF_NAME: ${{ github.event.release.tag_name || inputs.ref }}
         run: |
           set +e
           publish_log=$(mktemp)
+          case "$REF_NAME" in
+            *-rc*|*-beta*|*-alpha*|*-pre*|*-dev*) NPM_DIST_TAG="beta" ;;
+            *) NPM_DIST_TAG="latest" ;;
+          esac
+          echo "Resolved npm dist-tag: ${NPM_DIST_TAG}"
 
           # Leg 1: OIDC trusted publishing. No NODE_AUTH_TOKEN env, so
           # npm reaches for the OIDC token from the GitHub Actions
           # runner directly. Provenance is only attachable on this leg.
           echo "==> Attempting OIDC trusted-publishing leg"
           unset NODE_AUTH_TOKEN
-          npm publish --provenance --access public 2>&1 | tee "$publish_log"
+          npm publish --provenance --access public --tag "$NPM_DIST_TAG" 2>&1 | tee "$publish_log"
           status=${PIPESTATUS[0]}
           if [ "$status" -eq 0 ]; then
             echo "npm publish succeeded via OIDC trusted publishing"
@@ -134,7 +145,7 @@ jobs:
             # static NODE_AUTH_TOKEN is rejected with a 403 if you ask
             # for provenance (npm 9.5+). So this leg ships WITHOUT
             # provenance and we surface that fact via ::warning:: below.
-            npm publish --access public 2>&1 | tee "$publish_log2"
+            npm publish --access public --tag "$NPM_DIST_TAG" 2>&1 | tee "$publish_log2"
             status2=${PIPESTATUS[0]}
             if [ "$status2" -eq 0 ]; then
               echo "npm publish succeeded via NPM_TOKEN fallback"
