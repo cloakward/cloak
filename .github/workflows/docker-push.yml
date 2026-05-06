@@ -14,6 +14,15 @@ name: docker-push
 on:
   release:
     types: [published]
+  # Manual dispatch for re-running against an existing release tag
+  # (e.g. after a transient buildx failure). Same pattern as
+  # npm-publish.yml's workflow_dispatch.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Release tag to build & push (e.g. v0.9.0-rc1)"
+        required: true
+        type: string
 
 concurrency:
   group: docker-push-${{ github.ref }}
@@ -40,6 +49,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Honor either the release event's tag or the manual dispatch input.
+          ref: ${{ github.event.release.tag_name || inputs.ref }}
 
       # Strip the leading `v` so a tag of `v1.2.3` becomes `1.2.3`, and
       # derive the major.minor floating tag (`1.2`). `latest` is gated
@@ -52,12 +64,26 @@ jobs:
       # reliable for this gate.
       - name: Compute version tags
         id: ver
+        env:
+          # Resolve tag from either the release event or the
+          # workflow_dispatch input. GITHUB_REF_NAME is the branch on
+          # workflow_dispatch (e.g. `beta`), so we cannot use it.
+          REF_NAME: ${{ github.event.release.tag_name || inputs.ref }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${REF_NAME#v}"
           MAJOR_MINOR="$(echo "$TAG" | awk -F. '{print $1"."$2}')"
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
           echo "major_minor=$MAJOR_MINOR" >> "$GITHUB_OUTPUT"
+          # Derive `is_prerelease` from the tag name pattern (works
+          # for both release events AND workflow_dispatch).
+          # github.event.release.prerelease is empty on dispatch, so
+          # we cannot rely on it alone.
+          case "$REF_NAME" in
+            *-rc*|*-beta*|*-alpha*|*-pre*|*-dev*) is_pre=true ;;
+            *) is_pre=false ;;
+          esac
+          echo "is_prerelease=$is_pre" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -73,21 +99,22 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Build the tag list. `:VERSION` and `:MAJOR_MINOR` always go;
-      # `:latest` is appended only when the release event flags this
-      # tag as a non-prerelease. A pre-release like v0.9.0-rc1 thus
-      # publishes `:0.9.0-rc1` and `:0.9` but does not move `:latest`.
+      # `:latest` is appended only when the tag is a non-prerelease,
+      # as derived from the tag name pattern in `Compute version tags`
+      # above. A pre-release like v0.9.0-rc1 thus publishes `:0.9.0-rc1`
+      # and `:0.9` but does not move `:latest`.
       - name: Compose tag list
         id: tags
         run: |
           set -euo pipefail
           tags="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
           ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.major_minor }}"
-          if [ "${{ github.event.release.prerelease }}" != "true" ]; then
+          if [ "${{ steps.ver.outputs.is_prerelease }}" != "true" ]; then
             tags="${tags}
           ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-            echo "Including :latest tag (release is non-prerelease)."
+            echo "Including :latest tag (tag is non-prerelease)."
           else
-            echo "Skipping :latest tag (release is a pre-release)."
+            echo "Skipping :latest tag (tag is a pre-release)."
           fi
           {
             echo "list<<EOF"
