@@ -1,5 +1,5 @@
 {
-  "name": "@cloak/mcp",
+  "name": "@cloak-ward/mcp",
   "version": "0.1.0",
   "description": "Cloak MCP server — model surface that never sees plaintext secrets.",
   "license": "Apache-2.0",

@@ -1,9 +1,9 @@
-# W9d - publish @cloak/mcp to npm via OIDC trusted publishing.
+# W9d - publish @cloak-ward/mcp to npm via OIDC trusted publishing.
 #
 # Fires when a GitHub Release is published. The workflow runs npm publish
 # from packages/cloak-mcp/ using a short-lived OIDC token (no static
 # NPM_TOKEN secret in this repo). Trusted-publishing config on npmjs.com
-# and the @cloak scope are tracked at cloakward/cloak#6; until that lands
+# and the @cloak-ward scope are tracked at cloakward/cloak#6; until that lands
 # the publish step exits 0 with a warning so the GitHub release still
 # ships.
 name: npm-publish
@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   publish:
-    name: publish @cloak/mcp
+    name: publish @cloak-ward/mcp
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout release tag
