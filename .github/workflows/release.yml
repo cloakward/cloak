@@ -136,6 +136,14 @@ jobs:
         run: cross build --release --workspace --target ${{ matrix.target }}
 
       - name: cloak-mcp single-binary build
+        # `bun build --compile` embeds the runner host's bun runtime (glibc-linked,
+        # host arch). Skip on:
+        #   * x86_64-unknown-linux-musl — bun runtime is glibc-linked, won't run on
+        #     a pure-musl userspace.
+        #   * aarch64-unknown-linux-gnu — runs on x86_64 host; bun --compile cannot
+        #     cross-target arm64.
+        # These two tarballs ship cloak + cloakd only.
+        if: ${{ matrix.target != 'x86_64-unknown-linux-musl' && matrix.target != 'aarch64-unknown-linux-gnu' }}
         working-directory: packages/cloak-mcp
         run: |
           bun install --frozen-lockfile
@@ -149,14 +157,17 @@ jobs:
           version="${{ steps.meta.outputs.version }}"
           target="${{ matrix.target }}"
           stage="cloak-${version}-${target}"
-          mkdir -p "dist/${stage}"
+          mkdir -p "dist/${stage}/bin"
 
-          cp "target/${target}/release/cloak" "dist/${stage}/"
-          cp "target/${target}/release/cloakd" "dist/${stage}/"
-          cp "packages/cloak-mcp/dist/cloak-mcp" "dist/${stage}/"
+          cp "target/${target}/release/cloak"  "dist/${stage}/bin/"
+          cp "target/${target}/release/cloakd" "dist/${stage}/bin/"
+          # cloak-mcp ships only on platforms where the bun --compile build ran.
+          if [ -f "packages/cloak-mcp/dist/cloak-mcp" ]; then
+            cp "packages/cloak-mcp/dist/cloak-mcp" "dist/${stage}/bin/"
+          fi
           # Self-describing tarball: include README + license + changelog
-          # if present. Missing files are non-fatal so the workflow
-          # doesn't break when these are renamed.
+          # if present at top level. Missing files are non-fatal so the
+          # workflow doesn't break when these are renamed.
           for f in README.md LICENSE LICENSE-APACHE LICENSE-MIT SECURITY.md CHANGELOG.md; do
             if [ -f "$f" ]; then cp "$f" "dist/${stage}/"; fi
           done
