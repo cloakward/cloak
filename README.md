@@ -6,7 +6,7 @@ Cloak replaces the prevailing anti-pattern of pasting API keys into prompts (or 
 
 Agents call action-shaped MCP tools — `sign_request`, `proxy_authenticated_http_request`, `mint_short_lived_token` — and the daemon performs the privileged operation on the agent's behalf. Reveal is a deliberate, biometric-gated CLI act, not a tool call.
 
-This drop is **v1.0**: the load-bearing security invariants are intact, the post-v0.1 work has landed (real AWS SigV4/STS, Linux Secret Service pepper, cross-platform CI matrix, cosign-signed SLSA L3 releases), and Windows + biometric polkit + recovery + rotation handlers are scoped to v1.0.1 / v1.x.
+This drop is **v0.9.0-rc1**, the first release candidate for v1.0: the load-bearing security invariants are intact, the post-v0.1 work has landed (real AWS SigV4/STS, Linux Secret Service pepper, cross-platform CI matrix, cosign-signed SLSA L3 releases), and Windows + biometric polkit + recovery + rotation handlers are scoped to v1.0.1 / v1.x.
 
 ---
 
@@ -57,7 +57,7 @@ Plus `scripts/smoke-test.sh` exercises the full real flow: build → daemon up �
                               └─────────────────┘
 ```
 
-Three processes, one trust boundary. The MCP shim translates MCP tool calls to IPC requests; it imports zero HTTP clients (CI grep gate enforces). The daemon owns the vault, the policy, the audit log, and **all** outbound HTTP. The CLI reads/writes the vault file directly today (v0.1) and pushes the in-memory unlock state to the daemon via `cloak daemon-unlock`. v1.x will move the CLI fully onto IPC.
+Three processes, one trust boundary. The MCP shim translates MCP tool calls to IPC requests; it imports zero HTTP clients (CI grep gate enforces). The daemon owns the vault, the policy, the audit log, and **all** outbound HTTP. The CLI reads/writes the vault file directly today (v0.9.x) and pushes the in-memory unlock state to the daemon via `cloak daemon-unlock`. v1.x will move the CLI fully onto IPC.
 
 ---
 
@@ -73,7 +73,11 @@ cd packages/cloak-mcp && bun install && bun build src/server.ts --compile --outf
 
 # 2. Initialize the vault. Argon2id autotunes (≤500ms target).
 ./target/release/cloak init
+```
 
+> **⚠️ Back up your passphrase before adding any secret.** Cloak v0.9.0-rc1 has no recovery mechanism: if you lose your passphrase, every secret in the vault is permanently unrecoverable. Store it in a password manager or out-of-band backup. BIP-39 24-word recovery is planned for v1.x.
+
+```sh
 # 3. Add a secret. The value is read with echo OFF.
 ./target/release/cloak add OPENAI_API_KEY
 
@@ -82,7 +86,11 @@ cd packages/cloak-mcp && bun install && bun build src/server.ts --compile --outf
 
 # 5. Unlock the daemon's in-memory vault state.
 ./target/release/cloak daemon-unlock
+```
 
+> Note: re-run `cloak daemon-unlock` after every reboot, daemon restart, or launchd respawn — `cloakd` holds the master key only in memory.
+
+```sh
 # 6. Wire into Claude Desktop:
 # Add to ~/Library/Application Support/Claude/claude_desktop_config.json:
 # {
@@ -99,13 +107,13 @@ For a fully automated end-to-end demo run `./scripts/smoke-test.sh` — it does 
 
 ---
 
-## What's in v1.0
+## What's in v0.9.0-rc1 (release-candidate scope for v1.0)
 
 ### Implemented
 - **Crypto:** libsodium-only via `libsodium-sys-stable`. XChaCha20-Poly1305-IETF AEAD; Argon2id keyed mode with autotune (HMAC-SHA256(pepper, passphrase) → `crypto_pwhash`); per-record subkeys via `crypto_kdf_derive_from_key`. `Secret<T>` zeroize-on-drop everywhere.
 - **Vault:** SQLite WAL, STRICT tables, master-key wrapping with AAD `cloak.master.v1`, per-record AAD binding `(name || created_unix || version)`. Monotonic counter rejects rollback. macOS Keychain pepper, freedesktop Secret Service on Linux (W7), or `CLOAK_PEPPER_FILE` fallback.
 - **CLI:** `init`, `add`, `set`, `get`, `list`, `rm`, `show` (Touch ID gated, TTY-only), `status`, `completions`, `daemon-unlock`. `CLOAK_PASSPHRASE` test-only escape hatch with stderr warning.
-- **Daemon (`cloakd`):** Tokio UDS listener with mode 0600, peer-credential auth (`SOL_LOCAL`/`LOCAL_PEERPID` + `getpeereid` on macOS, `SO_PEERCRED` on Linux) and SHA-256 of the peer binary as a v1.0 code-signature surrogate, session tokens bound to (peer_pid, basename, conn_id) with constant-time compare, signal-driven graceful shutdown, stale-socket cleanup with probe-connect.
+- **Daemon (`cloakd`):** Tokio UDS listener with mode 0600, peer-credential auth (`SOL_LOCAL`/`LOCAL_PEERPID` + `getpeereid` on macOS, `SO_PEERCRED` on Linux) and SHA-256 of the peer binary recorded as a code-signature audit field (true mach-o code-directory matching is a v1.0.1 deliverable), session tokens bound to (peer_pid, basename, conn_id) with constant-time compare, signal-driven graceful shutdown, stale-socket cleanup with probe-connect.
 - **IPC:** length-prefixed JSON, 4 MiB cap, typed error code map (`peer-not-trusted`, `vault-locked`, `policy-denied`, `aead-failure`, `audit-broken`, etc.).
 - **MCP server:** Bun-compiled single binary speaking the official `@modelcontextprotocol/sdk`, six action-shaped tools, zod-validated args, **zero outbound HTTP** (`packages/cloak-mcp/scripts/check-no-http.mjs` grep gate enforces).
 - **Privileged handlers:** `tool.sign_request` (HMAC-SHA256 + real AWS SigV4 via `aws-sigv4`, KAT-verified), `tool.proxy_http` (reqwest+rustls + allowed-hosts + auth-header strip), `tool.mint_token` (real AWS STS via `aws-sdk-sts`), `tool.query_audit`. Policy is checked **before** vault read — denied calls never decrypt.
@@ -119,9 +127,9 @@ For a fully automated end-to-end demo run `./scripts/smoke-test.sh` — it does 
 - `mint_token` for `github-app` / `gitlab-pat` still returns a typed not-supported error (still audited).
 
 ### Deferred from the 8-week plan
-- Linux desktop pepper now uses freedesktop Secret Service (W7); Linux biometric (polkit) is still a stub in v1.0.
-- v1.0 ships **macOS + Linux only — Windows lands in v1.0.1**, see [issue #2](https://github.com/cloakward/cloak/issues/2).
-- Cosign keyless + SLSA L3 provenance ship in v1.0 (W9b). SignPath OV signing (Windows) is v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)).
+- Linux desktop pepper now uses freedesktop Secret Service (W7); Linux biometric is enforced via polkit (action `dev.cloak.show-secret`, see `scripts/polkit/dev.cloak.policy`).
+- v0.9.0-rc1 ships **macOS + Linux only — Windows lands in v1.0.1**, see [issue #2](https://github.com/cloakward/cloak/issues/2).
+- Cosign keyless + SLSA L3 provenance ship in v0.9.0-rc1 (W9b). SignPath OV signing (Windows) is v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)).
 - Apple notarization is a v1.x deliverable (see "macOS Gatekeeper" below and `docs/QUICKSTART.md`).
 - BIP-39 24-word recovery, `cloak export/import`, `.env` import, `cloak rotate NAME`.
 - Mintlify docs site, fuzz harnesses, full property-test KAT vector suite, chaos tests.
@@ -183,7 +191,7 @@ See `docs/THREAT_MODEL.md` for the full adversary model, `docs/IPC_WIRE.md` for 
 
 ## A note on macOS Gatekeeper
 
-Cloak v1.0 binaries are not Apple-notarized. If you download a release artifact (rather than building from source), macOS Gatekeeper will block it until you clear the quarantine attribute:
+v0.9.0-rc1 (and v1.0 going forward) binaries are not Apple-notarized. If you download a release artifact (rather than building from source), macOS Gatekeeper will block it until you clear the quarantine attribute:
 
 ```sh
 xattr -d com.apple.quarantine ./cloak ./cloakd ./cloak-mcp

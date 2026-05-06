@@ -1,6 +1,6 @@
-# Cloak Quickstart (v1.0, macOS)
+# Cloak Quickstart (v0.9.0-rc1, macOS)
 
-> v1.0 ships macOS + Linux. Windows is deferred to v1.0.1
+> v0.9.0-rc1 (the first release candidate for v1.0) ships macOS + Linux. Windows is deferred to v1.0.1
 > ([issue #3](https://github.com/cloakward/cloak/issues/3)). On Linux the
 > desktop pepper uses freedesktop Secret Service (W7) and `cloak show`
 > gates the reveal on polkit (`dev.cloak.show-secret`; install
@@ -11,13 +11,13 @@
 
 ## Gatekeeper note (macOS, unsigned dev builds)
 
-Cloak v1.0 binaries are not Apple-notarized. After downloading a release artifact, macOS Gatekeeper will refuse to run it until you clear the quarantine attribute:
+Cloak v0.9.0-rc1 (and v1.0 going forward) binaries are not Apple-notarized. After downloading a release artifact, macOS Gatekeeper will refuse to run it until you clear the quarantine attribute:
 
 ```sh
 xattr -d com.apple.quarantine ./cloak ./cloakd ./cloak-mcp
 ```
 
-Apple notarization is a v1.x deliverable. The cosign + SLSA L3 attestations on every release are sufficient to verify that the binary you have is the one CI built; notarization adds Apple's pre-execution scan on top of that. We chose to ship without notarization for v1.0 to avoid the Apple Developer Program enrollment and signing-cert renewal treadmill while the project is small.
+Apple notarization is a v1.x deliverable. The cosign + SLSA L3 attestations on every release are sufficient to verify that the binary you have is the one CI built; notarization adds Apple's pre-execution scan on top of that. We chose to ship without notarization for v0.9.0-rc1 to avoid the Apple Developer Program enrollment and signing-cert renewal treadmill while the project is small.
 
 If you build from source there is no Gatekeeper friction — your local toolchain produces an ad-hoc-signed binary that runs immediately.
 
@@ -45,6 +45,8 @@ tail -f ~/Library/Logs/cloak/cloakd.err.log
 
 ## 3. Initialize the vault
 
+> **⚠️ Back up your passphrase before adding any secret.** Cloak v0.9.0-rc1 has no recovery mechanism: if you lose your passphrase, every secret in the vault is permanently unrecoverable. Store it in a password manager or out-of-band backup. BIP-39 24-word recovery is planned for v1.x.
+
 ```sh
 cloak init                  # prompts for passphrase, autotunes Argon2id
 cloak status                # vault path, record count, KDF params
@@ -64,7 +66,8 @@ cloak show OPENAI_API_KEY   # Touch ID prompt → prints to TTY
 
 `cloak init` / `cloak add` operate on the vault file directly. The running
 `cloakd` (the process MCP talks to) keeps its master key in memory and
-must be told the passphrase exactly once per boot:
+must be told the passphrase **once per `cloakd` start** — that is, after every
+reboot, manual `launchctl unload/load`, or daemon crash:
 
 ```sh
 cloak daemon-unlock              # prompts for the passphrase, pushes it

@@ -4,9 +4,18 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
-## [0.9.0-rc1] — 2026-05-05
+## [0.9.0-rc1] — 2026-05-06
 
-First release candidate. macOS arm64/x86_64 + Linux glibc/musl. Windows is deferred to v1.0.1 (#2). All 11 v1.0 critical-path workstreams (W1, W3–W10, W9b/c/d/e/f) are on `beta`. Linux pidfd peer-exit watcher is implemented but disabled at the daemon call site for this RC; re-enable tracked in #21. See sections below for the cumulative changes since v0.1.
+First release candidate for v1.0. Ships macOS arm64/x86_64 + Linux glibc/musl; Windows is deferred to v1.0.1 ([#2](https://github.com/cloakward/cloak/issues/2)). All 11 v1.0 critical-path workstreams (W1, W3–W10, W9b/c/d/e/f) are on `beta`.
+
+### Known caveats
+
+- **Linux pidfd peer-exit watcher** is implemented in source but disabled at the daemon's `serve_conn` call site for this RC; the captured pidfd path tripped a tokio `AsyncFd` registration error on the GitHub Actions runner kernel that we couldn't reproduce locally. Re-enable tracked in [#21](https://github.com/cloakward/cloak/issues/21). macOS kqueue + audit-token path is fully wired and gives full A8 coverage; Linux falls back to socket-FIN-driven session revocation, same surface as v0.1.
+- **npm publish two-leg fallback.** OIDC trusted publishing is preferred and attaches `--provenance`. If the npm-side trusted-publisher relationship for `@cloak-ward/mcp` is not yet configured (tracked in [#6](https://github.com/cloakward/cloak/issues/6)), the workflow falls back to a static `NPM_TOKEN` and publishes WITHOUT provenance, with a `::warning::` flagging the gap. Migration to trusted-publishing-only is a v1.0.x follow-up.
+- **macos-13 (x86_64) release row is best-effort.** A 30-min runner-allocation timeout drops the row with a workflow warning instead of failing the release. macOS arm64 always ships; macOS x86_64 ships when GitHub allocates a free-tier runner in time.
+- **Biometric (Touch ID / polkit) is enforced by the `cloak` CLI binary, not by `cloakd`.** A same-UID attacker who calls the daemon directly via the IPC socket — bypassing the CLI — gets through with no biometric prompt. v1.0.1 moves the LocalAuthentication / polkit calls into `cloakd` itself so the prompt fires regardless of which peer requested `vault.show`.
+- **Rollback counter lives in the vault file only**, not the OS keychain. Read-side rollback (`cloak show` against a restored older snapshot) is not detected; write-side is. v1.0.1 mirrors the counter into the keychain so reads also detect rollback.
+- **No passphrase recovery.** v0.9.0-rc1 ships without BIP-39 24-word recovery — if you lose your passphrase, every secret in the vault is permanently unrecoverable. Back up your passphrase out-of-band before adding any secret.
 
 ### Added
 - v0.1 source drop:

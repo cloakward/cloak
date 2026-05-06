@@ -1,6 +1,6 @@
 # Cloak policy — default deny-by-default with a few common allow rules.
 #
-# Reload: `cloak policy reload` (daemon hot-reloads on SIGHUP too).
+# Reload: restart `cloakd` to pick up policy changes. Hot-reload via SIGHUP is planned for v1.0.1.
 # Validate: `cloak policy validate ./policy.toml`.
 
 [default]
