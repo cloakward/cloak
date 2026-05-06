@@ -15,7 +15,7 @@ import { tools, dispatchTool } from "./tools/index.ts";
 import { handshake } from "./ipc.ts";
 import { runSelfTest } from "./self-test.ts";
 
-const VERSION = "0.1.0";
+const VERSION = "0.9.0-rc1";
 
 function printVersion(): void {
   process.stdout.write(`cloak-mcp ${VERSION}\n`);

@@ -4,6 +4,10 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [0.9.0-rc1] — 2026-05-05
+
+First release candidate. macOS arm64/x86_64 + Linux glibc/musl. Windows is deferred to v1.0.1 (#2). All 11 v1.0 critical-path workstreams (W1, W3–W10, W9b/c/d/e/f) are on `beta`. Linux pidfd peer-exit watcher is implemented but disabled at the daemon call site for this RC; re-enable tracked in #21. See sections below for the cumulative changes since v0.1.
+
 ### Added
 - v0.1 source drop:
   - Cargo workspace with `cloak-core` library + `cloakd` daemon binary; `cloak-cli` binary.
