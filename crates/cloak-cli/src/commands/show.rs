@@ -7,9 +7,9 @@
 //!    `--allow-redirect` (so secrets don't end up in shell history /
 //!    redirected pipes by accident).
 //! 2. Unlock the vault (passphrase prompt with up to 3 retries).
-//! 3. Require Touch ID confirmation on macOS unless `--no-biometric` is
-//!    set globally; on non-macOS the [`crate::biometric_macos`] stub
-//!    short-circuits to `Ok(true)`.
+//! 3. Require Touch ID confirmation on macOS / polkit confirmation on
+//!    Linux (action `dev.cloak.show-secret`) unless `--no-biometric` is
+//!    set globally; see [`crate::biometric_macos`].
 //! 4. Decrypt, write the plaintext bytes, then explicitly drop the
 //!    `Secret<String>` so its zeroize-on-drop runs immediately.
 
@@ -34,9 +34,10 @@ pub fn run(ctx: &Context, name: &str, allow_redirect: bool, newline: bool) -> Re
     // 2. Unlock with the passphrase.
     unlock_interactive(&mut vault)?;
 
-    // 3. Biometric step. Off only when --no-biometric is passed; the
-    //    non-macOS stub returns true unconditionally so this is a noop
-    //    on Linux/Windows for now.
+    // 3. Biometric / user-presence step. Off only when --no-biometric
+    //    is passed. On macOS this is Touch ID; on Linux it's a polkit
+    //    confirmation against the `dev.cloak.show-secret` action. On
+    //    other targets the gate fails closed.
     if !ctx.no_biometric {
         let reason = format!("Reveal secret '{name}' from Cloak vault");
         match biometric_macos::authenticate(&reason) {

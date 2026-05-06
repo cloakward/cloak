@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "@cloak/mcp",
+      "name": "@cloak-ward/mcp",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.0.0",
         "zod": "^3.23.0",

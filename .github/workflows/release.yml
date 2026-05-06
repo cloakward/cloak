@@ -1,0 +1,638 @@
+# W9b — release pipeline: cosign keyless signing + SLSA L3 provenance.
+#
+# Triggers ONLY on `v*` tag pushes (e.g. v0.9.0-rc1, v1.0.0). Builds release
+# tarballs of `cloak`, `cloakd`, and `cloak-mcp` for the four v1.0 platforms,
+# signs each tarball + the checksum file with cosign keyless via the
+# Actions OIDC token, generates SLSA L3 provenance, and drafts a GitHub
+# Release. A separate verification job re-runs cosign verify-blob and
+# slsa-verifier against the drafted artifacts; if it fails, the release
+# stays in draft and is never published.
+#
+# Action versions are pinned. Standing call from the maintainer:
+# macos-26-intel (x86_64) is best-effort — if its runner doesn't
+# allocate, the row fails open via `continue-on-error`, but a downstream
+# guard job fails the workflow if BOTH macOS rows go missing.
+#
+# Out of scope for this workstream:
+#   - npm publish
+#   - Docker push
+#   - Homebrew tap bump
+#   - SignPath / Windows code signing
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # -------------------------------------------------------------------
+  # 1. Build release tarballs per platform.
+  # -------------------------------------------------------------------
+  build:
+    name: build (${{ matrix.os }}, ${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.best_effort }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            target: aarch64-apple-darwin
+            platform: macos
+            cross: false
+            best_effort: false
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            platform: macos
+            cross: false
+            best_effort: true
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            cross: false
+            best_effort: false
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            cross: true
+            best_effort: false
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            cross: true
+            best_effort: false
+
+    env:
+      # Pin the macOS deployment floor on the macos-26 (Tahoe) runners so
+      # the produced arm64/x86_64 tarballs still load on macOS 13+.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release version from tag
+        id: meta
+        shell: bash
+        run: |
+          ref="${GITHUB_REF#refs/tags/}"
+          version="${ref#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${version}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install libsodium (macOS)
+        if: matrix.platform == 'macos'
+        run: brew install libsodium
+
+      - name: Install libsodium (Linux, host)
+        if: ${{ matrix.platform == 'linux' && !matrix.cross }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev pkg-config
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install cross (musl row)
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: cargo build (host targets)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: cross build (musl)
+        if: matrix.cross
+        run: cross build --release --workspace --target ${{ matrix.target }}
+
+      - name: cloak-mcp single-binary build
+        # `bun build --compile` embeds the runner host's bun runtime (glibc-linked,
+        # host arch). Skip on:
+        #   * x86_64-unknown-linux-musl — bun runtime is glibc-linked, won't run on
+        #     a pure-musl userspace.
+        #   * aarch64-unknown-linux-gnu — runs on x86_64 host; bun --compile cannot
+        #     cross-target arm64.
+        # These two tarballs ship cloak + cloakd only.
+        if: ${{ matrix.target != 'x86_64-unknown-linux-musl' && matrix.target != 'aarch64-unknown-linux-gnu' }}
+        working-directory: packages/cloak-mcp
+        run: |
+          bun install --frozen-lockfile
+          bun build src/server.ts --compile --outfile dist/cloak-mcp
+
+      - name: Stage and tarball release artifacts
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          target="${{ matrix.target }}"
+          stage="cloak-${version}-${target}"
+          mkdir -p "dist/${stage}/bin"
+
+          cp "target/${target}/release/cloak"  "dist/${stage}/bin/"
+          cp "target/${target}/release/cloakd" "dist/${stage}/bin/"
+          # cloak-mcp ships only on platforms where the bun --compile build ran.
+          if [ -f "packages/cloak-mcp/dist/cloak-mcp" ]; then
+            cp "packages/cloak-mcp/dist/cloak-mcp" "dist/${stage}/bin/"
+          fi
+          # Self-describing tarball: include README + license + changelog
+          # if present at top level. Missing files are non-fatal so the
+          # workflow doesn't break when these are renamed.
+          for f in README.md LICENSE LICENSE-APACHE LICENSE-MIT SECURITY.md CHANGELOG.md; do
+            if [ -f "$f" ]; then cp "$f" "dist/${stage}/"; fi
+          done
+
+          tarball="${stage}.tar.gz"
+          tar -C dist -czf "dist/${tarball}" "${stage}"
+          echo "tarball=${tarball}" >> "$GITHUB_OUTPUT"
+          echo "stage=${stage}" >> "$GITHUB_OUTPUT"
+
+          # Per-tarball sha256 fragment, used by the aggregate sums step.
+          # macOS prefers `shasum -a 256`; Linux has both.
+          if command -v sha256sum >/dev/null 2>&1; then
+            ( cd dist && sha256sum "${tarball}" ) > "dist/${tarball}.sha256"
+          else
+            ( cd dist && shasum -a 256 "${tarball}" ) > "dist/${tarball}.sha256"
+          fi
+          cat "dist/${tarball}.sha256"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.target }}
+          path: |
+            dist/${{ steps.pack.outputs.tarball }}
+            dist/${{ steps.pack.outputs.tarball }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  # -------------------------------------------------------------------
+  # 2. macOS coverage guard.
+  #
+  # macos-26-intel has `continue-on-error: true` above (free-tier x86
+  # macOS runners can be slow to allocate). This job runs after `build`
+  # and fails the workflow only when BOTH macOS rows are missing
+  # (indicates a deeper macOS regression, not a runner allocation blip).
+  # Logs the dropped row clearly either way.
+  # -------------------------------------------------------------------
+  macos-guard:
+    name: macos coverage guard
+    needs: build
+    runs-on: ubuntu-24.04
+    if: always() && needs.build.result != 'cancelled'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+          pattern: tarball-*-apple-darwin
+
+      - name: Verify at least one macOS row produced a tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          arm="incoming/tarball-aarch64-apple-darwin"
+          x86="incoming/tarball-x86_64-apple-darwin"
+          arm_present=0
+          x86_present=0
+          [ -d "$arm" ] && arm_present=1
+          [ -d "$x86" ] && x86_present=1
+
+          if [ "$x86_present" -eq 0 ]; then
+            echo "::warning::macos-26-intel (x86_64-apple-darwin) tarball absent — best-effort row dropped, possibly runner allocation > 30 min."
+          fi
+          if [ "$arm_present" -eq 0 ]; then
+            echo "::warning::macos-26 (aarch64-apple-darwin) tarball absent — required row failed."
+          fi
+          if [ "$arm_present" -eq 0 ] && [ "$x86_present" -eq 0 ]; then
+            echo "::error::Both macOS rows missing. Refusing to ship a release with zero macOS coverage."
+            exit 1
+          fi
+
+  # -------------------------------------------------------------------
+  # 3. Aggregate sha256sums + cosign keyless sign every artifact.
+  # -------------------------------------------------------------------
+  sign:
+    name: sign tarballs (cosign keyless)
+    needs: [build, macos-guard]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      id-token: write   # OIDC token for cosign keyless
+      contents: read
+    outputs:
+      version: ${{ needs.build.outputs.version }}
+      hashes: ${{ steps.hashes.outputs.hashes }}
+    steps:
+      - name: Download all tarball artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: incoming
+          pattern: tarball-*
+
+      - name: Flatten artifacts into ./dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Each tarball-<target>/ holds one .tar.gz and one .tar.gz.sha256.
+          find incoming -type f \( -name "*.tar.gz" -o -name "*.tar.gz.sha256" \) -exec cp {} dist/ \;
+          find dist -maxdepth 1 -type f -print
+
+      - name: Compute aggregate sha256sums.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          : > sha256sums.txt
+          # Stable ordering for reproducibility.
+          while IFS= read -r f; do
+            sha256sum "$f" >> sha256sums.txt
+          done < <(find . -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' | sort)
+          cat sha256sums.txt
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: cosign sign-blob (each tarball + sha256sums.txt)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          while IFS= read -r f; do
+            echo "Signing ${f}..."
+            cosign sign-blob --yes \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.cert" \
+              "${f}"
+          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name 'sha256sums.txt' \) -printf '%f\n' | sort)
+          find . -maxdepth 1 -type f \( -name '*.sig' -o -name '*.cert' \) -print
+
+      - name: Compute base64 hashes for SLSA generator
+        id: hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          # The SLSA generic generator wants base64 of a sha256sums-style
+          # listing of every artifact we want covered by provenance —
+          # that's every tarball plus the sums file itself.
+          tmp="$(mktemp)"
+          while IFS= read -r f; do
+            sha256sum "$f" >> "$tmp"
+          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name 'sha256sums.txt' \) -printf '%f\n' | sort)
+          encoded="$(base64 -w0 < "$tmp")"
+          echo "hashes=${encoded}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-bundle
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sig
+            dist/*.tar.gz.cert
+            dist/sha256sums.txt
+            dist/sha256sums.txt.sig
+            dist/sha256sums.txt.cert
+          if-no-files-found: error
+          retention-days: 7
+
+  # -------------------------------------------------------------------
+  # 3b. Cloak.dxt — Claude Desktop Extension package.
+  #
+  # Builds one .dxt per platform (macOS arm64/x64, Linux x64/arm64) by
+  # reusing the cloak-mcp binary from the same tarball the build job
+  # produced. No second build of cloak-mcp — the bytes inside the .dxt
+  # are byte-identical to those inside the signed tarball. Windows is
+  # deferred to v1.0.1.
+  #
+  # This job is intentionally NOT in `sign` — Cloak.dxt is a v0.9.0-rc1
+  # convenience asset, not part of the SLSA-signed core. v1.0.x will
+  # fold .dxt artifacts into the cosign + SLSA provenance scope.
+  # -------------------------------------------------------------------
+  dxt-package:
+    name: dxt package (${{ matrix.platform_tag }})
+    needs: [build, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            platform_tag: macos-arm64
+          - target: x86_64-apple-darwin
+            platform_tag: macos-x64
+          - target: x86_64-unknown-linux-gnu
+            platform_tag: linux-x64
+          - target: aarch64-unknown-linux-gnu
+            platform_tag: linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download tarball for ${{ matrix.target }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        id: dl
+        with:
+          name: tarball-${{ matrix.target }}
+          path: incoming
+
+      - name: Skip if upstream tarball missing (best-effort row)
+        if: steps.dl.outcome != 'success'
+        shell: bash
+        run: |
+          echo "::warning::tarball-${{ matrix.target }} not produced; skipping .dxt for ${{ matrix.platform_tag }}."
+          exit 0
+
+      - name: Extract cloak-mcp from tarball
+        if: steps.dl.outcome == 'success'
+        id: extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.sign.outputs.version }}"
+          stage="cloak-${version}-${{ matrix.target }}"
+          tarball="incoming/${stage}.tar.gz"
+          test -f "$tarball" || { echo "::error::expected $tarball"; exit 1; }
+          mkdir -p extracted
+          tar -C extracted -xzf "$tarball"
+          # PR #40 changed the tarball layout to nest binaries under `bin/`.
+          mcp="extracted/${stage}/bin/cloak-mcp"
+          test -f "$mcp" || { echo "::error::cloak-mcp not at $mcp inside tarball"; exit 1; }
+          chmod +x "$mcp"
+          echo "mcp=$mcp" >> "$GITHUB_OUTPUT"
+
+      - name: Build .dxt
+        if: steps.dl.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.sign.outputs.version }}"
+          ./scripts/build-dxt.sh "$version" "${{ matrix.platform_tag }}" "${{ steps.extract.outputs.mcp }}"
+
+      - name: Upload .dxt artifact
+        if: steps.dl.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxt-${{ matrix.platform_tag }}
+          path: dist/Cloak-*.dxt
+          if-no-files-found: error
+          retention-days: 7
+
+  # -------------------------------------------------------------------
+  # 4. SLSA L3 provenance via the official reusable workflow.
+  # Pinned to the v2.0.0 release tag (semver). The generator expects
+  # the base64-encoded sha256-list output from the sign job.
+  # -------------------------------------------------------------------
+  provenance:
+    name: slsa provenance (L3)
+    needs: sign
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: ${{ needs.sign.outputs.hashes }}
+      provenance-name: multiple.intoto.jsonl
+      upload-assets: false
+
+  # -------------------------------------------------------------------
+  # 5. Draft GitHub Release.
+  #
+  # Attaches every tarball, every .sig, every .cert, sha256sums.txt
+  # (+ its sig/cert), and the SLSA provenance jsonl. Notes are pulled
+  # from the tag if `--notes-from-tag` finds anything; otherwise the
+  # maintainer hand-edits before publishing. The release is created
+  # in DRAFT state and only the verification job below decides whether
+  # to mark it ready — a maintainer flips it to published manually.
+  # -------------------------------------------------------------------
+  release:
+    name: draft release
+    needs: [sign, provenance, dxt-package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag_name: ${{ steps.create.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download signed bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-bundle
+          path: dist
+
+      - name: Download SLSA provenance
+        uses: actions/download-artifact@v4
+        with:
+          # Hard-coded to match `provenance-name: multiple.intoto.jsonl`
+          # passed to the SLSA reusable workflow's `with:` block above.
+          # The reusable workflow's `outputs.provenance-name` has been a
+          # historical footgun (intermittent empty values); pin literally.
+          name: multiple.intoto.jsonl
+          path: dist
+
+      - name: Download .dxt artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dxt-incoming
+          pattern: dxt-*
+
+      - name: Flatten .dxt artifacts into dist/
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d dxt-incoming ]; then
+            find dxt-incoming -type f -name '*.dxt' -exec cp {} dist/ \;
+          fi
+          find dist -maxdepth 1 -type f -name '*.dxt' -print || true
+
+      - name: List release payload
+        shell: bash
+        run: find dist -maxdepth 1 -type f -print
+
+      - name: Create draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          echo "tag_name=${tag}" >> "$GITHUB_OUTPUT"
+
+          # Detect pre-release tags (rc/beta/alpha) so the draft is
+          # marked `prerelease=true`. Downstream workflows
+          # (docker-push, npm-publish, homebrew-bump) gate
+          # production-only side-effects (e.g. the docker `:latest`
+          # tag, formula bump) on this flag.
+          prerelease_flag=""
+          case "$tag" in
+            *-rc*|*-beta*|*-alpha*|*-pre*|*-dev*)
+              prerelease_flag="--prerelease"
+              echo "Tag ${tag} matches pre-release pattern; will mark draft as prerelease."
+              ;;
+          esac
+
+          # If the draft already exists (re-run), reuse it. Otherwise
+          # create with `--notes-from-tag` first; fall back to
+          # `--generate-notes` for lightweight tags.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --draft \
+              ${prerelease_flag} \
+              --title "Cloak ${tag}" \
+              --notes-from-tag \
+              || gh release create "$tag" \
+                --draft \
+                ${prerelease_flag} \
+                --title "Cloak ${tag}" \
+                --generate-notes
+          fi
+
+          # Upload every artifact in dist/. `--clobber` so re-runs
+          # against an existing draft don't duplicate-fail.
+          find dist -maxdepth 1 -type f -print0 | xargs -0 gh release upload "$tag" --clobber
+
+  # -------------------------------------------------------------------
+  # 6. Verification gate.
+  #
+  # Fresh runner — verifies the same signed-bundle + SLSA provenance
+  # artifacts that were attached to the draft release. We pull them
+  # from the workflow's artifact storage rather than `gh release
+  # download`, because gh cannot fetch from a release that is still
+  # in DRAFT (the design intent is for the release to remain in DRAFT
+  # until this verify gate passes). The bytes are identical to those
+  # uploaded to the draft.
+  # -------------------------------------------------------------------
+  verify:
+    name: verify signatures + provenance
+    needs: [sign, provenance, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Download signed bundle (from sign job)
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-bundle
+          path: verify
+
+      - name: Download SLSA provenance (from provenance job)
+        uses: actions/download-artifact@v4
+        with:
+          # Hard-coded to match `provenance-name: multiple.intoto.jsonl`
+          # passed to the SLSA reusable workflow's `with:` block above.
+          # The reusable workflow's `outputs.provenance-name` has been a
+          # historical footgun (intermittent empty values); pin literally.
+          name: multiple.intoto.jsonl
+          path: verify
+
+      - name: List verify payload
+        shell: bash
+        run: find verify -maxdepth 1 -type f -print
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: cosign verify-blob (each tarball + sha256sums.txt)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          # Workflow ref must match release.yml on the tagged commit.
+          EXPECTED_ISSUER: "https://token.actions.githubusercontent.com"
+          EXPECTED_IDENTITY_REGEX: "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ needs.release.outputs.tag_name }}$"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd verify
+          fail=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            echo "Verifying ${f}..."
+            if ! cosign verify-blob \
+                --certificate "${f}.cert" \
+                --signature "${f}.sig" \
+                --certificate-oidc-issuer "$EXPECTED_ISSUER" \
+                --certificate-identity-regexp "$EXPECTED_IDENTITY_REGEX" \
+                "$f"; then
+              echo "::error::cosign verify-blob FAILED for ${f}"
+              fail=1
+            fi
+          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name 'sha256sums.txt' \) -printf '%f\n' | sort)
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::One or more cosign verifications failed. Release stays in DRAFT."
+            exit 1
+          fi
+
+      - name: Install slsa-verifier
+        uses: slsa-framework/slsa-verifier/actions/installer@v2.6.0
+
+      - name: slsa-verifier verify-artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd verify
+          fail=0
+          while IFS= read -r f; do
+            echo "SLSA verifying ${f}..."
+            if ! slsa-verifier verify-artifact \
+                --provenance-path multiple.intoto.jsonl \
+                --source-uri "github.com/${{ github.repository }}" \
+                --source-tag "${{ needs.release.outputs.tag_name }}" \
+                "$f"; then
+              echo "::error::slsa-verifier FAILED for ${f}"
+              fail=1
+            fi
+          done < <(find . -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' | sort)
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::SLSA verification failed. Release stays in DRAFT."
+            exit 1
+          fi
+
+      - name: Verification summary
+        shell: bash
+        run: |
+          echo "All cosign + SLSA checks passed for ${{ needs.release.outputs.tag_name }}."
+          echo "Release remains in DRAFT — maintainer flips it to published manually."

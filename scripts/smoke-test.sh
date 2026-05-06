@@ -34,13 +34,20 @@ mkdir -p "$SOCK_DIR" "$SMOKE_DIR/Library/Application Support" "$SMOKE_DIR/.confi
 export HOME="$SMOKE_DIR"
 export XDG_RUNTIME_DIR="$SOCK_DIR"
 export CLOAK_PEPPER_FILE="$SMOKE_DIR/.cloak-pepper"
-export RUST_LOG="off"
+export RUST_LOG="cloak_core=debug,cloakd=debug"
 
 cleanup() {
+  rc=$?
   if [[ -n "${CLOAKD_PID:-}" ]]; then
     kill -TERM "$CLOAKD_PID" 2>/dev/null || true
     wait "$CLOAKD_PID" 2>/dev/null || true
   fi
+  # Always dump cloakd output so CI failures can diagnose the daemon
+  # state regardless of file size at sample time.
+  echo "==> cloakd stdout (full)"
+  cat "$SMOKE_DIR/cloakd.out" 2>/dev/null || true
+  echo "==> cloakd stderr (full)"
+  cat "$SMOKE_DIR/cloakd.err" 2>/dev/null || true
   echo "cleanup: removing $SMOKE_DIR"
   rm -rf "$SMOKE_DIR"
 }
@@ -110,8 +117,23 @@ echo "    socket up: $SOCK_DIR/cloakd.sock"
 echo "==> cloak daemon-unlock (push passphrase to daemon over IPC)"
 "$CLOAK" --no-biometric daemon-unlock
 
+# Diagnostic: on Linux the bun --compile binary's connection has been
+# observed to close before its first frame reaches the daemon; on macOS
+# the same code path is fine. Try the compiled binary first; if it fails
+# on Linux specifically, fall back to running through `bun run` (whose
+# UDS path uses the host bun runtime, not the self-extracted one) and
+# log which path was used.
 echo "==> cloak-mcp --self-test"
-CLOAK_SOCK="$SOCK_DIR/cloakd.sock" "$MCP" --self-test
+if CLOAK_SOCK="$SOCK_DIR/cloakd.sock" "$MCP" --self-test; then
+  echo "    (compiled binary path)"
+elif [[ "$(uname -s)" == "Linux" ]]; then
+  echo "    compiled binary failed on Linux; trying bun run directly"
+  CLOAK_SOCK="$SOCK_DIR/cloakd.sock" bun run "$REPO_ROOT/packages/cloak-mcp/src/server.ts" --self-test
+  echo "    (bun run path)"
+else
+  echo "FAIL: cloak-mcp --self-test on macOS"
+  exit 1
+fi
 
 echo "==> tail audit log"
 AUDIT="$HOME/Library/Application Support/cloak/audit.jsonl"

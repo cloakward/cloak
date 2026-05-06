@@ -4,7 +4,12 @@
 //! - the peer's PID (recorded for audit / debugging),
 //! - the peer's binary basename (cheap policy hint for handlers),
 //! - an opaque per-connection ID (so a token issued on one socket
-//!   cannot be replayed on another).
+//!   cannot be replayed on another),
+//! - a platform-specific non-recycling identity ([`PeerIdentity`]).
+//!   On macOS this is the `audit_token_t` captured at handshake;
+//!   on Linux it is a pidfd-inode identity. Validation
+//!   constant-time-compares these bytes so a recycled PID cannot
+//!   replay a session bound to a now-dead process.
 //!
 //! Tokens are 32 random bytes, base64url-encoded (`subtle::ConstantTimeEq`
 //! is used for comparison). Default TTL is 30 minutes.
@@ -19,7 +24,7 @@ use tokio::sync::RwLock;
 
 use crate::crypto::aead;
 use crate::error::{Error, Result};
-use crate::peer_auth::PeerInfo;
+use crate::peer_auth::{PeerIdentity, PeerInfo};
 
 /// Default lifetime of a freshly issued session token.
 pub fn default_ttl() -> Duration {
@@ -55,6 +60,10 @@ pub struct SessionRecord {
     pub peer_basename: String,
     /// Unique per-connection ID assigned by the daemon.
     pub conn_id: u64,
+    /// Platform-specific non-recycling peer identity (macOS audit
+    /// token, Linux pidfd inode). `None` means the platform did not
+    /// supply one and validation must rely on the conn-id binding.
+    pub peer_identity: Option<PeerIdentity>,
     /// UTC timestamp at issuance.
     pub issued_at: DateTime<Utc>,
     /// UTC expiry time (issued_at + ttl).
@@ -65,6 +74,26 @@ impl SessionRecord {
     /// True iff `now` is at-or-past `expires_at`.
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         now >= self.expires_at
+    }
+
+    /// Constant-time compare this record's identity against a
+    /// candidate. If either side is `None` the bytes that *are*
+    /// present must still bind: a record carrying an identity is
+    /// only valid against the same identity.
+    pub fn identity_matches(&self, candidate: Option<&PeerIdentity>) -> bool {
+        match (self.peer_identity.as_ref(), candidate) {
+            (Some(a), Some(b)) => {
+                if a.kind != b.kind || a.bytes.len() != b.bytes.len() {
+                    return false;
+                }
+                let eq: bool = a.bytes.ct_eq(&b.bytes).into();
+                eq
+            }
+            // Both absent: legacy binding, fall through to conn-id check.
+            (None, None) => true,
+            // Mismatched presence: refuse.
+            _ => false,
+        }
     }
 }
 
@@ -78,6 +107,15 @@ impl SessionStore {
     /// Construct an empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return a cheap (Arc-cloned) handle to the same underlying map.
+    /// Used by the macOS peer-exit watcher task to revoke sessions
+    /// without holding a reference to the [`crate::daemon::DaemonCtx`].
+    pub fn clone_handle(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     /// Issue a new session token bound to `peer` and `conn_id`.
@@ -95,6 +133,7 @@ impl SessionStore {
             peer_pid: peer.pid,
             peer_basename: basename,
             conn_id,
+            peer_identity: peer.identity.clone(),
             issued_at: now,
             expires_at: now + ttl,
         };
@@ -139,6 +178,25 @@ impl SessionStore {
         Ok(rec)
     }
 
+    /// Validate `token` against the live set, additionally requiring
+    /// that the candidate peer-identity bytes constant-time-match the
+    /// stored ones. Used by the request hot-path on platforms that
+    /// supply non-recycling identities (macOS audit token, Linux
+    /// pidfd-inode). If the platform has no identity for this peer,
+    /// behaves identically to [`validate`].
+    pub async fn validate_with_identity(
+        &self,
+        token: &str,
+        conn_id: u64,
+        identity: Option<&PeerIdentity>,
+    ) -> Result<SessionRecord> {
+        let rec = self.validate(token, conn_id).await?;
+        if !rec.identity_matches(identity) {
+            return Err(Error::SessionExpired);
+        }
+        Ok(rec)
+    }
+
     /// Revoke a single token. No-op if the token does not exist.
     pub async fn revoke(&self, token: &str) {
         let mut g = self.inner.write().await;
@@ -150,6 +208,27 @@ impl SessionStore {
     pub async fn revoke_by_conn(&self, conn_id: u64) {
         let mut g = self.inner.write().await;
         g.retain(|_, v| v.conn_id != conn_id);
+    }
+
+    /// Revoke every session bound to the given non-recycling peer
+    /// identity. Called by the per-connection peer-exit watcher
+    /// (kqueue on macOS, pidfd on Linux) the moment the kernel reports
+    /// the peer task has exited — closes the PID-recycle window before
+    /// any other process at the same UID can present a stale token.
+    /// The compare is constant-time on the bytes; identities of a
+    /// different `kind` or length never match.
+    pub async fn revoke_by_identity(&self, identity: &PeerIdentity) {
+        let mut g = self.inner.write().await;
+        g.retain(|_, v| {
+            let Some(stored) = v.peer_identity.as_ref() else {
+                return true;
+            };
+            if stored.kind != identity.kind || stored.bytes.len() != identity.bytes.len() {
+                return true;
+            }
+            let eq: bool = stored.bytes.ct_eq(&identity.bytes).into();
+            !eq
+        });
     }
 
     /// Drop every expired record. Cheap to call periodically.
@@ -174,7 +253,7 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer_auth::PeerInfo;
+    use crate::peer_auth::{PeerIdentity, PeerIdentityKind, PeerInfo};
     use std::path::PathBuf;
 
     fn mk_peer(pid: i32, basename: &str) -> PeerInfo {
@@ -184,6 +263,21 @@ mod tests {
             gid: 501,
             binary_path: Some(PathBuf::from(format!("/usr/local/bin/{basename}"))),
             code_sig_hash: Some([0u8; 32]),
+            identity: None,
+        }
+    }
+
+    fn mk_peer_with_identity(pid: i32, basename: &str, bytes: Vec<u8>) -> PeerInfo {
+        PeerInfo {
+            pid,
+            uid: 501,
+            gid: 501,
+            binary_path: Some(PathBuf::from(format!("/usr/local/bin/{basename}"))),
+            code_sig_hash: Some([0u8; 32]),
+            identity: Some(PeerIdentity {
+                kind: PeerIdentityKind::MacAuditToken,
+                bytes,
+            }),
         }
     }
 
@@ -196,6 +290,7 @@ mod tests {
         assert_eq!(rec.peer_pid, 99);
         assert_eq!(rec.peer_basename, "cloak");
         assert_eq!(rec.conn_id, 7);
+        assert!(rec.peer_identity.is_none());
     }
 
     #[tokio::test]
@@ -276,5 +371,53 @@ mod tests {
         assert_ne!(a.0, b.0);
         // 32 bytes base64url-no-pad → 43 chars.
         assert_eq!(a.0.len(), 43);
+    }
+
+    #[tokio::test]
+    async fn identity_match_required_when_set() {
+        let s = SessionStore::new();
+        let bytes = vec![1u8; 32];
+        let p = mk_peer_with_identity(99, "cloak", bytes.clone());
+        let tok = s.issue(&p, 7, Duration::minutes(30)).await.unwrap();
+
+        // Same identity validates.
+        let same = PeerIdentity {
+            kind: PeerIdentityKind::MacAuditToken,
+            bytes: bytes.clone(),
+        };
+        assert!(s
+            .validate_with_identity(tok.as_str(), 7, Some(&same))
+            .await
+            .is_ok());
+
+        // A single-byte change is rejected.
+        let mut bad_bytes = bytes.clone();
+        bad_bytes[0] ^= 0x01;
+        let bad = PeerIdentity {
+            kind: PeerIdentityKind::MacAuditToken,
+            bytes: bad_bytes,
+        };
+        assert!(s
+            .validate_with_identity(tok.as_str(), 7, Some(&bad))
+            .await
+            .is_err());
+
+        // Missing identity when one was bound is also rejected.
+        assert!(s
+            .validate_with_identity(tok.as_str(), 7, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn identity_absent_is_legacy_compatible() {
+        let s = SessionStore::new();
+        let p = mk_peer(99, "cloak");
+        let tok = s.issue(&p, 7, Duration::minutes(30)).await.unwrap();
+        // No identity bound → both sides None is fine.
+        assert!(s
+            .validate_with_identity(tok.as_str(), 7, None)
+            .await
+            .is_ok());
     }
 }

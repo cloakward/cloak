@@ -1,4 +1,4 @@
-# Cloak IPC wire format (v0.1)
+# Cloak IPC wire format (v1.0)
 
 This is the **frozen** contract between `cloakd` (the daemon, Rust) and its peers (`cloak` CLI in Rust, `cloak-mcp` in TypeScript/Bun). All four code paths agree on the shapes here.
 
@@ -49,8 +49,19 @@ or
 Error codes are symbolic, lowercase-kebab. Defined codes:
 `peer-not-trusted`, `session-expired`, `unknown-method`, `invalid-params`,
 `vault-locked`, `secret-not-found`, `secret-exists`, `policy-denied`,
-`confirmation-rejected`, `rate-limited`, `aead-failure`, `audit-broken`,
+`confirmation-rejected`, `aead-failure`, `audit-broken`,
 `internal-error`.
+
+Rate-limit exhaustion surfaces as `policy-denied` with the message
+`rate limited` — the rate-limit bucket lives inside the policy engine
+(`crates/cloak-core/src/handlers.rs:168-183`), so a single symbolic code
+covers both rule-driven denials and bucket-driven denials.
+
+The mapping from `cloak-core::Error` to wire `RpcError` is defined in
+`crates/cloak-core/src/ipc.rs:104-150`. `unknown-method` and `vault-locked`
+are emitted directly by the dispatcher
+(`crates/cloak-core/src/daemon.rs:348-353,382-385`); they bypass the
+`Error` enum and so do not appear in that table.
 
 ## Methods
 
@@ -76,7 +87,7 @@ Error codes are symbolic, lowercase-kebab. Defined codes:
 ### Privileged tool handlers (MCP-callable; subject to policy)
 - **`tool.sign_request`** — params `{ secret_name, scheme, method, url, headers?, body_b64? }` → `{ headers: {...} }`. `scheme ∈ {"aws-sigv4","hmac-sha256"}`.
 - **`tool.proxy_http`** — params `{ secret_name, method, url, headers?, body_b64?, auth_scheme, header_name?, query_name? }` → `{ status, headers, body_b64 }`. The daemon enforces the `allowed_hosts` policy and strips the auth header from any echoed metadata.
-- **`tool.mint_token`** — params `{ secret_name, kind, scope?, ttl_seconds? }` → `{ token, expires_at }`. `kind ∈ {"aws-sts","github-app","gitlab-pat"}`. v0.1 ships `aws-sts` only as a working impl; the rest may return `unknown-method` or `not-implemented` errors but their schemas are stable.
+- **`tool.mint_token`** — params `{ secret_name, kind, scope?, ttl_seconds? }` → `{ token, expires_at }`. `kind ∈ {"aws-sts","github-app","gitlab-pat"}`. v1.0 ships `aws-sts` as a real impl (calls AWS STS `GetSessionToken`); `github-app` and `gitlab-pat` schemas are stable but the handlers return a typed not-supported error (still policy-checked, rate-limited, and audited).
 - **`tool.query_audit`** — params `{ since?, until?, tool?, secret?, result?, limit? }` → `{ entries: [...] }`. Entries never contain secret values.
 
 ## Auth & sessions
@@ -89,5 +100,5 @@ Error codes are symbolic, lowercase-kebab. Defined codes:
 ## What is NOT in this contract
 
 - Plaintext secret retrieval over MCP. There is **no** method named `get_secret`, `reveal_secret`, or anything equivalent on the MCP-callable surface. `vault.show` is gated to the CLI peer. This is enforced by both peer-identity checks and policy.
-- Streaming. v0.1 is request/response only.
+- Streaming. v1.0 is request/response only.
 - Bi-directional pushes. The daemon issues confirmation prompts via a separate side-channel (CLI invocation + desktop notification), not over the IPC reply channel.

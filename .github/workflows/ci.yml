@@ -7,9 +7,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, beta]
   pull_request:
-    branches: [main]
+    branches: [main, beta]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -30,11 +30,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-26
             target: aarch64-apple-darwin
             platform: macos
             cross: false
-          - os: macos-13
+          - os: macos-26-intel
             target: x86_64-apple-darwin
             platform: macos
             cross: false
@@ -46,10 +46,19 @@ jobs:
             target: x86_64-unknown-linux-musl
             platform: linux
             cross: true
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            cross: true
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             platform: windows
             cross: false
+
+    # macOS 26 (Tahoe) runners build against the SDK shipped with Xcode 16+;
+    # pin the deployment floor so binaries still load on macOS 13+.
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
       - uses: actions/checkout@v4

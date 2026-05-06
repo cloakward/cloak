@@ -1,0 +1,168 @@
+# W9d - publish @cloak-ward/mcp to npm.
+#
+# Fires when a GitHub Release is published. Two-leg flow:
+#
+#   Leg 1 (preferred): OIDC trusted publishing. npm 9.5+ picks up the
+#   token from ACTIONS_ID_TOKEN_REQUEST_URL when `id-token: write` is
+#   set, and `--provenance` attaches a signed provenance attestation.
+#   This is the strict-good path.
+#
+#   Leg 2 (fallback): classic NPM_TOKEN repository secret. Runs only
+#   if leg 1 returned a 403 (the normal state until npm exposes the
+#   trusted-publishers UI for a fresh org/scope, see cloakward/cloak#6)
+#   AND `NPM_TOKEN` is configured. This leg CANNOT attach provenance:
+#   `npm publish --provenance` requires the OIDC identity, and a static
+#   token will be rejected with another 403. Leg 2 therefore publishes
+#   without `--provenance` and emits a `::warning::` so the operator
+#   knows the artifact lacks provenance.
+#
+# Failure policy (changed from previous silent-skip):
+#   - Leg 1 success                       -> exit 0 (with provenance).
+#   - Leg 1 403, NPM_TOKEN unset          -> ::error:: + exit 1.
+#   - Leg 1 403, leg 2 success            -> exit 0 + ::warning:: (no provenance).
+#   - Leg 1 403, leg 2 403                -> ::error:: + exit 1.
+#   - Any non-403 failure in either leg   -> ::error:: + exit 1.
+#
+# Restoring the silent-skip behaviour would let release.yml mark a
+# release as published even when no package shipped, which is exactly
+# the silent-failure mode tracked in cloakward/cloak#6.
+name: npm-publish
+
+on:
+  release:
+    types: [published]
+  # Manual dispatch lets us re-run against an existing release tag —
+  # useful when a publish failed for a transient/auth reason and we
+  # want to retry without un-publishing and re-publishing the GitHub
+  # release. Pass the release tag in the input.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Release tag to publish (e.g. v0.9.0-rc1)"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    name: publish @cloak-ward/mcp
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          # Honor either the release event's tag or the manual dispatch input.
+          ref: ${{ github.event.release.tag_name || inputs.ref }}
+
+      - name: Verify package.json version matches release tag
+        working-directory: packages/cloak-mcp
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.ref }}
+        run: |
+          set -euo pipefail
+          tag_version="${RELEASE_TAG#v}"
+          pkg_version=$(node -p "require('./package.json').version")
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Release tag ${RELEASE_TAG} (version ${tag_version}) does not match packages/cloak-mcp/package.json version ${pkg_version}. Bump packages/cloak-mcp/package.json before tagging."
+            exit 1
+          fi
+          echo "version sync ok: ${pkg_version}"
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install, lint, typecheck, test
+        working-directory: packages/cloak-mcp
+        run: |
+          bun install --frozen-lockfile
+          bun run lint:no-http
+          bun run typecheck
+          bun test
+
+      - name: Build standalone binary
+        working-directory: packages/cloak-mcp
+        run: bun build src/server.ts --compile --outfile dist/cloak-mcp
+
+      # Two-stage publish: OIDC trusted publishing first; classic
+      # NPM_TOKEN fallback (without provenance) if it fails with 403.
+      # If neither leg ships the package, the job fails loud so the
+      # GitHub release shows npm-publish red and the operator knows to
+      # finish the trusted-publisher config in cloakward/cloak#6.
+      - name: Publish to npm (OIDC trusted publishing, then NPM_TOKEN fallback)
+        working-directory: packages/cloak-mcp
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Resolve dist-tag from the release/dispatch tag pattern.
+          # Pre-release tags (-rc / -beta / -alpha / -pre / -dev) ship
+          # to the `beta` dist-tag so `npm install @cloak-ward/mcp`
+          # (no @<tag>) does NOT pull a pre-release. Stable tags ship
+          # to `latest` (npm's default).
+          REF_NAME: ${{ github.event.release.tag_name || inputs.ref }}
+        run: |
+          set +e
+          publish_log=$(mktemp)
+          case "$REF_NAME" in
+            *-rc*|*-beta*|*-alpha*|*-pre*|*-dev*) NPM_DIST_TAG="beta" ;;
+            *) NPM_DIST_TAG="latest" ;;
+          esac
+          echo "Resolved npm dist-tag: ${NPM_DIST_TAG}"
+
+          # Leg 1: OIDC trusted publishing. No NODE_AUTH_TOKEN env, so
+          # npm reaches for the OIDC token from the GitHub Actions
+          # runner directly. Provenance is only attachable on this leg.
+          echo "==> Attempting OIDC trusted-publishing leg"
+          unset NODE_AUTH_TOKEN
+          npm publish --provenance --access public --tag "$NPM_DIST_TAG" 2>&1 | tee "$publish_log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -eq 0 ]; then
+            echo "npm publish succeeded via OIDC trusted publishing"
+            exit 0
+          fi
+
+          # Leg 2: classic NPM_TOKEN fallback (only if the secret is set).
+          # We also catch 404 because the first publish of a brand-new
+          # scoped package (no existing package on the registry, no
+          # trusted-publisher relationship yet) returns 404 PUT rather
+          # than 403. After that first publish the package exists and
+          # subsequent failures collapse to 403/auth errors.
+          if [ -n "${NPM_TOKEN:-}" ] && grep -qE '(^|[^0-9])40[34]([^0-9]|$)|E40[34]|Forbidden|EOTP|EAUTHIP|need auth|Not found|is not in this registry' "$publish_log"; then
+            echo "==> OIDC leg returned 403/404 auth error; falling back to NPM_TOKEN"
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+            publish_log2=$(mktemp)
+            # NOTE: --provenance is intentionally omitted here. The npm
+            # provenance flow requires the OIDC identity from leg 1; a
+            # static NODE_AUTH_TOKEN is rejected with a 403 if you ask
+            # for provenance (npm 9.5+). So this leg ships WITHOUT
+            # provenance and we surface that fact via ::warning:: below.
+            npm publish --access public --tag "$NPM_DIST_TAG" 2>&1 | tee "$publish_log2"
+            status2=${PIPESTATUS[0]}
+            if [ "$status2" -eq 0 ]; then
+              echo "npm publish succeeded via NPM_TOKEN fallback"
+              echo "::warning::published @cloak-ward/mcp without --provenance via NPM_TOKEN; configure trusted publishing to restore provenance (#6)"
+              exit 0
+            fi
+            if grep -qE '(^|[^0-9])40[34]([^0-9]|$)|E40[34]|Forbidden|Not found|is not in this registry' "$publish_log2"; then
+              echo "::error::npm publish failed: both OIDC and NPM_TOKEN legs hit 403/404; rotate NPM_TOKEN (granular access token with publish + bypass-2fa on @cloak-ward) or finish trusted-publisher config (cloakward/cloak#6)"
+              exit 1
+            fi
+            echo "::error::npm publish (NPM_TOKEN fallback) failed with status ${status2} for a reason other than 403/404"
+            exit "$status2"
+          fi
+
+          if grep -qE '(^|[^0-9])40[34]([^0-9]|$)|E40[34]|Forbidden|Not found|is not in this registry' "$publish_log"; then
+            echo "::error::npm publish failed: OIDC returned 403/404 and no NPM_TOKEN secret is configured; finish trusted-publisher config (cloakward/cloak#6) or set NPM_TOKEN (granular access token with publish + bypass-2fa on @cloak-ward)"
+            exit 1
+          fi
+          echo "::error::npm publish failed with status ${status} for a reason other than 403/404"
+          exit "$status"

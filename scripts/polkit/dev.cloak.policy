@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Cloak polkit policy.
+
+  Action: dev.cloak.show-secret
+  Invoked from `cloak show NAME` on Linux as a user-presence gate after
+  the passphrase unlock (see `crates/cloak-cli/src/biometric_macos.rs`,
+  Linux arm). The action is checked via `org.freedesktop.PolicyKit1`'s
+  `CheckAuthorization` method with `AllowUserInteraction=true`, so the
+  user is prompted by their session's polkit agent.
+
+  Default policy is `auth_self_keep`: the user must authenticate with
+  their own password, and the authorization is cached for the rest of
+  the session so a burst of `cloak show` calls only prompts once.
+
+  To install distribution-wide:
+    install -m 0644 dev.cloak.policy /usr/share/polkit-1/actions/
+
+  This file is purely descriptive — runtime enforcement is the polkit
+  daemon's job; Cloak only invokes `CheckAuthorization`.
+-->
+<policyconfig>
+
+  <vendor>Cloak</vendor>
+  <vendor_url>https://github.com/cloakward/cloak</vendor_url>
+
+  <action id="dev.cloak.show-secret">
+    <description>Reveal a secret stored in your Cloak vault</description>
+    <message>Authentication is required to reveal a secret from your Cloak vault.</message>
+    <defaults>
+      <allow_any>auth_self_keep</allow_any>
+      <allow_inactive>auth_self_keep</allow_inactive>
+      <allow_active>auth_self_keep</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

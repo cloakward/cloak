@@ -1,8 +1,29 @@
 {
-  "name": "@cloak/mcp",
-  "version": "0.1.0",
+  "name": "@cloak-ward/mcp",
+  "version": "0.9.0-rc1",
   "description": "Cloak MCP server — model surface that never sees plaintext secrets.",
   "license": "Apache-2.0",
+  "homepage": "https://github.com/cloakward/cloak#readme",
+  "bugs": {
+    "url": "https://github.com/cloakward/cloak/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cloakward/cloak.git",
+    "directory": "packages/cloak-mcp"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "files": [
+    "src/**/*.ts",
+    "scripts/check-no-http.mjs",
+    "tsconfig.json",
+    "package.json",
+    "README.md",
+    "LICENSE*"
+  ],
   "type": "module",
   "main": "src/server.ts",
   "bin": {
