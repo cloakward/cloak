@@ -20,6 +20,9 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 - `npm-publish.yml` derives the npm dist-tag from the tag pattern: prereleases (`-rc*` / `-beta*` / `-alpha*` / `-pre*` / `-dev*`) ship to the `beta` dist-tag; stable tags ship to `latest`. So `npm install @cloak-ward/mcp` (no `@beta`) does not pull a pre-release.
 - New `npm-dist-tag.yml` workflow: server-side dist-tag operations using the repo's `NPM_TOKEN` secret. Lets the operator move the dist-tag of an already-published version (e.g. demote rc1 from `latest` to `beta`) without having to wrangle 2FA / token state on their laptop.
 
+### Deferred to v1.0.0
+- **Docker image (`ghcr.io/cloakward/cloakd`)** — multi-arch buildx of the cargo cross-compile chain hit a stubborn `error[E0463]: can't find crate for core` on the linux/arm64 row across four iteration attempts. Cleanest fix is to split into native-runner jobs (`ubuntu-24.04` for amd64, `ubuntu-24.04-arm` for arm64) and merge via `docker buildx imagetools create`; that refactor is queued for v1.0.0 work. The `release.published` trigger has been removed from `docker-push.yml`; the workflow stays in-tree on `workflow_dispatch` only. v0.9.0-rc1 ships via the four other install paths (GitHub release tarballs, npm, Homebrew tap, Cloak.dxt). Tracked in [#46](https://github.com/cloakward/cloak/issues/46).
+
 ## [0.9.0-rc1] — 2026-05-06
 
 First release candidate for v1.0. Ships macOS arm64/x86_64 + Linux glibc/musl; Windows is deferred to v1.0.1 ([#2](https://github.com/cloakward/cloak/issues/2)). All 11 v1.0 critical-path workstreams (W1, W3–W10, W9b/c/d/e/f) are on `beta`.
