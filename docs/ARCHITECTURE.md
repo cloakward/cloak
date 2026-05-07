@@ -165,11 +165,15 @@ row's name (verified by
 
 ### Rollback resistance
 
-The `meta.monotonic_counter` is mirrored into a separate keychain item.
-`Vault::open_unlocked` rejects an unlock if the on-disk counter is **less
-than** the keychain counter (`crates/cloak-core/src/vault.rs::tests::rollback_counter_rejected_via_store`).
-A vault thief who restores `vault.cloak` from a stale backup hits
-`Error::VaultRollbackDetected`.
+The `meta.monotonic_counter` lives in the vault file only; every write
+enforces strict increase via `bump_counter`, so a thief who restores
+`vault.cloak` from a stale backup hits `Error::VaultRollbackDetected`
+on the next write. Read-only operations (`vault.show`, `vault.list`)
+against a rolled-back snapshot are **not** detected — this is a
+documented residual risk for v0.9.x (see `docs/THREAT_MODEL.md` and the
+v0.9.0-rc2 known-caveats list in `CHANGELOG.md`). Mirroring the counter
+into a separate OS-keychain item so `Vault::open_unlocked` can reject
+read-side rollback is a v1.0.1 deliverable.
 
 ## Privileged tool dispatch
 

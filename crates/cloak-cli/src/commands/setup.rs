@@ -6,7 +6,9 @@
 //!
 //! Steps:
 //! 1. Vault passphrase (with strength meter via `zxcvbn`).
-//! 2. Pepper installed in OS keychain (handled inside `Vault::initialize`).
+//!    Pepper installed in OS keychain (handled inside `Vault::initialize`).
+//! 2. Default policy file written to `~/.config/cloak/policy.toml`
+//!    (idempotent; never overwrites a user's edits).
 //! 3. Daemon installed (launchd / systemd-user) and started.
 //! 4. Detected MCP clients registered (per-client opt-out).
 //! 5. `.env` files in cwd offered for import; post-import disposition.
@@ -18,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use cloak_core::crypto::Secret;
+use cloak_core::policy::default_policy_path;
 use dialoguer::{theme::ColorfulTheme, Confirm, Password, Select};
 use zxcvbn::Score;
 
@@ -26,6 +29,12 @@ use super::daemon as daemonctl;
 use super::dotenv::{discover_envs, parse_dotenv};
 use super::import::{import_silently, Mode as ImportMode};
 use super::{open_vault, Context, SystemError};
+
+/// Starter policy template written by `cloak setup` when no
+/// `policy.toml` exists. Default-deny posture matching the in-memory
+/// fallback in `cloak-core::policy`, plus commented-out per-secret
+/// examples the user can uncomment to enable specific tools/hosts.
+pub(crate) const STARTER_POLICY_TOML: &str = include_str!("setup_starter_policy.toml");
 
 /// CLI options for `cloak setup`.
 #[derive(Debug, Clone, Default)]
@@ -39,6 +48,10 @@ pub struct SetupOptions {
     pub skip_clients: bool,
     /// Skip the `.env` import step.
     pub skip_env: bool,
+    /// Invoked from a Claude Desktop extension (Cloak.dxt). The
+    /// process has no controlling TTY, so passphrase prompts are
+    /// routed through native OS dialogs instead of `dialoguer`.
+    pub from_dxt: bool,
 }
 
 pub fn run(ctx: &Context, opts: SetupOptions) -> Result<()> {
@@ -52,7 +65,19 @@ pub fn run(ctx: &Context, opts: SetupOptions) -> Result<()> {
     // --- 1. Passphrase + vault init ----------------------------------------
     init_vault(ctx, &theme, &opts)?;
 
-    // --- 2. Daemon install / start -----------------------------------------
+    // --- 2. Default policy file -------------------------------------------
+    // Always run; the function is idempotent and only writes when no
+    // file is present. This is what stops a fresh install from silently
+    // hitting the in-memory `Action::Deny` fallback in cloak-core.
+    let policy_outcome = match write_default_policy(&default_policy_path()) {
+        Ok(o) => Some(o),
+        Err(e) => {
+            eprintln!("warning: could not write default policy.toml: {e}");
+            None
+        }
+    };
+
+    // --- 3. Daemon install / start -----------------------------------------
     if !opts.skip_daemon {
         match install_and_start_daemon(&theme, &opts) {
             Ok(()) => {}
@@ -63,18 +88,31 @@ pub fn run(ctx: &Context, opts: SetupOptions) -> Result<()> {
         }
     }
 
-    // --- 3. MCP client registration ----------------------------------------
+    // --- 4. MCP client registration ----------------------------------------
     if !opts.skip_clients {
         register_clients(&theme, &opts);
     }
 
-    // --- 4. .env import -----------------------------------------------------
+    // --- 5. .env import -----------------------------------------------------
     if !opts.skip_env {
         offer_env_import(ctx, &theme, &opts)?;
     }
 
     println!();
     println!("Setup complete. Try `cloak list` or `cloak doctor`.");
+    if let Some(o) = policy_outcome {
+        match o {
+            PolicyWriteOutcome::Wrote(p) => {
+                println!();
+                println!("Note: I wrote a default-deny policy at {}.", p.display());
+                println!("      Edit it to allow specific secrets/hosts before");
+                println!("      Claude (or any MCP client) can call protected tools.");
+                println!("      See `scripts/policy.example.toml` in the Cloak repo");
+                println!("      for a worked example.");
+            }
+            PolicyWriteOutcome::AlreadyExists(_) => {}
+        }
+    }
     Ok(())
 }
 
@@ -86,13 +124,13 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
     let mut vault = open_vault(ctx)?;
     if vault.is_initialized()? {
         println!(
-            "[1/4] vault: already initialized at {}",
+            "[1/5] vault: already initialized at {}",
             ctx.vault_path.display()
         );
         return Ok(());
     }
     println!(
-        "[1/4] vault: creating a new vault at {}",
+        "[1/5] vault: creating a new vault at {}",
         ctx.vault_path.display()
     );
 
@@ -102,6 +140,11 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
         return Err(SystemError::boxed(
             "vault not initialized; run `cloak setup` interactively first",
         ));
+    } else if opts.from_dxt {
+        // Claude Desktop extension: no TTY. Use native OS password
+        // dialog instead of `dialoguer::Password`, which would error
+        // out trying to read from /dev/tty.
+        prompt_passphrase_via_native_dialog()?
     } else {
         prompt_strong_passphrase(theme)?
     };
@@ -155,6 +198,182 @@ fn prompt_strong_passphrase(theme: &ColorfulTheme) -> Result<Secret<String>> {
     }
 }
 
+/// Prompt for a passphrase via a native OS password dialog. Used by the
+/// Cloak.dxt first-run flow because the extension host runs us without
+/// a controlling TTY, which means `dialoguer::Password::interact()`
+/// would fail with "not a terminal".
+///
+/// macOS: AppleScript `display dialog ... with hidden answer`.
+/// Linux: `zenity --password`, falling back to
+/// `kdialog --password "..."` if zenity is missing.
+///
+/// We do NOT pipe the passphrase through argv / env (visible in
+/// `ps`); we read it from the dialog tool's stdout. We also do a
+/// simple confirm dialog for "type it again" parity with the TTY flow.
+fn prompt_passphrase_via_native_dialog() -> Result<Secret<String>> {
+    if let Ok(p) = std::env::var("CLOAK_PASSPHRASE") {
+        // Honor the test/CI override silently.
+        return Ok(Secret::new(p));
+    }
+    loop {
+        let first = native_password_prompt(
+            "Cloak",
+            "Choose a passphrase for your local secrets vault.\n\nThis passphrase encrypts your vault on disk and never leaves this machine.",
+        )?;
+        let confirm = native_password_prompt("Cloak", "Confirm your passphrase.")?;
+        if first.expose_secret() != confirm.expose_secret() {
+            // Show an info dialog and loop.
+            native_info_dialog("Cloak", "Passphrases did not match. Please try again.");
+            continue;
+        }
+        // Score with zxcvbn and accept-or-warn. We don't loop on weak
+        // input here because the dialog UX is awkward; we surface the
+        // warning and let the user decide.
+        let estimate = zxcvbn::zxcvbn(first.expose_secret(), &[]);
+        if (estimate.score() as u8) < 2 {
+            let warning = estimate
+                .feedback()
+                .and_then(|f| f.warning())
+                .map(|w| w.to_string())
+                .unwrap_or_else(|| "passphrase is weak".to_string());
+            native_info_dialog(
+                "Cloak: weak passphrase",
+                &format!(
+                    "{warning}\n\nYou can continue, but consider a stronger passphrase next time."
+                ),
+            );
+        }
+        return Ok(first);
+    }
+}
+
+/// Spawn a native password dialog and return the entered string. The
+/// dialog blocks until the user clicks OK or cancels. On cancel /
+/// failure we surface a `SystemError` so the caller can exit non-zero.
+fn native_password_prompt(title: &str, message: &str) -> Result<Secret<String>> {
+    #[cfg(target_os = "macos")]
+    {
+        // AppleScript handles dialog dismissal: it returns text on OK
+        // and exits non-zero on Cancel. We escape the message string
+        // by JSON-encoding it (AppleScript accepts the same escapes
+        // for double-quoted strings).
+        let msg = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".into());
+        let title_lit = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
+        let script = format!(
+            "set R to display dialog {msg} with title {title_lit} default answer \"\" with hidden answer\nreturn text returned of R"
+        );
+        let out = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .map_err(|e| SystemError::boxed(format!("spawn osascript: {e}")))?;
+        if !out.status.success() {
+            return Err(SystemError::boxed("passphrase dialog cancelled"));
+        }
+        let s = String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches('\n')
+            .to_string();
+        Ok(Secret::new(s))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // zenity prints the password to stdout on OK, exits non-zero
+        // on Cancel. kdialog behaves the same.
+        if which_bin("zenity") {
+            let out = std::process::Command::new("zenity")
+                .args([
+                    "--password",
+                    &format!("--title={title}"),
+                    // zenity --password ignores --text on some
+                    // versions; keep the title informative and rely
+                    // on a preceding info dialog when context matters.
+                ])
+                .output()
+                .map_err(|e| SystemError::boxed(format!("spawn zenity: {e}")))?;
+            if !out.status.success() {
+                return Err(SystemError::boxed("passphrase dialog cancelled"));
+            }
+            let s = String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches('\n')
+                .to_string();
+            return Ok(Secret::new(s));
+        }
+        if which_bin("kdialog") {
+            let out = std::process::Command::new("kdialog")
+                .args(["--title", title, "--password", message])
+                .output()
+                .map_err(|e| SystemError::boxed(format!("spawn kdialog: {e}")))?;
+            if !out.status.success() {
+                return Err(SystemError::boxed("passphrase dialog cancelled"));
+            }
+            let s = String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches('\n')
+                .to_string();
+            return Ok(Secret::new(s));
+        }
+        Err(SystemError::boxed(
+            "no native password dialog available (install zenity or kdialog)",
+        ))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (title, message);
+        Err(SystemError::boxed(
+            "native password dialog not supported on this platform",
+        ))
+    }
+}
+
+/// Show a non-modal informational dialog. Best-effort.
+fn native_info_dialog(title: &str, message: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let msg = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".into());
+        let title_lit = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
+        let script = format!(
+            "display dialog {msg} with title {title_lit} buttons {{\"OK\"}} default button \"OK\""
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .status();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if which_bin("zenity") {
+            let _ = std::process::Command::new("zenity")
+                .args([
+                    "--info",
+                    &format!("--title={title}"),
+                    &format!("--text={message}"),
+                ])
+                .status();
+            return;
+        }
+        if which_bin("kdialog") {
+            let _ = std::process::Command::new("kdialog")
+                .args(["--title", title, "--msgbox", message])
+                .status();
+            return;
+        }
+        eprintln!("[{title}] {message}");
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (title, message);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn which_bin(name: &str) -> bool {
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if dir.join(name).is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn strength_bar(score: Score) -> &'static str {
     match score as u8 {
         0 => "[#         ] very weak",
@@ -166,7 +385,45 @@ fn strength_bar(score: Score) -> &'static str {
 }
 
 // -------------------------------------------------------------------------
-// Step 2: daemon install / start
+// Step 2: default policy file
+// -------------------------------------------------------------------------
+
+/// Result of [`write_default_policy`].
+#[derive(Debug)]
+pub(crate) enum PolicyWriteOutcome {
+    /// Wrote a fresh starter policy.
+    Wrote(PathBuf),
+    /// File already existed; left untouched.
+    AlreadyExists(#[allow(dead_code)] PathBuf),
+}
+
+/// Ensure `path` (typically `~/.config/cloak/policy.toml`) contains a
+/// policy file. If absent, write the default-deny starter template at
+/// mode 0o600 with a `.bak` of any prior file. Idempotent: never
+/// overwrites existing content.
+pub(crate) fn write_default_policy(path: &Path) -> Result<PolicyWriteOutcome> {
+    if path.exists() {
+        tracing::debug!(
+            path = %path.display(),
+            "policy.toml already exists; leaving alone"
+        );
+        println!(
+            "[2/5] policy: {} already exists; leaving alone",
+            path.display()
+        );
+        return Ok(PolicyWriteOutcome::AlreadyExists(path.to_path_buf()));
+    }
+    daemonctl::atomic_write_with_backup(path, STARTER_POLICY_TOML.as_bytes(), 0o600)
+        .with_context(|| format!("write default policy to {}", path.display()))?;
+    println!(
+        "[2/5] policy: wrote default-deny policy to {}",
+        path.display()
+    );
+    Ok(PolicyWriteOutcome::Wrote(path.to_path_buf()))
+}
+
+// -------------------------------------------------------------------------
+// Step 3: daemon install / start
 // -------------------------------------------------------------------------
 
 fn install_and_start_daemon(theme: &ColorfulTheme, opts: &SetupOptions) -> Result<()> {
@@ -174,7 +431,7 @@ fn install_and_start_daemon(theme: &ColorfulTheme, opts: &SetupOptions) -> Resul
         true
     } else {
         Confirm::with_theme(theme)
-            .with_prompt("[2/4] install the cloakd background daemon now?")
+            .with_prompt("[3/5] install the cloakd background daemon now?")
             .default(true)
             .interact()
             .unwrap_or(true)
@@ -206,16 +463,16 @@ fn install_and_start_daemon(theme: &ColorfulTheme, opts: &SetupOptions) -> Resul
 }
 
 // -------------------------------------------------------------------------
-// Step 3: MCP client registration
+// Step 4: MCP client registration
 // -------------------------------------------------------------------------
 
 fn register_clients(theme: &ColorfulTheme, opts: &SetupOptions) {
     let detected = clients::detected();
     if detected.is_empty() {
-        println!("[3/4] MCP clients: none detected. Use `cloak claude register --all` later.");
+        println!("[4/5] MCP clients: none detected. Use `cloak claude register --all` later.");
         return;
     }
-    println!("[3/4] MCP clients detected:");
+    println!("[4/5] MCP clients detected:");
     for c in &detected {
         println!("        - {}", c.label());
     }
@@ -254,17 +511,17 @@ fn register_clients(theme: &ColorfulTheme, opts: &SetupOptions) {
 }
 
 // -------------------------------------------------------------------------
-// Step 4: .env import
+// Step 5: .env import
 // -------------------------------------------------------------------------
 
 fn offer_env_import(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let envs = discover_envs(&cwd);
     if envs.is_empty() {
-        println!("[4/4] .env: none found in {}", cwd.display());
+        println!("[5/5] .env: none found in {}", cwd.display());
         return Ok(());
     }
-    println!("[4/4] .env files found:");
+    println!("[5/5] .env files found:");
     for p in &envs {
         let n = parse_dotenv(p).map(|v| v.len()).unwrap_or(0);
         println!("        - {} ({} entries)", p.display(), n);
@@ -368,4 +625,85 @@ fn add_to_gitignore(path: &Path) -> Result<()> {
     daemonctl::atomic_write(&gi, existing.as_bytes(), 0o644)?;
     println!("      → added {} to {}", line, gi.display());
     Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Tests
+// -------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bundled starter template must always parse with the same
+    /// engine that cloakd uses, otherwise we'd hand the user a broken
+    /// file. Also asserts the default-deny posture.
+    #[test]
+    fn starter_template_parses_and_is_default_deny() {
+        let mut e = cloak_core::policy::PolicyEngine::from_str(STARTER_POLICY_TOML)
+            .expect("starter policy must parse");
+        let ctx = cloak_core::policy::EvalContext {
+            tool: "proxy_authenticated_http_request",
+            secret_name: Some("OPENAI_API_KEY"),
+            secret_kind: None,
+            target_host: Some("api.openai.com"),
+            peer_basename: "test",
+        };
+        // Default-deny: no per-secret rule is uncommented in the
+        // starter template, so this call must be denied.
+        assert_eq!(
+            e.evaluate(&ctx).action,
+            cloak_core::policy::Action::Deny,
+            "starter policy must default-deny proxy_http"
+        );
+        // query_audit is always allowed (read-only).
+        let audit_ctx = cloak_core::policy::EvalContext {
+            tool: "query_audit",
+            secret_name: None,
+            secret_kind: None,
+            target_host: None,
+            peer_basename: "test",
+        };
+        assert_eq!(
+            e.evaluate(&audit_ctx).action,
+            cloak_core::policy::Action::Allow
+        );
+    }
+
+    #[test]
+    fn write_default_policy_creates_file_with_mode_600() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cloak").join("policy.toml");
+        let outcome = write_default_policy(&path).unwrap();
+        assert!(matches!(outcome, PolicyWriteOutcome::Wrote(_)));
+        assert!(path.exists());
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("[default]"));
+        assert!(body.contains("action = \"deny\""));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "policy file must be mode 0o600, got {mode:o}");
+        }
+    }
+
+    #[test]
+    fn write_default_policy_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        std::fs::write(
+            &path,
+            b"# user-edited content\n[default]\naction = \"allow\"\n",
+        )
+        .unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        let outcome = write_default_policy(&path).unwrap();
+        assert!(matches!(outcome, PolicyWriteOutcome::AlreadyExists(_)));
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            original, after,
+            "existing policy.toml must not be overwritten"
+        );
+    }
 }

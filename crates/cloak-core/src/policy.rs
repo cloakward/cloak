@@ -13,12 +13,25 @@
 //! is the longest non-wildcard prefix; ties are broken by file order.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
+
+/// Default policy file path: `~/.config/cloak/policy.toml` (XDG config
+/// dir on Linux, `~/Library/Application Support` on macOS, etc.). Falls
+/// back to `/tmp/cloak-policy.toml` only if no config dir is detectable.
+///
+/// Both `cloakd` (loading the policy at startup) and `cloak setup` /
+/// `cloak doctor` (writing / inspecting it) resolve to the same path.
+pub fn default_policy_path() -> PathBuf {
+    if let Some(cfg) = dirs::config_dir() {
+        return cfg.join("cloak").join("policy.toml");
+    }
+    PathBuf::from("/tmp/cloak-policy.toml")
+}
 
 // ------------------------------------------------------------------------
 // Schema types
