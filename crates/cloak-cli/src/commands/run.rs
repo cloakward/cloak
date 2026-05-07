@@ -21,11 +21,7 @@ use super::audit_log;
 use super::{open_vault, unlock::unlock_interactive, Context};
 use crate::biometric_macos;
 
-pub fn run(
-    ctx: &Context,
-    only: Vec<String>,
-    cmdline: Vec<OsString>,
-) -> Result<ExitCode> {
+pub fn run(ctx: &Context, only: Vec<String>, cmdline: Vec<OsString>) -> Result<ExitCode> {
     if cmdline.is_empty() {
         anyhow::bail!("usage: cloak run [--only K1,K2] -- COMMAND [ARG ...]");
     }
@@ -77,9 +73,9 @@ pub fn run(
         child.env(k, v.expose_secret());
     }
     // Inherit the rest of stdin/stdout/stderr — aws-vault style.
-    let status = child.status().map_err(|e| {
-        anyhow::anyhow!("failed to spawn {}: {e}", program.to_string_lossy())
-    })?;
+    let status = child
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to spawn {}: {e}", program.to_string_lossy()))?;
 
     // Explicitly drop now so zeroize-on-drop runs before we return.
     drop(env_pairs);

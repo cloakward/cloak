@@ -123,7 +123,11 @@ impl Client {
             }
             Client::ClaudeCode => None,
             Client::Cursor => Some(home.join(".cursor").join("mcp.json")),
-            Client::Windsurf => Some(home.join(".codeium").join("windsurf").join("mcp_config.json")),
+            Client::Windsurf => Some(
+                home.join(".codeium")
+                    .join("windsurf")
+                    .join("mcp_config.json"),
+            ),
             Client::Continue => Some(home.join(".continue").join("config.json")),
             Client::Zed => Some(
                 cfg.unwrap_or_else(|| home.join(".config"))
@@ -137,13 +141,12 @@ impl Client {
     /// Returns true if this client appears to be installed locally.
     pub fn detect(&self) -> bool {
         match self {
-            Client::ClaudeCode => super::daemon::resolve_cloakd_bin().is_ok() && which_bin("claude"),
+            Client::ClaudeCode => {
+                super::daemon::resolve_cloakd_bin().is_ok() && which_bin("claude")
+            }
             other => other
                 .config_path()
-                .map(|p| {
-                    p.exists()
-                        || p.parent().map(|d| d.exists()).unwrap_or(false)
-                })
+                .map(|p| p.exists() || p.parent().map(|d| d.exists()).unwrap_or(false))
                 .unwrap_or(false),
         }
     }
@@ -162,7 +165,11 @@ fn which_bin(name: &str) -> bool {
 
 /// Detected, installed clients in priority order.
 pub fn detected() -> Vec<Client> {
-    Client::all().iter().copied().filter(|c| c.detect()).collect()
+    Client::all()
+        .iter()
+        .copied()
+        .filter(|c| c.detect())
+        .collect()
 }
 
 // -------------------------------------------------------------------------
@@ -256,7 +263,13 @@ fn register_claude_code() -> Result<RegisterOutcome> {
         return Ok(RegisterOutcome::Skipped("claude CLI not on PATH"));
     }
     let status = std::process::Command::new("claude")
-        .args(["mcp", "add", SERVER_NAME, "--", mcp_bin.to_str().unwrap_or("cloak-mcp")])
+        .args([
+            "mcp",
+            "add",
+            SERVER_NAME,
+            "--",
+            mcp_bin.to_str().unwrap_or("cloak-mcp"),
+        ])
         .status()
         .context("spawn claude mcp add")?;
     if !status.success() {
@@ -291,8 +304,7 @@ fn register_json_client(client: Client) -> Result<RegisterOutcome> {
         .config_path()
         .ok_or_else(|| anyhow::anyhow!("no config path for {}", client.label()))?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
 
     let mut root = read_jsonish(&path)?;
@@ -365,8 +377,7 @@ fn read_jsonish(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(Value::Object(Map::new()));
     }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     if raw.trim().is_empty() {
         return Ok(Value::Object(Map::new()));
     }
@@ -420,7 +431,9 @@ fn strip_jsonc_comments(input: &str) -> String {
             }
             if next == '*' {
                 i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] as char == '*' && bytes[i + 1] as char == '/') {
+                while i + 1 < bytes.len()
+                    && !(bytes[i] as char == '*' && bytes[i + 1] as char == '/')
+                {
                     i += 1;
                 }
                 i = (i + 2).min(bytes.len());
@@ -461,7 +474,11 @@ pub fn run_register(_ctx: &Context, sel: RegisterSelection) -> Result<()> {
                 println!("[ok]      {}: ran `{cmd}`", c.label());
             }
             Ok(RegisterOutcome::AlreadyPresent(p)) => {
-                println!("[noop]    {}: already up to date ({})", c.label(), p.display());
+                println!(
+                    "[noop]    {}: already up to date ({})",
+                    c.label(),
+                    p.display()
+                );
             }
             Ok(RegisterOutcome::Skipped(why)) => {
                 println!("[skip]    {}: {why}", c.label());
@@ -532,7 +549,8 @@ mod tests {
         std::fs::write(&path, r#"{"otherServers":{"x":1}}"#).unwrap();
         let stanza = serde_json::json!({"command":"x","args":[],"env":{}});
 
-        let mut root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut root: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         root.as_object_mut()
             .unwrap()
             .entry("mcpServers".to_string())
@@ -540,7 +558,12 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("cloak".to_string(), stanza);
-        atomic_write_with_backup(&path, serde_json::to_string_pretty(&root).unwrap().as_bytes(), 0o600).unwrap();
+        atomic_write_with_backup(
+            &path,
+            serde_json::to_string_pretty(&root).unwrap().as_bytes(),
+            0o600,
+        )
+        .unwrap();
 
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(after.get("otherServers").is_some());

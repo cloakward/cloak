@@ -85,10 +85,16 @@ pub fn run(ctx: &Context, opts: SetupOptions) -> Result<()> {
 fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Result<()> {
     let mut vault = open_vault(ctx)?;
     if vault.is_initialized()? {
-        println!("[1/4] vault: already initialized at {}", ctx.vault_path.display());
+        println!(
+            "[1/4] vault: already initialized at {}",
+            ctx.vault_path.display()
+        );
         return Ok(());
     }
-    println!("[1/4] vault: creating a new vault at {}", ctx.vault_path.display());
+    println!(
+        "[1/4] vault: creating a new vault at {}",
+        ctx.vault_path.display()
+    );
 
     let pass = if opts.non_interactive {
         // Non-interactive: refuse rather than silently picking a

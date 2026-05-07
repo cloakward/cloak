@@ -75,9 +75,7 @@ pub fn run(ctx: &Context, sel: Selector, yes: bool) -> Result<()> {
     if matches!(sel, Selector::All) {
         unlock_interactive(&mut vault)?;
         if !ctx.no_biometric {
-            match biometric_macos::authenticate(
-                "Confirm: delete every secret in the Cloak vault",
-            ) {
+            match biometric_macos::authenticate("Confirm: delete every secret in the Cloak vault") {
                 Ok(true) => {}
                 _ => anyhow::bail!("biometric confirmation failed; aborting"),
             }

@@ -18,7 +18,12 @@ use super::{open_vault, Context};
 pub fn run(ctx: &Context) -> Result<()> {
     let vault = open_vault(ctx)?;
     let names: Vec<String> = if vault.is_initialized().unwrap_or(false) {
-        vault.list().unwrap_or_default().into_iter().map(|m| m.name).collect()
+        vault
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| m.name)
+            .collect()
     } else {
         Vec::new()
     };

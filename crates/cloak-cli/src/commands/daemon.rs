@@ -84,8 +84,7 @@ pub fn resolve_cloakd_bin() -> Result<PathBuf> {
 }
 
 fn which(bin: &str) -> Result<PathBuf> {
-    let path = std::env::var_os("PATH")
-        .ok_or_else(|| anyhow::anyhow!("PATH is not set"))?;
+    let path = std::env::var_os("PATH").ok_or_else(|| anyhow::anyhow!("PATH is not set"))?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(bin);
         if candidate.is_file() {
@@ -197,7 +196,8 @@ pub fn start_daemon() -> Result<()> {
             // because newer macOS prefers `bootstrap`. We then bootstrap
             // explicitly and fall back to `kickstart`.
             let _ = run_quiet(Command::new("launchctl").args(["unload", plist.to_str().unwrap()]));
-            let _ = run_quiet(Command::new("launchctl").args(["load", "-w", plist.to_str().unwrap()]));
+            let _ =
+                run_quiet(Command::new("launchctl").args(["load", "-w", plist.to_str().unwrap()]));
             // Kickstart: best-effort restart so re-runs pick up new bin.
             let domain = format!("gui/{}", current_uid());
             let target = format!("{domain}/{LAUNCHD_LABEL}");
@@ -207,7 +207,12 @@ pub fn start_daemon() -> Result<()> {
         DaemonFlavour::SystemdUser => {
             install_systemd_unit()?;
             run_quiet(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
-            run_quiet(Command::new("systemctl").args(["--user", "enable", "--now", "cloakd.service"]))?;
+            run_quiet(Command::new("systemctl").args([
+                "--user",
+                "enable",
+                "--now",
+                "cloakd.service",
+            ]))?;
             Ok(())
         }
     }
@@ -219,9 +224,8 @@ pub fn stop_daemon() -> Result<()> {
         DaemonFlavour::Launchd => {
             let plist = launchd_plist_path()?;
             if plist.exists() {
-                let _ = run_quiet(
-                    Command::new("launchctl").args(["unload", plist.to_str().unwrap()]),
-                );
+                let _ =
+                    run_quiet(Command::new("launchctl").args(["unload", plist.to_str().unwrap()]));
             }
             // Belt-and-suspenders: bootout & stop.
             let domain = format!("gui/{}", current_uid());
@@ -230,9 +234,12 @@ pub fn stop_daemon() -> Result<()> {
             Ok(())
         }
         DaemonFlavour::SystemdUser => {
-            let _ = run_quiet(
-                Command::new("systemctl").args(["--user", "disable", "--now", "cloakd.service"]),
-            );
+            let _ = run_quiet(Command::new("systemctl").args([
+                "--user",
+                "disable",
+                "--now",
+                "cloakd.service",
+            ]));
             Ok(())
         }
     }
@@ -241,7 +248,9 @@ pub fn stop_daemon() -> Result<()> {
 /// Returns true if the daemon's UDS is live (we can connect, then close).
 pub fn daemon_alive() -> bool {
     use std::os::unix::net::UnixStream;
-    let Some(sock) = socket_path() else { return false };
+    let Some(sock) = socket_path() else {
+        return false;
+    };
     UnixStream::connect(&sock).is_ok()
 }
 
@@ -299,8 +308,7 @@ pub fn install_systemd_unit() -> Result<PathBuf> {
     let cloakd = resolve_cloakd_bin()?;
     let path = systemd_unit_path()?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let body = systemd_unit_body(&cloakd);
     atomic_write(&path, body.as_bytes(), 0o644)?;
@@ -345,7 +353,10 @@ pub fn run_status(_ctx: &Context) -> Result<()> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "<unknown>".to_string());
     println!("socket:   {sock}");
-    println!("status:   {}", if alive { "running" } else { "not running" });
+    println!(
+        "status:   {}",
+        if alive { "running" } else { "not running" }
+    );
     if !alive {
         return Err(SystemError::boxed("cloakd is not running"));
     }
@@ -364,8 +375,7 @@ pub fn atomic_write(path: &std::path::Path, bytes: &[u8], mode: u32) -> Result<(
     let parent = path
         .parent()
         .ok_or_else(|| SystemError::boxed(format!("no parent dir for {}", path.display())))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("create {}", parent.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("tempfile in {}", parent.display()))?;
     tmp.write_all(bytes)

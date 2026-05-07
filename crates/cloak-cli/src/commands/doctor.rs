@@ -142,8 +142,16 @@ fn check_daemon() -> Check {
                     return Check {
                         name: "daemon socket ownership".into(),
                         status: Status::Fail,
-                        detail: format!("{} owned by uid {} (we are {})", p.display(), meta.uid(), our_uid),
-                        remediation: Some("stop cloakd, remove the socket, and run `cloak daemon start` again".into()),
+                        detail: format!(
+                            "{} owned by uid {} (we are {})",
+                            p.display(),
+                            meta.uid(),
+                            our_uid
+                        ),
+                        remediation: Some(
+                            "stop cloakd, remove the socket, and run `cloak daemon start` again"
+                                .into(),
+                        ),
                     };
                 }
                 if mode & 0o077 != 0 {
@@ -151,7 +159,10 @@ fn check_daemon() -> Check {
                         name: "daemon socket mode".into(),
                         status: Status::Fail,
                         detail: format!("{} mode {:o} (expected 0600)", p.display(), mode),
-                        remediation: Some("stop cloakd and restart it; never run cloakd as a different user".into()),
+                        remediation: Some(
+                            "stop cloakd and restart it; never run cloakd as a different user"
+                                .into(),
+                        ),
                     };
                 }
             }
@@ -173,7 +184,9 @@ fn check_vault(ctx: &Context) -> Check {
                 name: "vault file accessible".into(),
                 status: Status::Fail,
                 detail: e.to_string(),
-                remediation: Some("ensure your home directory is writable; run `cloak setup`".into()),
+                remediation: Some(
+                    "ensure your home directory is writable; run `cloak setup`".into(),
+                ),
             }
         }
     };
@@ -197,7 +210,9 @@ fn check_vault(ctx: &Context) -> Check {
             name: "vault initialized".into(),
             status: Status::Fail,
             detail: e.to_string(),
-            remediation: Some("file may be corrupted; check `cloak status` and consider restoring".into()),
+            remediation: Some(
+                "file may be corrupted; check `cloak status` and consider restoring".into(),
+            ),
         },
     }
 }

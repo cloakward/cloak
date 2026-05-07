@@ -340,7 +340,10 @@ pub fn run() -> Result<ExitCode> {
     // primitives) so that scripted callers and the wizard itself don't
     // recurse.
     if requires_vault(&cli.command) && !vault_exists(&ctx) {
-        eprintln!("(no vault found at {} — running setup wizard first)", ctx.vault_path.display());
+        eprintln!(
+            "(no vault found at {} — running setup wizard first)",
+            ctx.vault_path.display()
+        );
         setup::run(
             &ctx,
             setup::SetupOptions {
