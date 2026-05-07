@@ -238,7 +238,7 @@ fn native_password_prompt(title: &str, message: &str) -> Result<Secret<String>> 
         let s = String::from_utf8_lossy(&out.stdout)
             .trim_end_matches('\n')
             .to_string();
-        return Ok(Secret::new(s));
+        Ok(Secret::new(s))
     }
     #[cfg(target_os = "linux")]
     {
@@ -276,9 +276,9 @@ fn native_password_prompt(title: &str, message: &str) -> Result<Secret<String>> 
                 .to_string();
             return Ok(Secret::new(s));
         }
-        return Err(SystemError::boxed(
+        Err(SystemError::boxed(
             "no native password dialog available (install zenity or kdialog)",
-        ));
+        ))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
