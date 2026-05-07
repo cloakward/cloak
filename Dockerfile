@@ -9,7 +9,13 @@
 #
 # Build: `docker build -t cloakd-local .`              (host arch only)
 # Multi-arch builds happen in CI (.github/workflows/docker-push.yml)
-# via `docker buildx build --platform linux/amd64,linux/arm64 ...`.
+# via two native runner jobs (ubuntu-24.04 for linux/amd64,
+# ubuntu-24.04-arm for linux/arm64); the per-arch images are then
+# stitched into a multi-arch manifest with `docker buildx imagetools
+# create`. We deliberately do NOT cross-compile inside Docker — the
+# previous `FROM --platform=$BUILDPLATFORM` + `rustup target add`
+# arrangement consistently failed with `error[E0463]: can't find
+# crate for core` (#46).
 #
 # Runtime contract:
 #   * Vault state lives at /var/lib/cloak (declared as a VOLUME).
@@ -23,7 +29,12 @@
 # `rust:1-bookworm` tracks the latest stable Rust on Debian 12, which
 # matches `rust-toolchain.toml` (channel = "stable"). Bookworm is also
 # what the distroless runtime is built from, so glibc versions line up.
-FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
+#
+# No `--platform=$BUILDPLATFORM` here: each CI build runs on a native
+# runner for the target architecture (ubuntu-24.04 for amd64,
+# ubuntu-24.04-arm for arm64), so the builder pulls the right
+# rust:1-bookworm tag automatically and the entire compile is native.
+FROM rust:1-bookworm AS builder
 
 # `libsodium-sys-stable` is configured with the `fetch-latest` feature
 # in the workspace Cargo.toml, so the build script downloads and
@@ -39,45 +50,19 @@ RUN apt-get update \
         clang \
  && rm -rf /var/lib/apt/lists/*
 
-# `TARGETARCH` is supplied automatically by buildx (`amd64` or `arm64`).
-# Map it to the matching Rust triple. We only support glibc Linux here;
-# the musl matrix row in CI is for static-CLI distribution, not the
-# daemon container.
-ARG TARGETARCH
-RUN set -eux; \
-    case "${TARGETARCH:-amd64}" in \
-        amd64) RUST_TARGET=x86_64-unknown-linux-gnu ;; \
-        arm64) RUST_TARGET=aarch64-unknown-linux-gnu ;; \
-        *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    rustup target add "${RUST_TARGET}"; \
-    echo "${RUST_TARGET}" > /tmp/rust-target
-
 WORKDIR /src
 COPY . .
 
 # Build only the daemon — the CLI and MCP shim are not shipped here.
 # `cargo build --release -p cloak-core --bin cloakd` is the canonical
 # invocation; the workspace `Cargo.lock` is committed so we get a
-# reproducible build.
-#
-# Cache mounts use `sharing=locked` so the linux/amd64 and linux/arm64
-# buildx builds — which `docker buildx` runs concurrently by default —
-# serialize access to the cache instead of racing. The earlier attempt
-# to partition by `id=cargo-{registry,target}-${TARGETARCH}` cleared
-# the EEXIST race but somehow interfered with rustc's discovery of the
-# target std libs (`error[E0463]: can't find crate for core`). Locked
-# sharing keeps a single shared cache and mutex-serializes the writes
-# — marginally slower than parallel but rock-solid for cross-compile.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/src/target,sharing=locked \
+# reproducible build. No `--target` flag because the host arch IS
+# the target arch (native build per-runner).
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
     set -eux; \
-    RUST_TARGET="$(cat /tmp/rust-target)"; \
-    cargo build --release \
-        --target "${RUST_TARGET}" \
-        -p cloak-core \
-        --bin cloakd; \
-    cp "/src/target/${RUST_TARGET}/release/cloakd" /cloakd
+    cargo build --release -p cloak-core --bin cloakd; \
+    cp /src/target/release/cloakd /cloakd
 
 # Resolve any dynamic libsodium dependency. With `fetch-latest`,
 # libsodium is statically linked into `cloakd`, so `ldd` reports no
