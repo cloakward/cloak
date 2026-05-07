@@ -1,6 +1,6 @@
-# Cloak Quickstart (v0.9.0-rc1, macOS)
+# Cloak Quickstart (v0.9.0-rc2, macOS)
 
-> v0.9.0-rc1 (the first release candidate for v1.0) ships macOS + Linux. Windows is deferred to v1.0.1
+> v0.9.0-rc2 (the second release candidate for v1.0) ships macOS + Linux. Windows is deferred to v1.0.1
 > ([issue #3](https://github.com/cloakward/cloak/issues/3)). On Linux the
 > desktop pepper uses freedesktop Secret Service (W7) and `cloak show`
 > gates the reveal on polkit (`dev.cloak.show-secret`; install
@@ -11,13 +11,13 @@
 
 ## Gatekeeper note (macOS, unsigned dev builds)
 
-Cloak v0.9.0-rc1 (and v1.0 going forward) binaries are not Apple-notarized. After downloading a release artifact, macOS Gatekeeper will refuse to run it until you clear the quarantine attribute:
+Cloak v0.9.0-rc2 (and v1.0 going forward) binaries are not Apple-notarized. After downloading a release artifact, macOS Gatekeeper will refuse to run it until you clear the quarantine attribute:
 
 ```sh
 xattr -d com.apple.quarantine ./cloak ./cloakd ./cloak-mcp
 ```
 
-Apple notarization is a v1.x deliverable. The cosign + SLSA L3 attestations on every release are sufficient to verify that the binary you have is the one CI built; notarization adds Apple's pre-execution scan on top of that. We chose to ship without notarization for v0.9.0-rc1 to avoid the Apple Developer Program enrollment and signing-cert renewal treadmill while the project is small.
+Apple notarization is a v1.x deliverable. The cosign + SLSA L3 attestations on every release are sufficient to verify that the binary you have is the one CI built; notarization adds Apple's pre-execution scan on top of that. We chose to ship without notarization for v0.9.0-rc2 to avoid the Apple Developer Program enrollment and signing-cert renewal treadmill while the project is small.
 
 If you build from source there is no Gatekeeper friction — your local toolchain produces an ad-hoc-signed binary that runs immediately.
 
@@ -45,7 +45,7 @@ tail -f ~/Library/Logs/cloak/cloakd.err.log
 
 ## 3. Initialize the vault
 
-> **⚠️ Back up your passphrase before adding any secret.** Cloak v0.9.0-rc1 has no recovery mechanism: if you lose your passphrase, every secret in the vault is permanently unrecoverable. Store it in a password manager or out-of-band backup. BIP-39 24-word recovery is planned for v1.x.
+> **⚠️ Back up your passphrase before adding any secret.** Cloak v0.9.0-rc2 has no recovery mechanism: if you lose your passphrase, every secret in the vault is permanently unrecoverable. Store it in a password manager or out-of-band backup. BIP-39 24-word recovery is planned for v1.x.
 
 ```sh
 cloak init                  # prompts for passphrase, autotunes Argon2id
@@ -106,9 +106,10 @@ The model will call `proxy_authenticated_http_request`. The daemon attaches the 
 
 ## 7. Inspect the audit log
 
+The hash-chained JSONL audit log lives at `~/Library/Application Support/cloak/audit.jsonl` (XDG equivalent on Linux). Tail it directly, or query it through the daemon via the MCP `tool.query_audit` surface:
+
 ```sh
-cloak audit tail -n 20
-cloak audit verify ~/Library/Application\ Support/cloak/audit.jsonl
+tail -n 20 ~/Library/Application\ Support/cloak/audit.jsonl
 ```
 
 ## What's deliberately not here yet
