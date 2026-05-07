@@ -230,7 +230,10 @@ pub(crate) fn write_default_policy(path: &Path) -> Result<PolicyWriteOutcome> {
     }
     daemonctl::atomic_write_with_backup(path, STARTER_POLICY_TOML.as_bytes(), 0o600)
         .with_context(|| format!("write default policy to {}", path.display()))?;
-    println!("[2/5] policy: wrote default-deny policy to {}", path.display());
+    println!(
+        "[2/5] policy: wrote default-deny policy to {}",
+        path.display()
+    );
     Ok(PolicyWriteOutcome::Wrote(path.to_path_buf()))
 }
 
@@ -504,7 +507,11 @@ mod tests {
     fn write_default_policy_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.toml");
-        std::fs::write(&path, b"# user-edited content\n[default]\naction = \"allow\"\n").unwrap();
+        std::fs::write(
+            &path,
+            b"# user-edited content\n[default]\naction = \"allow\"\n",
+        )
+        .unwrap();
         let original = std::fs::read_to_string(&path).unwrap();
         let outcome = write_default_policy(&path).unwrap();
         assert!(matches!(outcome, PolicyWriteOutcome::AlreadyExists(_)));
