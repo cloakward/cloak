@@ -243,12 +243,17 @@ jobs:
           BRANCH="bump/cloak-${VERSION}"
           git checkout -b "$BRANCH"
 
-          if git diff --quiet -- Formula/cloak.rb; then
+          # Stage first, then diff against HEAD. `git diff --quiet`
+          # alone misses brand-new (untracked) files — that's what
+          # tripped this on the very first formula bump for an empty
+          # tap repo. With the file staged, `git diff --cached` sees
+          # the add as a change and we proceed to push + PR.
+          git add Formula/cloak.rb
+          if git diff --cached --quiet -- Formula/cloak.rb; then
             echo "::notice::Formula/cloak.rb already up to date for ${VERSION}; nothing to do."
             exit 0
           fi
 
-          git add Formula/cloak.rb
           git commit -m "cloak ${VERSION}"
           git push --set-upstream origin "$BRANCH"
 
