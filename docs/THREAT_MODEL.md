@@ -1,4 +1,4 @@
-# Cloak Threat Model (v0.9.0-rc1)
+# Cloak Threat Model (v0.9.0-rc2)
 
 > This document describes what Cloak defends against, what it does not,
 > and the trust assumptions underpinning each defense. It enumerates the
@@ -27,7 +27,7 @@
 | **A5 — Memory dump of `cloakd`** | Postmortem core, swap, hibernate | (a) `Secret<T>` zeroize-on-drop on every secret-typed value. (b) Master key kept only when unlocked; `cloak lock` zeroizes. (c) Swap-disable is **not** done in v1.0; users on shared servers should disable swap or use full-disk encryption. |
 | **A6 — Tamper with vault file at rest** | Flip bytes in salt, ciphertext, header | AEAD tag detects any byte flip; typed `Error::Aead` (no panic). |
 | **A7 — Rollback to earlier vault state** | Restore an older `vault.cloak` to undo a rotation | Monotonic counter committed to the vault's `meta` table; every write enforces strict increase via `bump_counter`. On a restored older snapshot, the next write fails with `Error::VaultRollbackDetected`. Read-only operations (`vault.show`, `vault.list`) on a rolled-back vault are not detected; this is a documented residual risk for v0.9.x. v1.0.1 will mirror the counter to the OS keychain (separate item) so reads also detect rollback. |
-| **A8 — PID recycle attack** | Reuse a freed PID to impersonate a trusted peer | macOS: at handshake `cloakd` calls `getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)` to capture the peer's 32-byte `audit_token_t` (which carries the kernel's non-recycling pidversion in `val[7]`) and stores it in the `SessionRecord`; every subsequent request constant-time-compares the stored bytes via `subtle::ConstantTimeEq`. In parallel, a per-connection `kqueue` watcher armed with `EVFILT_PROC | NOTE_EXIT` (wrapped in `tokio::io::unix::AsyncFd`) revokes every session bound to the connection the instant the kernel reports the peer has exited, closing the PID-recycle window before any other process can inherit the freed PID. Linux (v0.9.0-rc1, see [#21](https://github.com/cloakward/cloak/issues/21)): the kernel `pidfd` capture path (`getsockopt(SOL_SOCKET, SO_PEERPIDFD)` with `pidfd_open(SO_PEERCRED.pid)` fallback) and the per-connection `PidfdWatcher` are *implemented* in `cloak-core` but *not wired in* at the daemon's `serve_conn` call site for this release — `getsockopt(SO_PEERPIDFD)` had a reproducible interaction on the GitHub Actions runner kernel that closed the cloak-mcp peer socket before it could send its first frame, and we did not ship a workaround we trusted on every Linux kernel within the release window. Until v1.0.1, peer identity on Linux is the `SO_PEERCRED` triple plus a SHA-256 of the peer's `/proc/<pid>/exe` snapshot taken at handshake — same surface as v0.1 — and session revocation is socket-FIN-driven only. The PID-recycle window on Linux is therefore bounded by *the time between the peer task's exit and its socket FIN reaching `cloakd`* rather than by the kernel's exit notification; this is strictly weaker than the macOS kqueue path and is documented honestly here rather than papered over. |
+| **A8 — PID recycle attack** | Reuse a freed PID to impersonate a trusted peer | macOS: at handshake `cloakd` calls `getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)` to capture the peer's 32-byte `audit_token_t` (which carries the kernel's non-recycling pidversion in `val[7]`) and stores it in the `SessionRecord`; every subsequent request constant-time-compares the stored bytes via `subtle::ConstantTimeEq`. In parallel, a per-connection `kqueue` watcher armed with `EVFILT_PROC | NOTE_EXIT` (wrapped in `tokio::io::unix::AsyncFd`) revokes every session bound to the connection the instant the kernel reports the peer has exited, closing the PID-recycle window before any other process can inherit the freed PID. Linux (v0.9.0-rc2, see [#21](https://github.com/cloakward/cloak/issues/21)): the kernel `pidfd` capture path (`getsockopt(SOL_SOCKET, SO_PEERPIDFD)` with `pidfd_open(SO_PEERCRED.pid)` fallback) and the per-connection `PidfdWatcher` are *implemented* in `cloak-core` but *not wired in* at the daemon's `serve_conn` call site for this release — `getsockopt(SO_PEERPIDFD)` had a reproducible interaction on the GitHub Actions runner kernel that closed the cloak-mcp peer socket before it could send its first frame, and we did not ship a workaround we trusted on every Linux kernel within the release window. Until v1.0.1, peer identity on Linux is the `SO_PEERCRED` triple plus a SHA-256 of the peer's `/proc/<pid>/exe` snapshot taken at handshake — same surface as v0.1 — and session revocation is socket-FIN-driven only. The PID-recycle window on Linux is therefore bounded by *the time between the peer task's exit and its socket FIN reaching `cloakd`* rather than by the kernel's exit notification; this is strictly weaker than the macOS kqueue path and is documented honestly here rather than papered over. |
 
 ## What Cloak **does not** defend against (honest list)
 
@@ -50,7 +50,7 @@
 4. SQLite WAL + fsync gives durable, atomic single-file writes.
 5. The user's passphrase entropy + the pepper jointly resist offline cracking; the pepper alone makes the file useless to a thief who lacks the keychain item.
 
-## Residual risks accepted for v0.9.0-rc1
+## Residual risks accepted for v0.9.0-rc2
 
 - No certificate pinning on outbound HTTP.
 - No swap-disable / mlock on `cloakd`.
@@ -58,7 +58,7 @@
 - No fuzz-tested IPC parser (1M-iteration target deferred).
 - No formal verification of the audit hash chain.
 - Linux Secret Service has no per-process ACL — see "What Cloak does not defend against" above.
-- Windows support is deferred to v1.0.1; do not run v0.9.0-rc1 on Windows in production.
+- Windows support is deferred to v1.0.1; do not run v0.9.0-rc2 on Windows in production.
 - Read-only rollback detection: the monotonic counter lives only in the vault file. A restored older snapshot is detected on the next write but not on reads. v1.0.1 mirrors the counter into the OS keychain.
 
 Session tokens use constant-time comparison

@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email **security@cloak.dev** (PGP key TBD) or use GitHub Private Vulnerability Reporting.
+Use [GitHub Private Vulnerability Reporting](https://github.com/cloakward/cloak/security/advisories/new).
 
 We aim to:
 - Acknowledge within **72 hours**.
@@ -15,15 +15,15 @@ If we cannot meet these timelines we will tell you in writing and explain why.
 - Cryptographic flaws in vault construction, KDF, AEAD usage.
 - Peer-authentication bypasses (impersonation, PID recycle, code-sig spoofing).
 - Plaintext secret material reaching the model surface (any MCP tool returning a raw key).
-- Audit log tampering not detected by `cloak audit verify`.
+- Audit log tampering not detected by the hash-chain verifier.
 - Privilege escalation between peers (CLI vs. MCP shim).
 
-## Out of scope (v0.9.0-rc1)
+## Out of scope (v0.9.0-rc2)
 - Issues that require root on the user's machine.
 - Issues that depend on the user pasting a secret value into a chat.
 - Macros / shell aliases that wrap `cloak show`.
 - Side channels (cache timing, EM, power) — best-effort only.
-- Windows: deferred to v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)). Issues against the Windows code paths in v0.9.0-rc1 are not in-scope.
+- Windows: deferred to v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)). Issues against the Windows code paths in v0.9.0-rc2 are not in-scope.
 
 ## Safe harbor
 We follow the [disclose.io](https://disclose.io) safe-harbor model. Good-faith research, clearly within scope, will not be pursued legally.
