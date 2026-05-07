@@ -45,12 +45,30 @@
     }
   },
   "tools": [
-    { "name": "vault.list", "description": "List secret names. Never returns secret values." },
-    { "name": "tool.sign_request", "description": "HMAC-SHA256 / AWS SigV4 signing. Returns only the signature header." },
-    { "name": "tool.proxy_http", "description": "Authenticated HTTP request via the daemon, allowlisted hosts only." },
-    { "name": "tool.mint_token", "description": "Short-lived token mint (e.g. AWS STS GetSessionToken)." },
-    { "name": "tool.query_audit", "description": "Filter the hash-chained audit log. Never returns secret values." },
-    { "name": "tool.policy_check", "description": "Dry-run a tool invocation against the policy engine." }
+    {
+      "name": "list_secret_names",
+      "description": "List the names and metadata of secrets stored in the local Cloak vault. Returns names, kinds, and tags only — never the secret values themselves."
+    },
+    {
+      "name": "get_secret_metadata",
+      "description": "Return metadata about a single named secret (kind, tags, created/updated timestamps, version). Never returns the secret value."
+    },
+    {
+      "name": "sign_request",
+      "description": "Compute authentication headers for an outbound HTTP request using a stored secret as the signing key. Supports AWS SigV4 and generic HMAC-SHA256. Returns only the computed headers — the underlying secret is never disclosed."
+    },
+    {
+      "name": "proxy_authenticated_http_request",
+      "description": "Perform an authenticated HTTP request via the daemon, attaching a stored secret as bearer / basic / custom-header / query-param auth. Allowlisted hosts only. Returns the upstream response; the secret never leaves the daemon."
+    },
+    {
+      "name": "mint_short_lived_token",
+      "description": "Mint a short-lived derived token from a long-lived parent secret (AWS STS session credentials, GitHub App installation token, scoped GitLab PAT). Returns the derived token and its expiry. The long-lived parent never leaves the daemon."
+    },
+    {
+      "name": "query_audit",
+      "description": "Query the local Cloak audit log of privileged operations. Filterable by time range, tool name, secret name, and result. Returns audit entries — never secret values."
+    }
   ],
   "tools_generated": false,
   "compatibility": {

@@ -1,0 +1,14 @@
+This directory is intentionally empty in source control.
+
+The `cloak-mcp` binary is injected here at .dxt build time by
+`scripts/build-dxt.sh <version> <platform-tag> <path-to-cloak-mcp>`,
+which stages the contents of `packaging/cloak-dxt/` into a temp dir,
+copies the binary to `server/binaries/cloak-mcp`, and zips the result
+into `dist/Cloak-<version>-<platform-tag>.dxt`.
+
+The CI `dxt-package` job in `.github/workflows/release.yml` invokes
+the same script with a freshly-built per-platform binary. Local
+developers can do the same after `cargo build -p cloak-mcp` (or after
+building the JS shim under `packages/cloak-mcp/`).
+
+Do NOT commit a binary into this directory.

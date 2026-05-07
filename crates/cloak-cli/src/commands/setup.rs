@@ -48,6 +48,10 @@ pub struct SetupOptions {
     pub skip_clients: bool,
     /// Skip the `.env` import step.
     pub skip_env: bool,
+    /// Invoked from a Claude Desktop extension (Cloak.dxt). The
+    /// process has no controlling TTY, so passphrase prompts are
+    /// routed through native OS dialogs instead of `dialoguer`.
+    pub from_dxt: bool,
 }
 
 pub fn run(ctx: &Context, opts: SetupOptions) -> Result<()> {
@@ -136,6 +140,11 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
         return Err(SystemError::boxed(
             "vault not initialized; run `cloak setup` interactively first",
         ));
+    } else if opts.from_dxt {
+        // Claude Desktop extension: no TTY. Use native OS password
+        // dialog instead of `dialoguer::Password`, which would error
+        // out trying to read from /dev/tty.
+        prompt_passphrase_via_native_dialog()?
     } else {
         prompt_strong_passphrase(theme)?
     };
@@ -187,6 +196,182 @@ fn prompt_strong_passphrase(theme: &ColorfulTheme) -> Result<Secret<String>> {
         }
         return Ok(Secret::new(pass));
     }
+}
+
+/// Prompt for a passphrase via a native OS password dialog. Used by the
+/// Cloak.dxt first-run flow because the extension host runs us without
+/// a controlling TTY, which means `dialoguer::Password::interact()`
+/// would fail with "not a terminal".
+///
+/// macOS: AppleScript `display dialog ... with hidden answer`.
+/// Linux: `zenity --password`, falling back to
+/// `kdialog --password "..."` if zenity is missing.
+///
+/// We do NOT pipe the passphrase through argv / env (visible in
+/// `ps`); we read it from the dialog tool's stdout. We also do a
+/// simple confirm dialog for "type it again" parity with the TTY flow.
+fn prompt_passphrase_via_native_dialog() -> Result<Secret<String>> {
+    if let Ok(p) = std::env::var("CLOAK_PASSPHRASE") {
+        // Honor the test/CI override silently.
+        return Ok(Secret::new(p));
+    }
+    loop {
+        let first = native_password_prompt(
+            "Cloak",
+            "Choose a passphrase for your local secrets vault.\n\nThis passphrase encrypts your vault on disk and never leaves this machine.",
+        )?;
+        let confirm = native_password_prompt("Cloak", "Confirm your passphrase.")?;
+        if first.expose_secret() != confirm.expose_secret() {
+            // Show an info dialog and loop.
+            native_info_dialog("Cloak", "Passphrases did not match. Please try again.");
+            continue;
+        }
+        // Score with zxcvbn and accept-or-warn. We don't loop on weak
+        // input here because the dialog UX is awkward; we surface the
+        // warning and let the user decide.
+        let estimate = zxcvbn::zxcvbn(first.expose_secret(), &[]);
+        if (estimate.score() as u8) < 2 {
+            let warning = estimate
+                .feedback()
+                .and_then(|f| f.warning())
+                .map(|w| w.to_string())
+                .unwrap_or_else(|| "passphrase is weak".to_string());
+            native_info_dialog(
+                "Cloak: weak passphrase",
+                &format!(
+                    "{warning}\n\nYou can continue, but consider a stronger passphrase next time."
+                ),
+            );
+        }
+        return Ok(first);
+    }
+}
+
+/// Spawn a native password dialog and return the entered string. The
+/// dialog blocks until the user clicks OK or cancels. On cancel /
+/// failure we surface a `SystemError` so the caller can exit non-zero.
+fn native_password_prompt(title: &str, message: &str) -> Result<Secret<String>> {
+    #[cfg(target_os = "macos")]
+    {
+        // AppleScript handles dialog dismissal: it returns text on OK
+        // and exits non-zero on Cancel. We escape the message string
+        // by JSON-encoding it (AppleScript accepts the same escapes
+        // for double-quoted strings).
+        let msg = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".into());
+        let title_lit = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
+        let script = format!(
+            "set R to display dialog {msg} with title {title_lit} default answer \"\" with hidden answer\nreturn text returned of R"
+        );
+        let out = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .map_err(|e| SystemError::boxed(format!("spawn osascript: {e}")))?;
+        if !out.status.success() {
+            return Err(SystemError::boxed("passphrase dialog cancelled"));
+        }
+        let s = String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches('\n')
+            .to_string();
+        Ok(Secret::new(s))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // zenity prints the password to stdout on OK, exits non-zero
+        // on Cancel. kdialog behaves the same.
+        if which_bin("zenity") {
+            let out = std::process::Command::new("zenity")
+                .args([
+                    "--password",
+                    &format!("--title={title}"),
+                    // zenity --password ignores --text on some
+                    // versions; keep the title informative and rely
+                    // on a preceding info dialog when context matters.
+                ])
+                .output()
+                .map_err(|e| SystemError::boxed(format!("spawn zenity: {e}")))?;
+            if !out.status.success() {
+                return Err(SystemError::boxed("passphrase dialog cancelled"));
+            }
+            let s = String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches('\n')
+                .to_string();
+            return Ok(Secret::new(s));
+        }
+        if which_bin("kdialog") {
+            let out = std::process::Command::new("kdialog")
+                .args(["--title", title, "--password", message])
+                .output()
+                .map_err(|e| SystemError::boxed(format!("spawn kdialog: {e}")))?;
+            if !out.status.success() {
+                return Err(SystemError::boxed("passphrase dialog cancelled"));
+            }
+            let s = String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches('\n')
+                .to_string();
+            return Ok(Secret::new(s));
+        }
+        Err(SystemError::boxed(
+            "no native password dialog available (install zenity or kdialog)",
+        ))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (title, message);
+        Err(SystemError::boxed(
+            "native password dialog not supported on this platform",
+        ))
+    }
+}
+
+/// Show a non-modal informational dialog. Best-effort.
+fn native_info_dialog(title: &str, message: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let msg = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".into());
+        let title_lit = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
+        let script = format!(
+            "display dialog {msg} with title {title_lit} buttons {{\"OK\"}} default button \"OK\""
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .status();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if which_bin("zenity") {
+            let _ = std::process::Command::new("zenity")
+                .args([
+                    "--info",
+                    &format!("--title={title}"),
+                    &format!("--text={message}"),
+                ])
+                .status();
+            return;
+        }
+        if which_bin("kdialog") {
+            let _ = std::process::Command::new("kdialog")
+                .args(["--title", title, "--msgbox", message])
+                .status();
+            return;
+        }
+        eprintln!("[{title}] {message}");
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (title, message);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn which_bin(name: &str) -> bool {
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if dir.join(name).is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn strength_bar(score: Score) -> &'static str {
