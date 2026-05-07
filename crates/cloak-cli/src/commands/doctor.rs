@@ -8,10 +8,11 @@
 //! Exit code: `0` if every check passes; `1` otherwise (mirrors the
 //! pattern of every other "is my system healthy" CLI).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Result;
+use cloak_core::policy::{default_policy_path, PolicyEngine};
 
 use super::clients::{self, Client};
 use super::daemon as daemonctl;
@@ -52,11 +53,13 @@ pub fn run_with_exit(ctx: &Context) -> Result<ExitCode> {
         check_daemon(),
         // 3. Vault state.
         check_vault(ctx),
-        // 4. Biometric availability (best-effort).
+        // 4. Policy file present + parses.
+        check_policy(&default_policy_path()),
+        // 5. Biometric availability (best-effort).
         check_biometric(),
     ];
 
-    // 5. MCP clients registered.
+    // 6. MCP clients registered.
     checks.extend(clients::detected().into_iter().map(check_client));
 
     let mut failed = 0u32;
@@ -212,6 +215,39 @@ fn check_vault(ctx: &Context) -> Check {
     }
 }
 
+fn check_policy(path: &Path) -> Check {
+    let name = "policy file exists".to_string();
+    if !path.exists() {
+        return Check {
+            name,
+            status: Status::Warn,
+            detail: format!("{} not found", path.display()),
+            remediation: Some(
+                "run `cloak setup` to write a default policy, or copy \
+                 `scripts/policy.example.toml`"
+                    .into(),
+            ),
+        };
+    }
+    match PolicyEngine::from_path(path) {
+        Ok(_) => Check {
+            name,
+            status: Status::Ok,
+            detail: path.display().to_string(),
+            remediation: None,
+        },
+        Err(e) => Check {
+            name,
+            status: Status::Fail,
+            detail: format!("{}: {e}", path.display()),
+            remediation: Some(format!(
+                "fix or remove {} (parse error above)",
+                path.display()
+            )),
+        },
+    }
+}
+
 fn check_biometric() -> Check {
     if cfg!(target_os = "macos") {
         // We can't actually probe LAContext without prompting; treat as
@@ -299,5 +335,43 @@ fn client_flag(c: Client) -> &'static str {
         Client::Continue => "continue-ext",
         Client::Zed => "zed",
         Client::Codex => "codex",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_policy_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.toml");
+        let c = check_policy(&path);
+        assert_eq!(c.status, Status::Warn);
+        assert!(c.remediation.is_some());
+    }
+
+    #[test]
+    fn valid_policy_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        std::fs::write(
+            &path,
+            b"[default]\naction = \"deny\"\n[tools.query_audit]\nallow = true\n",
+        )
+        .unwrap();
+        let c = check_policy(&path);
+        assert_eq!(c.status, Status::Ok);
+        assert!(c.remediation.is_none());
+    }
+
+    #[test]
+    fn broken_policy_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.toml");
+        std::fs::write(&path, b"this is = = not toml").unwrap();
+        let c = check_policy(&path);
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.remediation.is_some());
     }
 }
