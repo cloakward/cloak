@@ -43,26 +43,21 @@ impl Status {
 }
 
 pub fn run_with_exit(ctx: &Context) -> Result<ExitCode> {
-    let mut checks: Vec<Check> = Vec::new();
-
-    // 1. Binaries on PATH.
-    checks.push(check_binary("cloak"));
-    checks.push(check_binary("cloakd"));
-    checks.push(check_binary("cloak-mcp"));
-
-    // 2. Daemon up + socket sane.
-    checks.push(check_daemon());
-
-    // 3. Vault state.
-    checks.push(check_vault(ctx));
-
-    // 4. Biometric availability (best-effort).
-    checks.push(check_biometric());
+    let mut checks: Vec<Check> = vec![
+        // 1. Binaries on PATH.
+        check_binary("cloak"),
+        check_binary("cloakd"),
+        check_binary("cloak-mcp"),
+        // 2. Daemon up + socket sane.
+        check_daemon(),
+        // 3. Vault state.
+        check_vault(ctx),
+        // 4. Biometric availability (best-effort).
+        check_biometric(),
+    ];
 
     // 5. MCP clients registered.
-    for c in clients::detected() {
-        checks.push(check_client(c));
-    }
+    checks.extend(clients::detected().into_iter().map(check_client));
 
     let mut failed = 0u32;
     for c in &checks {
