@@ -128,11 +128,7 @@ impl Client {
                     .join("windsurf")
                     .join("mcp_config.json"),
             ),
-            Client::Continue => Some(
-                home.join(".continue")
-                    .join("mcpServers")
-                    .join("cloak.yaml"),
-            ),
+            Client::Continue => Some(home.join(".continue").join("mcpServers").join("cloak.yaml")),
             Client::Zed => Some(
                 cfg.unwrap_or_else(|| home.join(".config"))
                     .join("zed")
@@ -473,8 +469,7 @@ fn unregister_codex_toml_at(path: &Path) -> Result<RegisterOutcome> {
     if !path.exists() {
         return Ok(RegisterOutcome::Skipped("config file does not exist"));
     }
-    let raw =
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut doc = raw
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("parse TOML at {}", path.display()))?;

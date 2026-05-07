@@ -204,7 +204,9 @@ fn prompt_passphrase_via_native_dialog() -> Result<Secret<String>> {
                 .unwrap_or_else(|| "passphrase is weak".to_string());
             native_info_dialog(
                 "Cloak: weak passphrase",
-                &format!("{warning}\n\nYou can continue, but consider a stronger passphrase next time."),
+                &format!(
+                    "{warning}\n\nYou can continue, but consider a stronger passphrase next time."
+                ),
             );
         }
         return Ok(first);
@@ -233,7 +235,9 @@ fn native_password_prompt(title: &str, message: &str) -> Result<Secret<String>> 
         if !out.status.success() {
             return Err(SystemError::boxed("passphrase dialog cancelled"));
         }
-        let s = String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string();
+        let s = String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches('\n')
+            .to_string();
         return Ok(Secret::new(s));
     }
     #[cfg(target_os = "linux")]
@@ -254,7 +258,9 @@ fn native_password_prompt(title: &str, message: &str) -> Result<Secret<String>> 
             if !out.status.success() {
                 return Err(SystemError::boxed("passphrase dialog cancelled"));
             }
-            let s = String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string();
+            let s = String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches('\n')
+                .to_string();
             return Ok(Secret::new(s));
         }
         if which_bin("kdialog") {
@@ -265,7 +271,9 @@ fn native_password_prompt(title: &str, message: &str) -> Result<Secret<String>> 
             if !out.status.success() {
                 return Err(SystemError::boxed("passphrase dialog cancelled"));
             }
-            let s = String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string();
+            let s = String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches('\n')
+                .to_string();
             return Ok(Secret::new(s));
         }
         return Err(SystemError::boxed(
