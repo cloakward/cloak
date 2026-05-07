@@ -84,6 +84,13 @@ pub enum Command {
         /// Skip the `.env` import step.
         #[arg(long)]
         skip_env: bool,
+        /// Run setup from a non-TTY context like a Claude Desktop
+        /// extension. Routes interactive prompts (passphrase, etc.)
+        /// through native OS dialogs (`osascript` on macOS,
+        /// `zenity` / `kdialog` on Linux) instead of `dialoguer`,
+        /// which would otherwise fail without a controlling TTY.
+        #[arg(long = "from-dxt")]
+        from_dxt: bool,
     },
 
     /// Read-only diagnostic. Exits 1 if any check fails.
@@ -359,6 +366,7 @@ pub fn run() -> Result<ExitCode> {
             skip_daemon,
             skip_clients,
             skip_env,
+            from_dxt,
         } => setup::run(
             &ctx,
             setup::SetupOptions {
@@ -366,6 +374,7 @@ pub fn run() -> Result<ExitCode> {
                 skip_daemon,
                 skip_clients,
                 skip_env,
+                from_dxt,
             },
         )
         .map(|_| ExitCode::SUCCESS),

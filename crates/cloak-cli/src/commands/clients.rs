@@ -128,13 +128,17 @@ impl Client {
                     .join("windsurf")
                     .join("mcp_config.json"),
             ),
-            Client::Continue => Some(home.join(".continue").join("config.json")),
+            Client::Continue => Some(
+                home.join(".continue")
+                    .join("mcpServers")
+                    .join("cloak.yaml"),
+            ),
             Client::Zed => Some(
                 cfg.unwrap_or_else(|| home.join(".config"))
                     .join("zed")
                     .join("settings.json"),
             ),
-            Client::Codex => Some(home.join(".codex").join("config.json")),
+            Client::Codex => Some(home.join(".codex").join("config.toml")),
         }
     }
 
@@ -233,6 +237,8 @@ pub enum RegisterOutcome {
 pub fn register(client: Client) -> Result<RegisterOutcome> {
     match client {
         Client::ClaudeCode => register_claude_code(),
+        Client::Codex => register_codex_toml(client),
+        Client::Continue => register_continue_yaml(client),
         other => register_json_client(other),
     }
 }
@@ -253,6 +259,8 @@ pub fn unregister(client: Client) -> Result<RegisterOutcome> {
                 _ => Ok(RegisterOutcome::Skipped("claude CLI not available")),
             }
         }
+        Client::Codex => unregister_codex_toml(client),
+        Client::Continue => unregister_continue_yaml(client),
         other => unregister_json_client(other),
     }
 }
@@ -369,6 +377,204 @@ fn mcp_servers_key(client: Client) -> &'static str {
         Client::Zed => "context_servers",
         _ => "mcpServers",
     }
+}
+
+// -------------------------------------------------------------------------
+// Codex CLI — TOML at ~/.codex/config.toml
+// -------------------------------------------------------------------------
+//
+// OpenAI Codex CLI reads `~/.codex/config.toml` with stanzas of the
+// shape:
+//
+//   [mcp_servers.<name>]
+//   command = "/path/to/server"
+//   args = []
+//
+//   [mcp_servers.<name>.env]
+//   FOO = "bar"
+//
+// We use `toml_edit` so existing comments and key ordering are
+// preserved; we only mutate the `[mcp_servers.cloak]` table.
+
+fn register_codex_toml(client: Client) -> Result<RegisterOutcome> {
+    let path = client
+        .config_path()
+        .ok_or_else(|| anyhow::anyhow!("no config path for {}", client.label()))?;
+    let mcp_bin = resolve_cloak_mcp_bin()?;
+    register_codex_toml_at(&path, &mcp_bin.to_string_lossy())
+}
+
+fn register_codex_toml_at(path: &Path, cmd: &str) -> Result<RegisterOutcome> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let cmd_str = cmd.to_string();
+
+    let raw = if path.exists() {
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
+    } else {
+        String::new()
+    };
+    let mut doc = raw
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parse TOML at {}", path.display()))?;
+
+    // Ensure `[mcp_servers]` exists as a table.
+    if !doc.contains_key("mcp_servers") {
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(true);
+        doc["mcp_servers"] = toml_edit::Item::Table(t);
+    }
+    let servers = doc["mcp_servers"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("`mcp_servers` is not a table"))?;
+    servers.set_implicit(true);
+
+    // Build the canonical entry.
+    let mut entry = toml_edit::Table::new();
+    entry.insert("command", toml_edit::value(cmd_str.clone()));
+    entry.insert("args", toml_edit::value(toml_edit::Array::new()));
+    let mut env_tbl = toml_edit::Table::new();
+    env_tbl.set_implicit(false);
+    entry.insert("env", toml_edit::Item::Table(env_tbl));
+
+    // Idempotency: compare against the existing entry.
+    if let Some(existing) = servers.get(SERVER_NAME).and_then(|i| i.as_table()) {
+        let same_cmd = existing
+            .get("command")
+            .and_then(|i| i.as_str())
+            .map(|s| s == cmd_str)
+            .unwrap_or(false);
+        let args_empty = existing
+            .get("args")
+            .and_then(|i| i.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(false);
+        if same_cmd && args_empty {
+            return Ok(RegisterOutcome::AlreadyPresent(path.to_path_buf()));
+        }
+    }
+
+    servers.insert(SERVER_NAME, toml_edit::Item::Table(entry));
+
+    let serialized = doc.to_string();
+    atomic_write_with_backup(path, serialized.as_bytes(), 0o600)?;
+    Ok(RegisterOutcome::Registered(path.to_path_buf()))
+}
+
+fn unregister_codex_toml(client: Client) -> Result<RegisterOutcome> {
+    let path = client
+        .config_path()
+        .ok_or_else(|| anyhow::anyhow!("no config path for {}", client.label()))?;
+    unregister_codex_toml_at(&path)
+}
+
+fn unregister_codex_toml_at(path: &Path) -> Result<RegisterOutcome> {
+    if !path.exists() {
+        return Ok(RegisterOutcome::Skipped("config file does not exist"));
+    }
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut doc = raw
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parse TOML at {}", path.display()))?;
+    let removed = doc
+        .get_mut("mcp_servers")
+        .and_then(|i| i.as_table_mut())
+        .map(|t| t.remove(SERVER_NAME).is_some())
+        .unwrap_or(false);
+    if !removed {
+        return Ok(RegisterOutcome::Skipped("cloak entry not present"));
+    }
+    let serialized = doc.to_string();
+    atomic_write_with_backup(path, serialized.as_bytes(), 0o600)?;
+    Ok(RegisterOutcome::Registered(path.to_path_buf()))
+}
+
+// -------------------------------------------------------------------------
+// Continue.dev — per-server YAML at ~/.continue/mcpServers/<name>.yaml
+// -------------------------------------------------------------------------
+//
+// Continue stores each MCP server as its own YAML file. We only touch
+// the `cloak.yaml` file — never any sibling files.
+
+fn register_continue_yaml(client: Client) -> Result<RegisterOutcome> {
+    let path = client
+        .config_path()
+        .ok_or_else(|| anyhow::anyhow!("no config path for {}", client.label()))?;
+    let mcp_bin = resolve_cloak_mcp_bin()?;
+    register_continue_yaml_at(&path, &mcp_bin.to_string_lossy())
+}
+
+fn register_continue_yaml_at(path: &Path, cmd: &str) -> Result<RegisterOutcome> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let cmd_str = cmd.to_string();
+
+    let mut doc = serde_yaml::Mapping::new();
+    doc.insert(
+        serde_yaml::Value::String("name".into()),
+        serde_yaml::Value::String(SERVER_NAME.into()),
+    );
+    doc.insert(
+        serde_yaml::Value::String("command".into()),
+        serde_yaml::Value::String(cmd_str.clone()),
+    );
+    doc.insert(
+        serde_yaml::Value::String("args".into()),
+        serde_yaml::Value::Sequence(Vec::new()),
+    );
+    doc.insert(
+        serde_yaml::Value::String("env".into()),
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+    );
+
+    let serialized = serde_yaml::to_string(&serde_yaml::Value::Mapping(doc.clone()))
+        .context("serialize cloak.yaml")?;
+
+    // Idempotency: structural compare against the existing file.
+    if path.exists() {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            if let Ok(existing) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+                if existing == serde_yaml::Value::Mapping(doc) {
+                    return Ok(RegisterOutcome::AlreadyPresent(path.to_path_buf()));
+                }
+            }
+        }
+    }
+
+    atomic_write_with_backup(path, serialized.as_bytes(), 0o600)?;
+    Ok(RegisterOutcome::Registered(path.to_path_buf()))
+}
+
+fn unregister_continue_yaml(client: Client) -> Result<RegisterOutcome> {
+    let path = client
+        .config_path()
+        .ok_or_else(|| anyhow::anyhow!("no config path for {}", client.label()))?;
+    unregister_continue_yaml_at(&path)
+}
+
+fn unregister_continue_yaml_at(path: &Path) -> Result<RegisterOutcome> {
+    if !path.exists() {
+        return Ok(RegisterOutcome::Skipped("cloak.yaml not present"));
+    }
+    // Back up before deleting so we keep parity with the atomic-write
+    // contract (originals always recoverable from .bak).
+    let bak = path.with_extension({
+        let mut e = path
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !e.is_empty() {
+            e.push('.');
+        }
+        e.push_str("bak");
+        e
+    });
+    std::fs::copy(path, &bak).with_context(|| format!("backup {}", path.display()))?;
+    std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+    Ok(RegisterOutcome::Registered(path.to_path_buf()))
 }
 
 /// Read a (possibly missing) JSON-with-comments file into a `Value`,
@@ -540,6 +746,99 @@ mod tests {
         assert_eq!(v["name"], "// not a comment");
         assert_eq!(v["x"], 1);
         assert_eq!(v["y"], 2);
+    }
+
+    #[test]
+    fn codex_toml_round_trip_preserves_other_servers_and_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Pre-existing config: a comment, an unrelated mcp server, and
+        // another top-level option. None of these should be mutated by
+        // our register pass.
+        let original = r#"# Codex global config
+model = "gpt-5"
+
+[mcp_servers.other]
+command = "/usr/bin/other-mcp"
+args = ["--flag"]
+"#;
+        std::fs::write(&path, original).unwrap();
+
+        let r = register_codex_toml_at(&path, "/opt/homebrew/bin/cloak-mcp").unwrap();
+        assert!(matches!(r, RegisterOutcome::Registered(_)));
+
+        let after_str = std::fs::read_to_string(&path).unwrap();
+        // Comments + unrelated keys preserved.
+        assert!(after_str.contains("# Codex global config"));
+        assert!(after_str.contains("model = \"gpt-5\""));
+        assert!(after_str.contains("[mcp_servers.other]"));
+        assert!(after_str.contains("/usr/bin/other-mcp"));
+
+        // Round-trip: parse + check the cloak entry.
+        let doc: toml_edit::DocumentMut = after_str.parse().unwrap();
+        let cloak = &doc["mcp_servers"]["cloak"];
+        assert_eq!(
+            cloak["command"].as_str().unwrap(),
+            "/opt/homebrew/bin/cloak-mcp"
+        );
+        assert!(cloak["args"].as_array().unwrap().is_empty());
+
+        // .bak written.
+        assert!(path.with_extension("toml.bak").exists());
+
+        // Idempotent on a second pass.
+        let r2 = register_codex_toml_at(&path, "/opt/homebrew/bin/cloak-mcp").unwrap();
+        assert!(matches!(r2, RegisterOutcome::AlreadyPresent(_)));
+
+        // Unregister leaves the other server intact.
+        let _ = unregister_codex_toml_at(&path).unwrap();
+        let final_str = std::fs::read_to_string(&path).unwrap();
+        let final_doc: toml_edit::DocumentMut = final_str.parse().unwrap();
+        assert!(final_doc["mcp_servers"]
+            .as_table()
+            .unwrap()
+            .get("cloak")
+            .is_none());
+        assert!(final_doc["mcp_servers"]["other"]["command"]
+            .as_str()
+            .is_some());
+    }
+
+    #[test]
+    fn continue_yaml_round_trip_writes_only_cloak_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp_dir = dir.path().join("mcpServers");
+        std::fs::create_dir_all(&mcp_dir).unwrap();
+        // Sibling file from a different MCP server. We must NOT touch it.
+        let sibling = mcp_dir.join("other.yaml");
+        std::fs::write(&sibling, "name: other\ncommand: /bin/other\n").unwrap();
+        let cloak_path = mcp_dir.join("cloak.yaml");
+
+        let r = register_continue_yaml_at(&cloak_path, "/usr/local/bin/cloak-mcp").unwrap();
+        assert!(matches!(r, RegisterOutcome::Registered(_)));
+        assert!(cloak_path.exists());
+
+        // Parse the YAML and verify shape.
+        let raw = std::fs::read_to_string(&cloak_path).unwrap();
+        let v: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(v["name"].as_str(), Some("cloak"));
+        assert_eq!(v["command"].as_str(), Some("/usr/local/bin/cloak-mcp"));
+        assert!(v["args"].as_sequence().unwrap().is_empty());
+        assert!(v["env"].as_mapping().unwrap().is_empty());
+
+        // Sibling untouched.
+        let sib_after = std::fs::read_to_string(&sibling).unwrap();
+        assert!(sib_after.contains("name: other"));
+
+        // Idempotent on a second pass.
+        let r2 = register_continue_yaml_at(&cloak_path, "/usr/local/bin/cloak-mcp").unwrap();
+        assert!(matches!(r2, RegisterOutcome::AlreadyPresent(_)));
+
+        // Unregister: removes only cloak.yaml, leaves sibling.
+        let _ = unregister_continue_yaml_at(&cloak_path).unwrap();
+        assert!(!cloak_path.exists());
+        assert!(cloak_path.with_extension("yaml.bak").exists());
+        assert!(sibling.exists());
     }
 
     #[test]
