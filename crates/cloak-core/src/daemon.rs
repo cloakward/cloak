@@ -150,10 +150,7 @@ struct DaemonCtx {
 /// Default policy file path: `~/.config/cloak/policy.toml`. Missing file
 /// yields a default-deny policy via `PolicyEngine::from_path`.
 fn default_policy_path() -> PathBuf {
-    if let Some(cfg) = dirs::config_dir() {
-        return cfg.join("cloak").join("policy.toml");
-    }
-    PathBuf::from("/tmp/cloak-policy.toml")
+    crate::policy::default_policy_path()
 }
 
 /// Default audit log path: `<data_dir>/cloak/audit.jsonl` (e.g.
