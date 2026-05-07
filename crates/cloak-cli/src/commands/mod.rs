@@ -12,6 +12,7 @@
 //! - `2` — system / config error (vault not initialized when expected,
 //!   IO failure, malformed flag).
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -20,13 +21,23 @@ use clap::{Parser, Subcommand, ValueEnum};
 use cloak_core::vault::{SecretKind, Vault};
 
 mod add;
+mod audit_log;
+mod clients;
 mod completions;
+mod daemon;
 mod daemon_unlock;
+mod doctor;
+mod dotenv;
+mod export;
 mod get;
+mod import;
 mod init;
 mod list;
+mod panic;
 mod rm;
+mod run;
 mod set;
+mod setup;
 mod show;
 mod status;
 mod unlock;
@@ -62,6 +73,22 @@ pub struct Cli {
 /// All top-level subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Interactive first-time setup (vault + daemon + MCP clients + .env).
+    Setup {
+        /// Skip the daemon-install step.
+        #[arg(long)]
+        skip_daemon: bool,
+        /// Skip the MCP-client registration step.
+        #[arg(long)]
+        skip_clients: bool,
+        /// Skip the `.env` import step.
+        #[arg(long)]
+        skip_env: bool,
+    },
+
+    /// Read-only diagnostic. Exits 1 if any check fails.
+    Doctor,
+
     /// Initialize a new vault (interactive passphrase + KDF autotune).
     Init,
 
@@ -93,13 +120,19 @@ pub enum Command {
     /// List secrets (metadata only). Empty vault prints "(no secrets)".
     List,
 
-    /// Remove a secret. Prompts for confirmation unless `--yes`.
+    /// Remove secret(s). Bulk modes: `--tag T`, `--all`.
     Rm {
         /// Name of the secret to remove.
-        name: String,
+        name: Option<String>,
         /// Skip the confirmation prompt.
         #[arg(short = 'y', long = "yes")]
         yes: bool,
+        /// Delete every secret with this tag.
+        #[arg(long = "tag", value_name = "TAG", conflicts_with = "all")]
+        tag: Option<String>,
+        /// Delete every secret in the vault. Requires extra confirmation.
+        #[arg(long = "all", conflicts_with = "tag")]
+        all: bool,
     },
 
     /// Reveal a secret's plaintext (Touch ID gated, TTY-only).
@@ -124,8 +157,142 @@ pub enum Command {
     },
 
     /// Push the vault passphrase to the running `cloakd` so MCP peers
-    /// can serve requests. v0.1 bridge — see the module docs.
+    /// can serve requests.
     DaemonUnlock,
+
+    /// Import a `.env` file into the vault.
+    Import {
+        /// Path to the `.env` file (default: ./.env).
+        path: Option<PathBuf>,
+        /// Add new + overwrite existing keys.
+        #[arg(long, conflicts_with = "replace")]
+        update: bool,
+        /// `--update` plus delete vault entries not in the file.
+        #[arg(long)]
+        replace: bool,
+    },
+
+    /// Export the vault to a `.env` file (Touch ID gated).
+    Export {
+        /// Destination path (default: ./.env).
+        path: Option<PathBuf>,
+        /// Overwrite the destination if it exists.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Run a command with vault secrets injected as environment variables.
+    Run {
+        /// Comma-separated list of secret names to inject (default: all).
+        #[arg(long, value_name = "K1,K2", value_delimiter = ',')]
+        only: Vec<String>,
+        /// The command and its arguments.
+        #[arg(last = true, required = true)]
+        command: Vec<OsString>,
+    },
+
+    /// Emergency: lock the vault, kill the daemon, print rotation worksheet.
+    Panic,
+
+    /// Manage the cloakd background daemon (install/start/stop/status).
+    Daemon {
+        #[command(subcommand)]
+        cmd: DaemonCmd,
+    },
+
+    /// Register `cloak` with installed MCP clients (Claude Desktop, etc.).
+    Claude {
+        #[command(subcommand)]
+        cmd: ClaudeCmd,
+    },
+}
+
+/// `cloak daemon ...` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum DaemonCmd {
+    /// Install the daemon's launchd plist or systemd unit.
+    Install {
+        /// Force the launchd flavour (macOS).
+        #[arg(long, conflicts_with = "systemd_user")]
+        launchd: bool,
+        /// Force the systemd-user flavour (Linux).
+        #[arg(long, conflicts_with = "launchd")]
+        systemd_user: bool,
+    },
+    /// Start the daemon (load + enable).
+    Start,
+    /// Stop the daemon (unload + disable).
+    Stop,
+    /// Print whether the daemon is running.
+    Status,
+}
+
+/// `cloak claude ...` (and friends) subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ClaudeCmd {
+    /// Register the `cloak` MCP server with one or more clients.
+    Register(ClientFlags),
+    /// Remove the `cloak` MCP server entry from one or more clients.
+    Unregister(ClientFlags),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ClientFlags {
+    /// Apply to every supported client.
+    #[arg(long)]
+    pub all: bool,
+    /// Claude Desktop.
+    #[arg(long)]
+    pub desktop: bool,
+    /// Claude Code CLI.
+    #[arg(long)]
+    pub code: bool,
+    /// Cursor.
+    #[arg(long)]
+    pub cursor: bool,
+    /// Windsurf.
+    #[arg(long)]
+    pub windsurf: bool,
+    /// Continue.dev.
+    #[arg(long, name = "continue-ext")]
+    pub continue_ext: bool,
+    /// Zed.
+    #[arg(long)]
+    pub zed: bool,
+    /// Codex.
+    #[arg(long)]
+    pub codex: bool,
+}
+
+impl ClientFlags {
+    fn into_selection(self) -> clients::RegisterSelection {
+        let mut chosen = Vec::new();
+        if self.desktop {
+            chosen.push(clients::Client::ClaudeDesktop);
+        }
+        if self.code {
+            chosen.push(clients::Client::ClaudeCode);
+        }
+        if self.cursor {
+            chosen.push(clients::Client::Cursor);
+        }
+        if self.windsurf {
+            chosen.push(clients::Client::Windsurf);
+        }
+        if self.continue_ext {
+            chosen.push(clients::Client::Continue);
+        }
+        if self.zed {
+            chosen.push(clients::Client::Zed);
+        }
+        if self.codex {
+            chosen.push(clients::Client::Codex);
+        }
+        clients::RegisterSelection {
+            clients: chosen,
+            all: self.all,
+        }
+    }
 }
 
 /// `clap`-friendly mirror of [`SecretKind`]. Kept separate so we control
@@ -167,35 +334,151 @@ pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let ctx = Context::from(&cli);
 
-    let outcome = match cli.command {
-        Command::Init => init::run(&ctx),
-        Command::Add { name, kind, tags } => add::run(&ctx, &name, kind.into(), tags),
-        Command::Set { name } => set::run(&ctx, &name),
-        Command::Get { name } => get::run(&ctx, &name),
-        Command::List => list::run(&ctx),
-        Command::Rm { name, yes } => rm::run(&ctx, &name, yes),
+    // First-use trigger: if a vault-requiring command is invoked but no
+    // vault exists, run `cloak setup` first. We do NOT auto-trigger for
+    // non-stateful commands (init, setup, doctor, completions, daemon
+    // primitives) so that scripted callers and the wizard itself don't
+    // recurse.
+    if requires_vault(&cli.command) && !vault_exists(&ctx) {
+        eprintln!("(no vault found at {} — running setup wizard first)", ctx.vault_path.display());
+        setup::run(
+            &ctx,
+            setup::SetupOptions {
+                non_interactive: false,
+                ..Default::default()
+            },
+        )?;
+        eprintln!();
+    }
+
+    let outcome: Result<ExitCode> = match cli.command {
+        Command::Setup {
+            skip_daemon,
+            skip_clients,
+            skip_env,
+        } => setup::run(
+            &ctx,
+            setup::SetupOptions {
+                non_interactive: false,
+                skip_daemon,
+                skip_clients,
+                skip_env,
+            },
+        )
+        .map(|_| ExitCode::SUCCESS),
+        Command::Doctor => doctor::run_with_exit(&ctx),
+        Command::Init => init::run(&ctx).map(|_| ExitCode::SUCCESS),
+        Command::Add { name, kind, tags } => {
+            add::run(&ctx, &name, kind.into(), tags).map(|_| ExitCode::SUCCESS)
+        }
+        Command::Set { name } => set::run(&ctx, &name).map(|_| ExitCode::SUCCESS),
+        Command::Get { name } => get::run(&ctx, &name).map(|_| ExitCode::SUCCESS),
+        Command::List => list::run(&ctx).map(|_| ExitCode::SUCCESS),
+        Command::Rm {
+            name,
+            yes,
+            tag,
+            all,
+        } => {
+            let sel = if all {
+                rm::Selector::All
+            } else if let Some(t) = tag {
+                rm::Selector::Tag(t)
+            } else if let Some(n) = name {
+                rm::Selector::Name(n)
+            } else {
+                return Ok(ExitCode::from(2));
+            };
+            rm::run(&ctx, sel, yes).map(|_| ExitCode::SUCCESS)
+        }
         Command::Show {
             name,
             allow_redirect,
             newline,
-        } => show::run(&ctx, &name, allow_redirect, newline),
-        Command::Status => status::run(&ctx),
-        Command::Completions { shell } => completions::run(shell),
-        Command::DaemonUnlock => daemon_unlock::run(&ctx),
+        } => show::run(&ctx, &name, allow_redirect, newline).map(|_| ExitCode::SUCCESS),
+        Command::Status => status::run(&ctx).map(|_| ExitCode::SUCCESS),
+        Command::Completions { shell } => completions::run(shell).map(|_| ExitCode::SUCCESS),
+        Command::DaemonUnlock => daemon_unlock::run(&ctx).map(|_| ExitCode::SUCCESS),
+        Command::Import {
+            path,
+            update,
+            replace,
+        } => {
+            let mode = if replace {
+                import::Mode::Replace
+            } else if update {
+                import::Mode::Update
+            } else {
+                import::Mode::SafeAdd
+            };
+            import::run(&ctx, path, mode).map(|_| ExitCode::SUCCESS)
+        }
+        Command::Export { path, force } => {
+            export::run(&ctx, path, force).map(|_| ExitCode::SUCCESS)
+        }
+        Command::Run { only, command } => run::run(&ctx, only, command),
+        Command::Panic => panic::run(&ctx).map(|_| ExitCode::SUCCESS),
+        Command::Daemon { cmd } => match cmd {
+            DaemonCmd::Install {
+                launchd,
+                systemd_user,
+            } => {
+                let f = if launchd {
+                    Some(daemon::DaemonFlavour::Launchd)
+                } else if systemd_user {
+                    Some(daemon::DaemonFlavour::SystemdUser)
+                } else {
+                    None
+                };
+                daemon::run_install(&ctx, f).map(|_| ExitCode::SUCCESS)
+            }
+            DaemonCmd::Start => daemon::run_start(&ctx).map(|_| ExitCode::SUCCESS),
+            DaemonCmd::Stop => daemon::run_stop(&ctx).map(|_| ExitCode::SUCCESS),
+            DaemonCmd::Status => daemon::run_status(&ctx).map(|_| ExitCode::SUCCESS),
+        },
+        Command::Claude { cmd } => match cmd {
+            ClaudeCmd::Register(f) => {
+                clients::run_register(&ctx, f.into_selection()).map(|_| ExitCode::SUCCESS)
+            }
+            ClaudeCmd::Unregister(f) => {
+                clients::run_unregister(&ctx, f.into_selection()).map(|_| ExitCode::SUCCESS)
+            }
+        },
     };
 
     Ok(match outcome {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
-            // The command modules are responsible for printing
-            // user-friendly messages; we just translate the error class
-            // into an exit code. The error itself is also printed to
-            // stderr so anyhow's chain is visible in debug runs.
             let exit = exit_code_for(&e);
             eprintln!("error: {e}");
             exit
         }
     })
+}
+
+/// Whether this command requires an initialized vault. Used by the
+/// first-use auto-trigger.
+fn requires_vault(cmd: &Command) -> bool {
+    matches!(
+        cmd,
+        Command::Add { .. }
+            | Command::Set { .. }
+            | Command::Get { .. }
+            | Command::Show { .. }
+            | Command::List
+            | Command::Rm { .. }
+            | Command::Import { .. }
+            | Command::Export { .. }
+            | Command::Run { .. }
+            | Command::DaemonUnlock
+    )
+}
+
+fn vault_exists(ctx: &Context) -> bool {
+    let Ok(vault) = Vault::open_or_create(&ctx.vault_path) else {
+        return false;
+    };
+    vault.is_initialized().unwrap_or(false)
 }
 
 // -------------------------------------------------------------------------
