@@ -237,20 +237,66 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     //    we just take the standard `peer_info_from_unix` path.
     #[cfg(all(unix, not(target_os = "macos")))]
     let (peer, peer_pidfd): (PeerInfo, Option<std::os::fd::OwnedFd>) = {
-        // Linux: bypass SO_PEERPIDFD / pidfd_open entirely for v0.9.0-rc1.
-        // The Bun-driven cloak-mcp connection on the runner kernel was
-        // closing immediately after our getsockopt(SO_PEERPIDFD) call —
-        // we couldn't reproduce locally, but a clean peer_info_from_unix
-        // path with no pidfd touch makes Linux smoke pass. The pidfd
-        // watcher is also disabled below; re-enable both together once
-        // the syscall interaction is understood (issue #21).
-        match peer_auth::peer_info_from_unix(&stream) {
-            Ok(p) => (p, None),
+        // Linux: try to capture a pidfd for the peer (race-free
+        // SO_PEERPIDFD on Linux 6.5+, falling back to pidfd_open by
+        // SO_PEERCRED-pid on older kernels). Both syscalls now produce
+        // O_NONBLOCK pidfds so AsyncFd registration is contract-clean.
+        //
+        // If pidfd capture fails for any reason, we MUST continue with
+        // pidfd=None — the rc1 disable was forced by the capture
+        // tripping a still-not-understood interaction with bun-built
+        // cloak-mcp peers on the GitHub Actions kernel that closed the
+        // peer socket pre-frame. Returning early closed the user-visible
+        // connection. We instead degrade to socket-FIN-driven session
+        // revocation (the rc3 status quo) and log debug.
+        let peer = match peer_auth::peer_info_from_unix(&stream) {
+            Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, "peer_info_from_unix failed; closing connection");
                 return Ok(());
             }
-        }
+        };
+        let pidfd = {
+            // Skip pidfd capture for bun-built cloak-mcp peers. The
+            // rc1 disable proved that calling getsockopt(SO_PEERPIDFD)
+            // on a connection from a `bun build --compile` binary on
+            // certain Linux kernels (observed on GitHub Actions
+            // ubuntu-24.04) tears the peer socket down before any
+            // frame is read. Bun's runtime opens its own pidfds for
+            // subprocess management; the kernel-side pidfd-inode
+            // sharing appears to make our additional capture either
+            // collide (EEXIST on AsyncFd::new) or sever the peer
+            // socket as a side effect. cloak-mcp peers always
+            // disconnect cleanly via socket-FIN at session end, so
+            // socket-FIN-driven revocation gives the same window as
+            // a watcher-fired revocation in the common case. The
+            // CLI peer (basename "cloak"), where the security value
+            // of the watcher is highest, is unaffected and gets the
+            // full pidfd-watch path.
+            let is_bun_peer = peer.basename().is_some_and(|n| n == "cloak-mcp");
+            if is_bun_peer {
+                tracing::debug!(
+                    peer_pid = peer.pid,
+                    "skipping pidfd capture for cloak-mcp peer; \
+                     relying on socket-FIN-driven revocation"
+                );
+                None
+            } else {
+                use std::os::fd::AsRawFd;
+                match peer_auth::linux::acquire_peer_pidfd(stream.as_raw_fd(), peer.pid) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            peer_pid = peer.pid,
+                            "pidfd capture failed; falling back to socket-FIN-driven revocation"
+                        );
+                        None
+                    }
+                }
+            }
+        };
+        (peer, pidfd)
     };
     #[cfg(target_os = "macos")]
     let peer = match peer_auth::peer_info_from_unix(&stream) {
@@ -288,20 +334,15 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     let peer_exit = Arc::new(Notify::new());
     #[cfg(target_os = "macos")]
     let exit_watcher_task = spawn_peer_exit_watcher(&ctx, &peer, conn_id, peer_exit.clone());
-    // Linux: the pidfd watcher path tripped over a tokio AsyncFd
-    // registration EEXIST on GitHub Actions runners that we couldn't
-    // reproduce locally and that proved correlated with cloak-mcp
-    // connections being closed before any frame was read. The kqueue
-    // path on macOS already provides full A8 coverage; the Linux
-    // session-on-disconnect path closes the same window for the common
-    // case (peer exit → socket FIN → revoke_by_conn). Re-enable the
-    // pidfd watcher in a follow-up once the registration interaction
-    // is understood.
+    // Linux: spawn a pidfd-based watcher when we successfully captured
+    // a pidfd (and the watcher's AsyncFd registration succeeds). If
+    // either capture or registration fails we simply drop the pidfd
+    // and rely on socket-FIN-driven session revocation, the same
+    // surface as v0.1 / rc3. NEVER close the connection from this
+    // path — the peer would lose service.
     #[cfg(all(unix, not(target_os = "macos")))]
-    let exit_watcher_task: Option<tokio::task::JoinHandle<()>> = {
-        drop(peer_pidfd); // close the captured pidfd; it's not used in v0.9.0-rc1.
-        None
-    };
+    let exit_watcher_task: Option<tokio::task::JoinHandle<()>> =
+        spawn_peer_exit_watcher(&ctx, &peer, peer_pidfd, conn_id, peer_exit.clone());
 
     // 2. Split the stream so we can read & write concurrently if we
     //    ever need to. v0.1 is request/response, so we just borrow.
