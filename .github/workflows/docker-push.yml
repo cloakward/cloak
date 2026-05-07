@@ -1,29 +1,27 @@
 # W9e — multi-arch container image for `cloakd`.
 #
-# DEFERRED FROM v0.9.0-rc1 — tracked in cloakward/cloak#46. Multi-arch
-# buildx of the cargo cross-compile chain hit a stubborn
-# `error[E0463]: can't find crate for core` on the linux/arm64 row
-# across four iteration attempts (cargo cache race fixes alone don't
-# resolve it; the cleanest fix is to split into two native runner jobs
-# — `ubuntu-24.04` for amd64 and `ubuntu-24.04-arm` for arm64 — and
-# merge with `docker buildx imagetools create`). That refactor is
-# queued for v1.0.0 work.
+# Two native runner jobs build per-arch images (linux/amd64 on
+# ubuntu-24.04, linux/arm64 on ubuntu-24.04-arm), then a third job
+# stitches them into a multi-arch manifest with `docker buildx
+# imagetools create`. We deliberately do NOT cross-compile inside
+# Docker — the previous `FROM --platform=$BUILDPLATFORM` arrangement
+# consistently failed with `error[E0463]: can't find crate for core`
+# on the linux/arm64 row across four iteration attempts (see #46).
+# Native compilation per arch sidesteps the problem entirely.
 #
-# Threat-model alignment also matters: Cloak's local-laptop posture
-# (kernel peer-cred + OS keychain pepper) doesn't map cleanly onto a
-# container without a remote-auth design that hasn't been done. Even
-# if multi-arch worked today, shipping a docker image as an rc1
-# install path would put users in a security posture we haven't
-# audited. Defer until v1.0 has time to define the container shape.
+# Image visibility (public vs private) on GHCR is controlled at the
+# package level in GitHub; tracked in
+# https://github.com/cloakward/cloak/issues/7.
 #
-# Trigger is `workflow_dispatch` only for now — no auto-fire on
-# release.published. The Dockerfile + workflow remain in-tree as
-# infrastructure for the v1.0 push.
+# Trigger: fires on `release: published` AND `workflow_dispatch`.
+# Manual dispatch is useful when re-publishing to GHCR after a
+# transient failure, without un-publishing the GitHub release.
+
 name: docker-push
 
 on:
-  # release.published trigger removed for v0.9.0-rc1; re-add when the
-  # linux/arm64 build chain is stable. Tracked in cloakward/cloak#46.
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       ref:
@@ -32,7 +30,7 @@ on:
         type: string
 
 concurrency:
-  group: docker-push-${{ github.ref }}
+  group: docker-push-${{ github.event.release.tag_name || inputs.ref }}
   cancel-in-progress: false
 
 env:
@@ -40,41 +38,47 @@ env:
   IMAGE_NAME: cloakward/cloakd
 
 jobs:
-  push:
-    name: build & push
-    runs-on: ubuntu-24.04
+  # -------------------------------------------------------------------
+  # Per-arch build. amd64 runs on ubuntu-24.04; arm64 runs on
+  # ubuntu-24.04-arm (free-tier on public repos). Each pushes a
+  # per-arch tag like `:VERSION-amd64` and outputs the resulting
+  # digest so the manifest job can stitch them together.
+  # -------------------------------------------------------------------
+  build:
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch_tag: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch_tag: arm64
+            runner: ubuntu-24.04-arm
 
     permissions:
       contents: read
-      # `packages: write` is the GHCR-push scope.
       packages: write
-      # `id-token: write` is required for keyless cosign signing once
-      # W9b's cosign-installer step is on `beta`. It's harmless to grant
-      # ahead of time.
       id-token: write
+
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      major_minor: ${{ steps.ver.outputs.major_minor }}
+      is_prerelease: ${{ steps.ver.outputs.is_prerelease }}
+      digest_amd64: ${{ steps.export.outputs.digest_amd64 }}
+      digest_arm64: ${{ steps.export.outputs.digest_arm64 }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Honor either the release event's tag or the manual dispatch input.
           ref: ${{ github.event.release.tag_name || inputs.ref }}
 
-      # Strip the leading `v` so a tag of `v1.2.3` becomes `1.2.3`, and
-      # derive the major.minor floating tag (`1.2`). `latest` is gated
-      # on `github.event.release.prerelease == false` so that
-      # release-candidate tags (e.g. `v0.9.0-rc1`) get the immutable
-      # `:VERSION` and `:MAJOR_MINOR` tags but do NOT advance `:latest`
-      # past production. release.yml passes `--prerelease` to
-      # `gh release create` whenever the tag matches `-rc*|-beta*|-alpha*`,
-      # so the `prerelease` bit on the published-release event is
-      # reliable for this gate.
       - name: Compute version tags
         id: ver
         env:
-          # Resolve tag from either the release event or the
-          # workflow_dispatch input. GITHUB_REF_NAME is the branch on
-          # workflow_dispatch (e.g. `beta`), so we cannot use it.
           REF_NAME: ${{ github.event.release.tag_name || inputs.ref }}
         run: |
           set -euo pipefail
@@ -82,18 +86,14 @@ jobs:
           MAJOR_MINOR="$(echo "$TAG" | awk -F. '{print $1"."$2}')"
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
           echo "major_minor=$MAJOR_MINOR" >> "$GITHUB_OUTPUT"
-          # Derive `is_prerelease` from the tag name pattern (works
-          # for both release events AND workflow_dispatch).
-          # github.event.release.prerelease is empty on dispatch, so
-          # we cannot rely on it alone.
+          # Derive `is_prerelease` from the tag-name pattern (works on
+          # both release.published and workflow_dispatch). The release
+          # event's prerelease flag is empty on dispatch.
           case "$REF_NAME" in
             *-rc*|*-beta*|*-alpha*|*-pre*|*-dev*) is_pre=true ;;
             *) is_pre=false ;;
           esac
           echo "is_prerelease=$is_pre" >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -105,49 +105,98 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build the tag list. `:VERSION` and `:MAJOR_MINOR` always go;
-      # `:latest` is appended only when the tag is a non-prerelease,
-      # as derived from the tag name pattern in `Compute version tags`
-      # above. A pre-release like v0.9.0-rc1 thus publishes `:0.9.0-rc1`
-      # and `:0.9` but does not move `:latest`.
-      - name: Compose tag list
-        id: tags
-        run: |
-          set -euo pipefail
-          tags="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.major_minor }}"
-          if [ "${{ steps.ver.outputs.is_prerelease }}" != "true" ]; then
-            tags="${tags}
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-            echo "Including :latest tag (tag is non-prerelease)."
-          else
-            echo "Skipping :latest tag (tag is a pre-release)."
-          fi
-          {
-            echo "list<<EOF"
-            echo "${tags}"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
+      - name: Build and push per-arch image
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ steps.tags.outputs.list }}
+          # Per-arch tags. The manifest job stitches them into the
+          # public-facing :VERSION / :MAJOR_MINOR / :latest tags.
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-${{ matrix.arch_tag }}
           provenance: true
           sbom: true
 
-      # TODO(W9e/W9b): once W9b lands cosign-installer on `beta`, sign
-      # the multi-arch manifest digest here:
-      #
-      #   - uses: sigstore/cosign-installer@v3
-      #   - run: cosign sign --yes \
-      #       ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-      #
-      # Image signing is intentionally a follow-up — it's safe to ship
-      # the image first and add the signature attestation later, since
-      # consumers pin by digest, not signature.
+      # The matrix can't write to the same output key, so we expose
+      # the digest under an arch-suffixed key. The manifest job picks
+      # whichever the matrix arch produced.
+      - name: Export per-arch digest
+        id: export
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.arch_tag }}" = "amd64" ]; then
+            echo "digest_amd64=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "digest_arm64=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # -------------------------------------------------------------------
+  # Stitch the two per-arch images into a multi-arch manifest. Pushes
+  # `:VERSION` and `:MAJOR_MINOR` always; `:latest` only on production
+  # tags (gated on tag-name pattern, not release-event prerelease bit,
+  # so it works on both release.published and workflow_dispatch).
+  # -------------------------------------------------------------------
+  manifest:
+    name: stitch multi-arch manifest
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve manifest tags
+        id: tags
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          MAJOR_MINOR: ${{ needs.build.outputs.major_minor }}
+          IS_PRERELEASE: ${{ needs.build.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          base="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          tags=(
+            "${base}:${VERSION}"
+            "${base}:${MAJOR_MINOR}"
+          )
+          if [ "$IS_PRERELEASE" != "true" ]; then
+            tags+=("${base}:latest")
+            echo "Including :latest tag (tag is non-prerelease)."
+          else
+            echo "Skipping :latest tag (tag is a pre-release)."
+          fi
+          # Emit space-joined list for the buildx imagetools call below.
+          echo "list=${tags[*]}" >> "$GITHUB_OUTPUT"
+          # Per-arch source images that the manifest will reference.
+          echo "src_amd64=${base}:${VERSION}-amd64" >> "$GITHUB_OUTPUT"
+          echo "src_arm64=${base}:${VERSION}-arm64" >> "$GITHUB_OUTPUT"
+
+      - name: Create multi-arch manifest
+        run: |
+          set -euo pipefail
+          tag_args=""
+          for t in ${{ steps.tags.outputs.list }}; do
+            tag_args="${tag_args} --tag ${t}"
+          done
+          # shellcheck disable=SC2086
+          docker buildx imagetools create ${tag_args} \
+            "${{ steps.tags.outputs.src_amd64 }}" \
+            "${{ steps.tags.outputs.src_arm64 }}"
+
+      - name: Verify manifest is multi-arch
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          base="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          docker buildx imagetools inspect "${base}:${VERSION}"
