@@ -1,26 +1,33 @@
 # W9e — multi-arch container image for `cloakd`.
 #
-# Fires on `release.published`, builds for linux/amd64 + linux/arm64,
-# and pushes to ghcr.io/cloakward/cloakd. The trigger is intentionally
-# narrow: we never publish container images on PR or push, only on a
-# tagged release that has been graduated from draft to published.
+# DEFERRED FROM v0.9.0-rc1 — tracked in cloakward/cloak#46. Multi-arch
+# buildx of the cargo cross-compile chain hit a stubborn
+# `error[E0463]: can't find crate for core` on the linux/arm64 row
+# across four iteration attempts (cargo cache race fixes alone don't
+# resolve it; the cleanest fix is to split into two native runner jobs
+# — `ubuntu-24.04` for amd64 and `ubuntu-24.04-arm` for arm64 — and
+# merge with `docker buildx imagetools create`). That refactor is
+# queued for v1.0.0 work.
 #
-# GHCR access is via the built-in GITHUB_TOKEN, scoped via `permissions`
-# below. Image visibility (public vs private) is controlled at the
-# package level in GitHub; tracked in
-# https://github.com/cloakward/cloak/issues/7.
+# Threat-model alignment also matters: Cloak's local-laptop posture
+# (kernel peer-cred + OS keychain pepper) doesn't map cleanly onto a
+# container without a remote-auth design that hasn't been done. Even
+# if multi-arch worked today, shipping a docker image as an rc1
+# install path would put users in a security posture we haven't
+# audited. Defer until v1.0 has time to define the container shape.
+#
+# Trigger is `workflow_dispatch` only for now — no auto-fire on
+# release.published. The Dockerfile + workflow remain in-tree as
+# infrastructure for the v1.0 push.
 name: docker-push
 
 on:
-  release:
-    types: [published]
-  # Manual dispatch for re-running against an existing release tag
-  # (e.g. after a transient buildx failure). Same pattern as
-  # npm-publish.yml's workflow_dispatch.
+  # release.published trigger removed for v0.9.0-rc1; re-add when the
+  # linux/arm64 build chain is stable. Tracked in cloakward/cloak#46.
   workflow_dispatch:
     inputs:
       ref:
-        description: "Release tag to build & push (e.g. v0.9.0-rc1)"
+        description: "Release tag to build & push (e.g. v1.0.0)"
         required: true
         type: string
 

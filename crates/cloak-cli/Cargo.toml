@@ -15,6 +15,9 @@ cloak-core = { path = "../cloak-core" }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 rpassword = { workspace = true }
+dialoguer = { workspace = true }
+zxcvbn = { workspace = true }
+tempfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

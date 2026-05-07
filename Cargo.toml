@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/cloak-core", "crates/cloak-cli"]
 
 [workspace.package]
-version = "0.9.0-rc1"
+version = "0.9.0-rc2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/cloakward/cloak"
@@ -31,6 +31,10 @@ toml = "0.8"
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
 clap_complete = "4.5"
 rpassword = "7.3"
+# Setup wizard prompts (W12 PR2). `dialoguer` covers select / input / confirm
+# with TTY detection; `zxcvbn` is a pure-Rust port for strength scoring.
+dialoguer = { version = "0.11", default-features = false, features = ["password"] }
+zxcvbn = { version = "3.1", default-features = false }
 
 # Errors / logging
 thiserror = "2.0"

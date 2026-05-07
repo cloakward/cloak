@@ -9,18 +9,25 @@ passphrase via Argon2id. Reveal is gated behind Touch ID on macOS.
 Usage: cloak [OPTIONS] <COMMAND>
 
 Commands:
+  setup          Interactive first-time setup (vault + daemon + MCP clients + .env)
+  doctor         Read-only diagnostic. Exits 1 if any check fails
   init           Initialize a new vault (interactive passphrase + KDF autotune)
   add            Add a new secret. Prompts for the value with echo OFF
   set            Update the value of an existing secret. Prompts with echo OFF
   get            Get metadata for a secret (name / kind / tags / timestamps). Never returns
                  plaintext
   list           List secrets (metadata only). Empty vault prints "(no secrets)"
-  rm             Remove a secret. Prompts for confirmation unless `--yes`
+  rm             Remove secret(s). Bulk modes: `--tag T`, `--all`
   show           Reveal a secret's plaintext (Touch ID gated, TTY-only)
   status         Print vault status (path, record count, KDF params, lock state)
   completions    Print shell completions
-  daemon-unlock  Push the vault passphrase to the running `cloakd` so MCP peers can serve requests.
-                 v0.1 bridge — see the module docs
+  daemon-unlock  Push the vault passphrase to the running `cloakd` so MCP peers can serve requests
+  import         Import a `.env` file into the vault
+  export         Export the vault to a `.env` file (Touch ID gated)
+  run            Run a command with vault secrets injected as environment variables
+  panic          Emergency: lock the vault, kill the daemon, print rotation worksheet
+  daemon         Manage the cloakd background daemon (install/start/stop/status)
+  claude         Register `cloak` with installed MCP clients (Claude Desktop, etc.)
   help           Print this message or the help of the given subcommand(s)
 
 Options:
