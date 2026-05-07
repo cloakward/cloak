@@ -42,6 +42,48 @@
 - **Biometric / user-presence as a server-side gate.** The Touch ID / polkit prompt is fired by the `cloak` CLI binary, not by `cloakd`. A same-UID attacker who calls the daemon directly via the IPC socket — bypassing the CLI — gets through with no biometric prompt. The daemon trusts a `biometric_ok: true` flag from the CLI peer. v1.0.1 moves the LocalAuthentication / polkit calls into `cloakd` itself so the prompt fires regardless of which peer requested `vault.show`.
 - **Side-channels: cache timing, EM, power.** Argon2id has timing-safety guarantees; everything else is best-effort.
 
+## Container deployment (`ghcr.io/cloakward/cloakd`)
+
+Cloak's primary threat model is a **single-user laptop** with a real OS keychain (macOS Keychain or freedesktop Secret Service) and kernel-enforced peer-credential isolation. The container image (`ghcr.io/cloakward/cloakd:VERSION`) ships the same daemon binary, but the surrounding security posture is materially different. Operators running `cloakd` in a container should read this section before adopting it for anything other than personal homelab use.
+
+### What still holds
+
+- **No plaintext over the wire to the model.** The same six-tool MCP surface; the same biometric-gated `vault.show` path; the same `Secret<T>` zeroize-on-drop discipline. A compromised model client cannot extract secret material from a containerized daemon any more easily than from a laptop daemon.
+- **Vault file confidentiality at rest.** AEAD per record + master-key wrap + Argon2id KDF are all unchanged. A stolen `vault.cloak` file is still useless to anyone who lacks the pepper.
+- **Audit log integrity.** Hash-chained JSONL works the same in a container; mount it on a persistent volume and `cloak audit verify` (CLI on the host) detects tampering.
+- **Cosign + SLSA L3 attestation.** The container image is built by the same pinned-workflow `release.yml` and inherits the same provenance chain as the tarballs. `cosign verify` on the image digest works (image signing itself is a v1.0.1 follow-up, but the attestation manifest is already attached via `provenance: true` on `docker/build-push-action`).
+
+### What changes in a container
+
+- **No OS keychain.** macOS Keychain doesn't exist inside a Linux container; freedesktop Secret Service requires a running session keyring, which a typical headless container does not have. The pepper falls back to `CLOAK_PEPPER_FILE`. Operators MUST mount the pepper as a Docker secret at `/run/secrets/cloak-pepper` (mode 0o600). The daemon reads `CLOAK_PEPPER_FILE` and refuses to load any pepper file readable by group or world. Anything else (`tmpfs`, `bind mount` from a world-readable host path, `--env CLOAK_PEPPER=...`) downgrades the threat model and is documented as a residual risk for that operator.
+- **Peer-credential semantics shift to namespace UIDs.** The daemon's `SO_PEERCRED` path reads PIDs and UIDs in the daemon's PID and user namespaces. A peer in another container or in the host's namespace presents UIDs that may collide with the daemon's notion of "trusted same-UID". The on-disk binary basename allowlist (`cloak`, `cloak-mcp`, `cloakd`) still applies, but the `getpeereid` UID equality check assumes a shared UID namespace — which is the default for `--ipc=host` and bind-mounted UDS sockets, but NOT for sandboxed peer containers. Operators running multi-container setups MUST audit which containers can `connect()` the cloakd UDS.
+- **Linux pidfd watcher behavior depends on the host kernel.** The PID-recycle defense (`SO_PEERPIDFD` + `pidfd_open` + `tokio::io::unix::AsyncFd` watcher) requires kernel ≥ 5.3 AND that pidfd be enabled in the container's seccomp profile. Hardened container runtimes (e.g., gVisor, Kata) may block `pidfd_open`; Cloak falls back to socket-FIN-driven session revocation in that case. The PID-recycle window then degrades to "the time between peer task exit and its socket FIN reaching cloakd" rather than the kernel's exit notification — strictly weaker than the macOS kqueue path.
+- **No biometric / user-presence gate.** Containers have no Touch ID, no polkit, no LocalAuthentication. `cloak show` from inside the container will always need `--no-biometric` (and audit-log every such call). The `cloak` CLI is intended for the host, not the container; the container ships only `cloakd`.
+- **Read-side rollback detection is unchanged** (vault-file-only counter). Mount your vault directory on a persistent volume that you back up; restoring an older volume snapshot is undetected on reads in this release.
+- **Image signature verification is the consumer's responsibility.** Always pin by digest in production:
+  ```
+  docker pull ghcr.io/cloakward/cloakd@sha256:...
+  cosign verify --certificate-identity-regexp '^https://github.com/cloakward/cloak/.github/workflows/release.yml@refs/tags/vX.Y.Z$' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    ghcr.io/cloakward/cloakd@sha256:...
+  ```
+
+### Recommended container deployment
+
+- Single user, single host, single daemon container. Multi-tenant cloakd is not in the v1.0 threat model.
+- Pepper mounted via Docker secret (`/run/secrets/cloak-pepper`, mode 0o600).
+- Vault on a named volume backed by host-level encryption (LUKS, FileVault, BitLocker on the host, etc.) — Cloak's at-rest crypto is good but defense-in-depth helps.
+- UDS (`/run/cloakd/cloakd.sock`) bind-mounted into peer containers that need to talk to it; do NOT expose it via `--ipc=host` to untrusted containers.
+- Run as `nonroot` (the distroless `cc-debian12:nonroot` base does this by default; do not override).
+- Treat the container as having **same threat model as a laptop daemon running as a single user**, not as a multi-tenant service. If you need multi-tenant, that's a v1.x design problem (remote auth, per-tenant master keys, etc.) and is not yet defined.
+
+### Out of scope for v0.9.x containers
+
+- Network-exposed cloakd (TCP listener with TLS + remote auth). v1.x.
+- Per-tenant key isolation. v1.x.
+- Image notarization equivalent (e.g. attached cosign signature on the manifest digest). v1.0.1.
+- Confidential-computing / TEE attestation. Not on the roadmap.
+
 ## Trust assumptions
 
 1. The host OS kernel correctly enforces UID isolation and reports peer credentials honestly (SCM_CREDENTIALS, audit_token_t).
