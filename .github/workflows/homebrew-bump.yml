@@ -9,6 +9,16 @@ name: homebrew-bump
 on:
   release:
     types: [published]
+  # Manual dispatch for re-running against an existing release tag —
+  # same pattern as npm-publish.yml and docker-push.yml. Useful when
+  # the tap repo + token weren't configured at the time the release
+  # was first published, so the auto-fire skipped with a warning.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Release tag to bump (e.g. v0.9.0-rc2)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -34,11 +44,12 @@ jobs:
         if: steps.cred.outputs.skip == 'false'
         id: tag
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          # Honor either the release event or the manual dispatch input.
+          TAG: ${{ github.event.release.tag_name || inputs.ref }}
         run: |
           set -euo pipefail
           if [ -z "${TAG}" ]; then
-            echo "::error::release.tag_name is empty"
+            echo "::error::no tag resolved (release.tag_name and inputs.ref both empty)"
             exit 1
           fi
           # Strip leading "v" if present.
@@ -63,7 +74,7 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
           # Workflow ref must match release.yml on the tagged commit.
           EXPECTED_ISSUER: "https://token.actions.githubusercontent.com"
-          EXPECTED_IDENTITY_REGEX: "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.event.release.tag_name }}$"
+          EXPECTED_IDENTITY_REGEX: "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.event.release.tag_name || inputs.ref }}$"
         run: |
           set -euo pipefail
 
