@@ -353,6 +353,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Mirror the per-platform `bun --compile` matrix in the build
+        # job: cloak-mcp ships only on macOS arm64, macOS x64, and
+        # Linux gnu amd64. The Linux gnu arm64 row's tarball does NOT
+        # contain a cloak-mcp binary because `bun build --compile`
+        # can't cross-target arm64 from an x86_64 host. Including
+        # linux-arm64 here would fail the dxt build at "Extract
+        # cloak-mcp from tarball" — re-add when the bun cross-compile
+        # gap closes (or when we build cloak-mcp natively per arch).
         include:
           - target: aarch64-apple-darwin
             platform_tag: macos-arm64
@@ -360,8 +368,6 @@ jobs:
             platform_tag: macos-x64
           - target: x86_64-unknown-linux-gnu
             platform_tag: linux-x64
-          - target: aarch64-unknown-linux-gnu
-            platform_tag: linux-arm64
     steps:
       - uses: actions/checkout@v4
 
