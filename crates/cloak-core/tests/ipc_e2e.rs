@@ -47,6 +47,14 @@ fn open_policy() -> (PeerPolicy, String) {
 async fn spawn_daemon(
     cli_basename: String,
 ) -> Option<(PathBuf, TempDir, Arc<Notify>, tokio::task::JoinHandle<()>)> {
+    // Disable the rollback-counter mirror for the same reason as in
+    // `handlers_e2e.rs`: a fresh per-test vault would otherwise be
+    // rejected by a stale keychain mirror left by a prior run.
+    // SAFETY: required by std 1.84+ for env mutation.
+    unsafe {
+        std::env::set_var("CLOAK_DISABLE_ROLLBACK_MIRROR", "1");
+    }
+
     let dir = TempDir::new().expect("tempdir");
     let socket_path = dir.path().join("cloakd.sock");
     let vault_path = dir.path().join("vault.cloak");

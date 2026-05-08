@@ -4,6 +4,9 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+### Security
+- Read-side rollback detection. The vault's monotonic counter is now mirrored into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`, 8 bytes big-endian) on every successful write, and `Vault::open_or_create` compares the file counter to the mirror before any record is decrypted. A file counter older than the mirror (backup-restore mishap, malware, bit-flip) is rejected with `Error::VaultRollbackDetected`; a newer file counter is accepted and refreshes the mirror (legitimate cross-device rsync); a missing mirror is seeded from the file (first run after upgrade). With `CLOAK_PEPPER_FILE` set the mirror falls back to a 0600 sibling file (`<vault_dir>/rollback-counter`) — see `docs/THREAT_MODEL.md` for the file-fallback caveat. This was a documented residual risk in v0.9.0-rc1/rc2; deferral note removed.
+
 ### Added
 - macOS binaries are now Apple-notarized + stapled. No more `xattr -d com.apple.quarantine` needed — `release.yml` codesigns `cloak`, `cloakd`, and `cloak-mcp` with a Developer ID Application cert, submits to `xcrun notarytool`, and staples the ticket before tarballing. Cosign keyless signing still happens AFTER notarization so the cosign cert covers the notarized bytes. Steps gracefully skip (with a `::warning::`) when the Apple secrets aren't configured (e.g. forks).
 - release tarballs include cloak-mcp at bin/cloak-mcp on macOS arm64, macOS x64, and Linux gnu amd64; brew/curl installs ship all three binaries with no npm dependency. (Linux musl + Linux arm64 ship cloak + cloakd only because bun --compile can't cross-target those triples — track in a follow-up issue if needed.)

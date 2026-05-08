@@ -73,6 +73,17 @@ async fn spawn_daemon(
     Arc<Notify>,
     tokio::task::JoinHandle<()>,
 )> {
+    // Disable the rollback-counter mirror in this test process. We
+    // create a fresh vault per test run; if a prior run left a higher
+    // counter in the OS keychain, `Vault::open_or_create` would refuse
+    // the new vault as a rollback. The mirror's behaviour is covered
+    // end-to-end by `tests/rollback_mirror.rs`.
+    // SAFETY: required by std 1.84+ for env mutation. Set once here;
+    // these e2e tests do not depend on the var being unset.
+    unsafe {
+        std::env::set_var("CLOAK_DISABLE_ROLLBACK_MIRROR", "1");
+    }
+
     let dir = TempDir::new().expect("tempdir");
     let socket_path = dir.path().join("cloakd.sock");
     let vault_path = dir.path().join("vault.cloak");

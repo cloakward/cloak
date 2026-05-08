@@ -147,13 +147,93 @@ pub struct Vault {
 impl Vault {
     /// Open an existing vault file or create an empty one (locked,
     /// uninitialized) if missing.
+    ///
+    /// On open, if the vault is initialized, the file's monotonic
+    /// counter is compared against the OS-keychain mirror (or the
+    /// `CLOAK_PEPPER_FILE`-sibling counter file). A file counter that is
+    /// *less* than the mirror is read-side rollback and is rejected with
+    /// [`Error::VaultRollbackDetected`]. A file counter that is *greater*
+    /// refreshes the mirror (legitimate external bump, e.g. an rsync
+    /// from a paired device). A missing mirror is seeded from the file
+    /// (first run after upgrade).
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let store = SqliteStore::open(path)?;
-        Ok(Self {
+        let v = Self {
             path: path.to_path_buf(),
             store,
             master: None,
-        })
+        };
+        v.check_rollback_on_open()?;
+        Ok(v)
+    }
+
+    /// Compare the file counter to the keychain mirror. See the
+    /// `open_or_create` docstring for the rule table.
+    fn check_rollback_on_open(&self) -> Result<()> {
+        // Uninitialized (no `meta` row) → nothing to compare. The very
+        // first `initialize` call will seed both the file counter and
+        // the mirror.
+        let meta = match self.store.get_meta()? {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+        let file_counter = meta.monotonic_counter;
+        match crate::keychain::read_keychain_counter() {
+            Ok(Some(mirror)) => {
+                if file_counter < mirror {
+                    tracing::error!(
+                        file_counter,
+                        mirror_counter = mirror,
+                        "vault rollback detected on open: file counter is older than keychain mirror"
+                    );
+                    return Err(Error::VaultRollbackDetected);
+                }
+                if file_counter > mirror {
+                    // Legitimate forward bump (e.g. rsync from paired
+                    // device). Refresh the mirror so subsequent opens
+                    // see equality. A failure here is logged but not
+                    // fatal — the file is the source of truth.
+                    if let Err(e) = crate::keychain::mirror_counter(file_counter) {
+                        tracing::warn!(
+                            error = %e,
+                            file_counter,
+                            "failed to refresh keychain rollback-counter mirror"
+                        );
+                    } else {
+                        tracing::info!(
+                            file_counter,
+                            previous_mirror = mirror,
+                            "refreshed keychain rollback-counter mirror to match vault file"
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                // First run after upgrade (or after a `cloak destroy`).
+                // Seed the mirror from the file.
+                match crate::keychain::mirror_counter(file_counter) {
+                    Ok(()) => tracing::info!(
+                        file_counter,
+                        "seeded keychain rollback counter from vault file (first-time mirror)"
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        file_counter,
+                        "failed to seed keychain rollback-counter mirror; \
+                         read-side rollback detection inactive until next successful write"
+                    ),
+                }
+            }
+            Err(e) => {
+                // Reading the mirror failed (e.g. D-Bus down on Linux,
+                // wrong-length item, world-readable counter file). We
+                // surface this as a typed Keychain error rather than
+                // silently letting an attacker bypass the gate by
+                // breaking the mirror.
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     /// Default vault path (`$DATA_DIR/cloak/vault.cloak`).
@@ -219,6 +299,17 @@ impl Vault {
             created_at: Utc::now().to_rfc3339(),
         };
         self.store.set_meta(&meta)?;
+        // Seed the keychain rollback-counter mirror so the first
+        // post-init `open_or_create` finds equality. Best-effort: if
+        // the keychain is unavailable, the next vault open will seed
+        // it from the file counter via the "missing mirror" branch.
+        if let Err(e) = crate::keychain::mirror_counter(meta.monotonic_counter) {
+            tracing::warn!(
+                error = %e,
+                counter = meta.monotonic_counter,
+                "failed to seed keychain rollback-counter mirror at init"
+            );
+        }
         // Cache so the caller doesn't have to re-unlock immediately.
         self.master = Some(Secret::new(master));
         Ok(InitResult { kdf_params: params })
@@ -322,7 +413,7 @@ impl Vault {
             return Err(Error::Other("failed to update inserted secret"));
         }
         tx.commit()?;
-        self.store.bump_counter(self.next_counter()?)?;
+        let _ = self.bump_and_mirror()?;
         Ok(())
     }
 
@@ -347,7 +438,7 @@ impl Vault {
         )?;
         self.store
             .update_secret_value(name, &now_iso, new_version, &nonce, &ct)?;
-        self.store.bump_counter(self.next_counter()?)?;
+        let _ = self.bump_and_mirror()?;
         Ok(())
     }
 
@@ -367,7 +458,7 @@ impl Vault {
     /// Remove a secret.
     pub fn rm(&self, name: &str) -> Result<()> {
         self.store.delete_secret(name)?;
-        self.store.bump_counter(self.next_counter()?)?;
+        let _ = self.bump_and_mirror()?;
         Ok(())
     }
 
@@ -404,6 +495,25 @@ impl Vault {
             .get_meta()?
             .ok_or(Error::VaultFormat("vault not initialized"))?;
         Ok(meta.monotonic_counter.saturating_add(1))
+    }
+
+    /// Bump the file counter and best-effort mirror it to the OS
+    /// keychain. The file is the source of truth; if the mirror write
+    /// fails we log a warning but do not fail the surrounding write.
+    /// Returns the new counter value on success.
+    fn bump_and_mirror(&self) -> Result<u64> {
+        let next = self.next_counter()?;
+        self.store.bump_counter(next)?;
+        if let Err(e) = crate::keychain::mirror_counter(next) {
+            tracing::warn!(
+                error = %e,
+                counter = next,
+                "failed to mirror rollback counter to OS keychain; \
+                 vault file counter is authoritative — read-side rollback \
+                 detection may lag until the next successful mirror"
+            );
+        }
+        Ok(next)
     }
 }
 
@@ -452,6 +562,24 @@ mod tests {
     use proptest::prelude::*;
     use tempfile::TempDir;
 
+    /// Disable the OS-keychain rollback-counter mirror for the entire
+    /// test process so the unit tests stay hermetic. The mirror logic
+    /// itself is exercised by dedicated tests that opt back in via a
+    /// scoped enable (see `rollback_mirror_*` tests below).
+    fn disable_rollback_mirror() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: required by std 1.84+ for `set_var`. We set this
+            // once at the start of the first test in the process and
+            // never mutate it again from a unit test, so the absence
+            // of synchronization with other env-var readers is fine.
+            unsafe {
+                std::env::set_var("CLOAK_DISABLE_ROLLBACK_MIRROR", "1");
+            }
+        });
+    }
+
     /// Fast Argon2id params for tests — production values come from
     /// `kdf::autotune()` but we cannot afford that per-test.
     fn fast_params() -> KdfParams {
@@ -465,6 +593,7 @@ mod tests {
     /// Initialize a vault using a deterministic dummy pepper so tests
     /// don't touch the real OS keychain. Returns (TempDir, Vault).
     fn init_test_vault() -> (TempDir, Vault) {
+        disable_rollback_mirror();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("vault.cloak");
         let mut v = Vault::open_or_create(&path).unwrap();
@@ -569,6 +698,7 @@ mod tests {
 
     #[test]
     fn lock_unlock_cycle() {
+        disable_rollback_mirror();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("v.cloak");
         let mut v = Vault::open_or_create(&path).unwrap();
@@ -585,6 +715,7 @@ mod tests {
 
     #[test]
     fn wrong_passphrase_typed_error() {
+        disable_rollback_mirror();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("v.cloak");
         let mut v = Vault::open_or_create(&path).unwrap();
@@ -687,6 +818,7 @@ mod tests {
             name in "[a-zA-Z0-9_-]{1,32}",
             value in proptest::collection::vec(any::<u8>(), 0..=256),
         ) {
+            disable_rollback_mirror();
             let dir = TempDir::new().unwrap();
             let path = dir.path().join("v.cloak");
             let mut v = Vault::open_or_create(&path).unwrap();

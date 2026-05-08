@@ -165,15 +165,21 @@ row's name (verified by
 
 ### Rollback resistance
 
-The `meta.monotonic_counter` lives in the vault file only; every write
-enforces strict increase via `bump_counter`, so a thief who restores
-`vault.cloak` from a stale backup hits `Error::VaultRollbackDetected`
-on the next write. Read-only operations (`vault.show`, `vault.list`)
-against a rolled-back snapshot are **not** detected — this is a
-documented residual risk for v0.9.x (see `docs/THREAT_MODEL.md` and the
-v0.9.0-rc2 known-caveats list in `CHANGELOG.md`). Mirroring the counter
-into a separate OS-keychain item so `Vault::open_unlocked` can reject
-read-side rollback is a v1.0.1 deliverable.
+The `meta.monotonic_counter` lives in the vault file *and* is mirrored
+into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`,
+8 bytes big-endian). Every write enforces strict increase via
+`bump_counter` and best-effort updates the mirror, so a thief who
+restores `vault.cloak` from a stale backup hits `Error::VaultRollbackDetected`
+*on open*, before any record is decrypted — read-side rollback is
+detected on every `Vault::open_or_create`. The check follows three
+rules: file == mirror is a no-op; file > mirror is a legitimate
+forward bump (e.g. an rsync from a paired device) that refreshes the
+mirror; file < mirror is rejected. A missing mirror (fresh install or
+upgrade from a Cloak that didn't have the mirror) is seeded from the
+file on first open. With `CLOAK_PEPPER_FILE` set the mirror falls back
+to a 0600 file alongside the pepper; in that fallback an attacker who
+can roll back the vault can also roll back the counter file in
+lockstep — see `docs/THREAT_MODEL.md`.
 
 ## Privileged tool dispatch
 
