@@ -390,12 +390,15 @@ fn restore_recovers_after_passphrase_loss() {
     // 2. "Lose" the passphrase: switch CLOAK_PASSPHRASE to a new value
     //    and confirm the original is no longer accepted by `show`.
     let path = dir.path().join("vault.cloak");
+    let pepper = dir.path().join("pepper");
     let mut bad_show = Command::cargo_bin("cloak").unwrap();
     bad_show
         .arg("--vault")
         .arg(&path)
         .arg("--no-biometric")
         .env("CLOAK_PASSPHRASE", "totally-different-pass")
+        .env("CLOAK_PEPPER_FILE", &pepper)
+        .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
         .env("RUST_LOG", "off")
         .arg("show")
         .arg("APIKEY")
@@ -411,6 +414,9 @@ fn restore_recovers_after_passphrase_loss() {
         .arg("--no-biometric")
         .env("CLOAK_PASSPHRASE", "fresh-recovery-pass")
         .env("CLOAK_MNEMONIC", &mnemonic)
+        .env("CLOAK_PEPPER_FILE", &pepper)
+        .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
+        .env("CLOAK_ALLOW_MNEMONIC_STDOUT", "1")
         .env("RUST_LOG", "off")
         .arg("restore")
         .assert()
@@ -423,6 +429,8 @@ fn restore_recovers_after_passphrase_loss() {
         .arg(&path)
         .arg("--no-biometric")
         .env("CLOAK_PASSPHRASE", "fresh-recovery-pass")
+        .env("CLOAK_PEPPER_FILE", &pepper)
+        .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
         .env("RUST_LOG", "off")
         .arg("show")
         .arg("APIKEY")
@@ -463,6 +471,7 @@ fn restore_writes_audit_entry() {
     fs::create_dir_all(&data_root).unwrap();
 
     let path = dir.path().join("vault.cloak");
+    let pepper = dir.path().join("pepper");
     let mut restore = Command::cargo_bin("cloak").unwrap();
     restore
         .arg("--vault")
@@ -470,6 +479,9 @@ fn restore_writes_audit_entry() {
         .arg("--no-biometric")
         .env("CLOAK_PASSPHRASE", "fresh-pass")
         .env("CLOAK_MNEMONIC", &mnemonic)
+        .env("CLOAK_PEPPER_FILE", &pepper)
+        .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
+        .env("CLOAK_ALLOW_MNEMONIC_STDOUT", "1")
         .env("XDG_DATA_HOME", &data_root)
         .env("HOME", dir.path())
         .env("RUST_LOG", "off")
