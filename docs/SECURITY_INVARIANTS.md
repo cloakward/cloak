@@ -125,9 +125,16 @@ on the token bytes. (`THREAT_MODEL.md` listed this as a v0.1 residual risk;
 the v1.0 fix landed pre-tag.)
 
 ### S3 — Vault rollback is rejected
-A monotonic counter persisted to the OS keychain (or `CLOAK_PEPPER_FILE`
-sibling) is checked on every unlock. `crates/cloak-core/src/vault.rs:616`
-(`rollback_counter_rejected_via_store`) covers it.
+A monotonic counter lives in the vault's `meta` table and is mirrored
+into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`,
+or a 0600 `rollback-counter` file alongside `CLOAK_PEPPER_FILE`).
+`Vault::open_or_create` compares the two and rejects with
+`Error::VaultRollbackDetected` whenever the file counter is below the
+mirror, so read-side rollback is caught before any record is decrypted.
+The write-side gate (`crates/cloak-core/src/store.rs::bump_counter`) is
+covered by `crates/cloak-core/src/vault.rs::tests::rollback_counter_rejected_via_store`;
+the read-side gate end-to-end is covered by
+`crates/cloak-core/tests/rollback_mirror.rs`.
 
 ### S4 — Per-record AAD prevents cross-record swap
 The AAD bound to each record's ciphertext is

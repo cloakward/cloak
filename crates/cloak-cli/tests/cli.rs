@@ -33,6 +33,14 @@ fn cloak(dir: &TempDir) -> (Command, PathBuf) {
     cmd.env("CLOAK_PEPPER_FILE", &pepper);
     // Tell tracing-subscriber to be quiet during tests.
     cmd.env("RUST_LOG", "off");
+    // Disable the OS-keychain rollback-counter mirror in this child
+    // process. Each CLI test creates a fresh vault file in its own
+    // tempdir; if a prior test run left a higher counter in the
+    // shared OS keychain, `cloak init` would refuse to open the
+    // newly-created (counter=1) vault as a rollback. The mirror's
+    // production behaviour is covered by
+    // `crates/cloak-core/tests/rollback_mirror.rs`.
+    cmd.env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1");
     (cmd, path)
 }
 
