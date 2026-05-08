@@ -6,7 +6,7 @@ Cloak replaces the prevailing anti-pattern of pasting API keys into prompts (or 
 
 Agents call action-shaped MCP tools — `sign_request`, `proxy_authenticated_http_request`, `mint_short_lived_token` — and the daemon performs the privileged operation on the agent's behalf. Reveal is a deliberate, biometric-gated CLI act, not a tool call.
 
-This drop is **v0.9.0-rc2**, the second release candidate for v1.0: the load-bearing security invariants are intact, the post-v0.1 work has landed (real AWS SigV4/STS, Linux Secret Service pepper, cross-platform CI matrix, cosign-signed SLSA L3 releases), and Windows + biometric polkit + recovery + rotation handlers are scoped to v1.0.1 / v1.x.
+This is **v1.0.0**: the load-bearing security invariants are intact, the post-v0.1 work has landed (real AWS SigV4/STS, Linux Secret Service pepper, cross-platform CI matrix, cosign-signed SLSA L3 releases, BIP-39 24-word recovery seed, server-side biometric enforcement, OS-keychain rollback counter mirror), and Windows + rotation handlers are scoped to v1.0.1 / v1.x.
 
 ---
 
@@ -65,7 +65,7 @@ Three processes, one trust boundary. The MCP shim translates MCP tool calls to I
 
 If you only want to use Cloak inside Claude Desktop and would rather skip the build steps below:
 
-1. Download `Cloak-0.9.0-rc2-<your-platform>.dxt` from the [latest release](https://github.com/cloakward/cloak/releases).
+1. Download `Cloak-1.0.0-<your-platform>.dxt` from the [latest release](https://github.com/cloakward/cloak/releases).
 2. Drag the `.dxt` onto Claude Desktop's **Settings → Extensions** panel (or double-click it).
 3. On first activation, Cloak's setup wizard runs in a native dialog — it walks you through vault init, daemon launch, and the biometric / passphrase prompts. No terminal commands required.
 
@@ -89,7 +89,7 @@ cd packages/cloak-mcp && bun install && bun build src/server.ts --compile --outf
 ./target/release/cloak init
 ```
 
-> **⚠️ Back up your passphrase before adding any secret.** Cloak v0.9.0-rc2 has no recovery mechanism: if you lose your passphrase, every secret in the vault is permanently unrecoverable. Store it in a password manager or out-of-band backup. BIP-39 24-word recovery is planned for v1.x.
+> **⚠️ Write down your 24-word recovery seed at vault creation.** Cloak v1.0 displays a BIP-39 mnemonic exactly once at `cloak init` time and never stores it. The seed unwraps the master key independently of the passphrase. If you lose both the passphrase **and** the printout, every secret in the vault is permanently unrecoverable — store the printout offline.
 
 ```sh
 # 3. Add a secret. The value is read with echo OFF.
@@ -121,7 +121,7 @@ For a fully automated end-to-end demo run `./scripts/smoke-test.sh` — it does 
 
 ---
 
-## What's in v0.9.0-rc2 (release-candidate scope for v1.0)
+## What's in v1.0.0
 
 ### Implemented
 - **Crypto:** libsodium-only via `libsodium-sys-stable`. XChaCha20-Poly1305-IETF AEAD; Argon2id keyed mode with autotune (HMAC-SHA256(pepper, passphrase) → `crypto_pwhash`); per-record subkeys via `crypto_kdf_derive_from_key`. `Secret<T>` zeroize-on-drop everywhere.
@@ -142,8 +142,8 @@ For a fully automated end-to-end demo run `./scripts/smoke-test.sh` — it does 
 
 ### Deferred from the 8-week plan
 - Linux desktop pepper now uses freedesktop Secret Service (W7); Linux biometric is enforced via polkit (action `dev.cloak.show-secret`, see `scripts/polkit/dev.cloak.policy`).
-- v0.9.0-rc2 ships **macOS + Linux only — Windows lands in v1.0.1**, see [issue #2](https://github.com/cloakward/cloak/issues/2).
-- Cosign keyless + SLSA L3 provenance ship in v0.9.0-rc2 (W9b). SignPath OV signing (Windows) is v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)).
+- v1.0.0 ships **macOS + Linux only — Windows lands in v1.0.1**, see [issue #2](https://github.com/cloakward/cloak/issues/2).
+- Cosign keyless + SLSA L3 provenance ship in v1.0.0 (W9b). SignPath OV signing (Windows) is v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)).
 - Apple notarization is a v1.x deliverable (see "macOS Gatekeeper" below and `docs/QUICKSTART.md`).
 - BIP-39 24-word recovery, `cloak export/import`, `.env` import, `cloak rotate NAME`.
 - Mintlify docs site, fuzz harnesses, full property-test KAT vector suite, chaos tests.
@@ -205,13 +205,7 @@ See `docs/THREAT_MODEL.md` for the full adversary model, `docs/IPC_WIRE.md` for 
 
 ## A note on macOS Gatekeeper
 
-v0.9.0-rc2 (and v1.0 going forward) binaries are not Apple-notarized. If you download a release artifact (rather than building from source), macOS Gatekeeper will block it until you clear the quarantine attribute:
-
-```sh
-xattr -d com.apple.quarantine ./cloak ./cloakd ./cloak-mcp
-```
-
-Every release is cosign-signed with SLSA L3 provenance, which lets you verify the binary is the exact artifact CI built. Notarization adds Apple's pre-execution scan on top and is a v1.x deliverable. See `docs/QUICKSTART.md` for the full Gatekeeper walkthrough.
+v1.0.0 binaries are signed with a Developer ID Application certificate, notarized by Apple, and stapled — Gatekeeper will accept them on first launch with no `xattr` dance. Every release is also cosign-signed with SLSA L3 provenance, which lets you verify the binary is the exact artifact CI built. See `docs/QUICKSTART.md` for the full verification walkthrough.
 
 ## License
 

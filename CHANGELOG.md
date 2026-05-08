@@ -4,6 +4,8 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-05-08
+
 ### Security
 - Read-side rollback detection. The vault's monotonic counter is now mirrored into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`, 8 bytes big-endian) on every successful write, and `Vault::open_or_create` compares the file counter to the mirror before any record is decrypted. A file counter older than the mirror (backup-restore mishap, malware, bit-flip) is rejected with `Error::VaultRollbackDetected`; a newer file counter is accepted and refreshes the mirror (legitimate cross-device rsync); a missing mirror is seeded from the file (first run after upgrade). With `CLOAK_PEPPER_FILE` set the mirror falls back to a 0600 sibling file (`<vault_dir>/rollback-counter`) — see `docs/THREAT_MODEL.md` for the file-fallback caveat. This was a documented residual risk in v0.9.0-rc1/rc2; deferral note removed.
 - Biometric / user-presence is now enforced by `cloakd` directly, not the `cloak` CLI. The daemon fires the Touch ID (macOS) / polkit (Linux) prompt itself before serving `vault.show`, and ignores any client-supplied "user already approved" assertion. A same-UID attacker who connects to the daemon socket directly — bypassing the CLI — no longer skips the prompt; the only documented escape hatch is the explicit `skip_biometric: true` opt-out forwarded by `cloak --no-biometric show NAME` for headless contexts. New `biometric-failed` IPC error code is returned on cancel / failure / unavailable. Threat-model row A9 in `docs/THREAT_MODEL.md`.
@@ -26,8 +28,8 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 - `npm-publish.yml` derives the npm dist-tag from the tag pattern: prereleases (`-rc*` / `-beta*` / `-alpha*` / `-pre*` / `-dev*`) ship to the `beta` dist-tag; stable tags ship to `latest`. So `npm install @cloak-ward/mcp` (no `@beta`) does not pull a pre-release.
 - New `npm-dist-tag.yml` workflow: server-side dist-tag operations using the repo's `NPM_TOKEN` secret. Lets the operator move the dist-tag of an already-published version (e.g. demote rc1 from `latest` to `beta`) without having to wrangle 2FA / token state on their laptop.
 
-### Deferred to v1.0.0
-- **Docker image (`ghcr.io/cloakward/cloakd`)** — multi-arch buildx of the cargo cross-compile chain hit a stubborn `error[E0463]: can't find crate for core` on the linux/arm64 row across four iteration attempts. Cleanest fix is to split into native-runner jobs (`ubuntu-24.04` for amd64, `ubuntu-24.04-arm` for arm64) and merge via `docker buildx imagetools create`; that refactor is queued for v1.0.0 work. The `release.published` trigger has been removed from `docker-push.yml`; the workflow stays in-tree on `workflow_dispatch` only. v0.9.0-rc1 ships via the four other install paths (GitHub release tarballs, npm, Homebrew tap, Cloak.dxt). Tracked in [#46](https://github.com/cloakward/cloak/issues/46).
+### Notes
+- The "deferred to v1.0.0" Docker multi-arch line from rc1 is resolved: `docker-push.yml` now splits into native-runner jobs (`ubuntu-24.04` for amd64, `ubuntu-24.04-arm` for arm64) and merges via `docker buildx imagetools create`. `:VERSION`, `:MAJOR_MINOR`, and `:latest` (stable tags only) are pushed to `ghcr.io/cloakward/cloakd`.
 
 ## [0.9.0-rc1] — 2026-05-06
 
