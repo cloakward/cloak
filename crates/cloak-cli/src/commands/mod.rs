@@ -22,6 +22,7 @@ use cloak_core::vault::{SecretKind, Vault};
 
 mod add;
 mod audit_log;
+mod backup;
 mod clients;
 mod completions;
 mod daemon;
@@ -34,6 +35,8 @@ mod import;
 mod init;
 mod list;
 mod panic;
+mod recovery_display;
+mod restore;
 mod rm;
 mod run;
 mod set;
@@ -212,6 +215,27 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ClaudeCmd,
     },
+
+    /// Re-derive vault access from your 24-word BIP-39 recovery seed.
+    Restore,
+
+    /// Backup utilities: confirm the recovery seed you wrote down.
+    Backup {
+        #[command(subcommand)]
+        cmd: BackupCmd,
+    },
+}
+
+/// `cloak backup ...` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum BackupCmd {
+    /// Surface the recovery seed disposition for this vault. The
+    /// 24-word phrase is NOT re-displayed — Cloak does not keep a
+    /// copy. This command confirms the wrap exists and is reachable.
+    Mnemonic,
+    /// Round-trip a candidate 24-word seed against the vault's stored
+    /// recovery wrap. Confirms you wrote the words down correctly.
+    Verify,
 }
 
 /// `cloak daemon ...` subcommands.
@@ -455,6 +479,11 @@ pub fn run() -> Result<ExitCode> {
             ClaudeCmd::Unregister(f) => {
                 clients::run_unregister(&ctx, f.into_selection()).map(|_| ExitCode::SUCCESS)
             }
+        },
+        Command::Restore => restore::run(&ctx).map(|_| ExitCode::SUCCESS),
+        Command::Backup { cmd } => match cmd {
+            BackupCmd::Mnemonic => backup::run_mnemonic(&ctx).map(|_| ExitCode::SUCCESS),
+            BackupCmd::Verify => backup::run_verify(&ctx).map(|_| ExitCode::SUCCESS),
         },
     };
 

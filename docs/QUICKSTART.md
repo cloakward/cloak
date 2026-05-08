@@ -45,12 +45,31 @@ tail -f ~/Library/Logs/cloak/cloakd.err.log
 
 ## 3. Initialize the vault
 
-> **⚠️ Back up your passphrase before adding any secret.** Cloak v0.9.0-rc2 has no recovery mechanism: if you lose your passphrase, every secret in the vault is permanently unrecoverable. Store it in a password manager or out-of-band backup. BIP-39 24-word recovery is planned for v1.x.
-
 ```sh
 cloak init                  # prompts for passphrase, autotunes Argon2id
 cloak status                # vault path, record count, KDF params
 ```
+
+`cloak init` prints a 24-word BIP-39 recovery seed exactly **once**.
+Write it down on paper and store it offline. If you lose your passphrase,
+the seed is the only path back to your secrets — Cloak does not keep a
+copy. Confirm you wrote it down correctly with `cloak backup verify`.
+
+## 3b. If you lose your passphrase
+
+If you still have the 24-word recovery seed you wrote down at vault
+creation, run `cloak restore`:
+
+```sh
+cloak restore               # prompts for the 24 words + a NEW passphrase
+```
+
+Cloak re-derives the master key from the seed (BIP-39 standard
+PBKDF2-HMAC-SHA512) and re-wraps it under your fresh passphrase. The
+old passphrase is no longer valid. Your secrets are unchanged.
+
+If you lose **both** the passphrase and the seed, every secret in the
+vault is permanently unrecoverable — that is the design.
 
 ## 4. Add and reveal a secret
 
@@ -115,7 +134,6 @@ tail -n 20 ~/Library/Application\ Support/cloak/audit.jsonl
 ## What's deliberately not here yet
 
 - Linux / Windows installers.
-- BIP-39 recovery (`cloak recover --from-words`).
 - Automated secret rotation (`cloak rotate NAME`).
 - `.env` import.
 - Signed release artifacts.

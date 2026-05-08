@@ -92,6 +92,40 @@ Cloak's primary threat model is a **single-user laptop** with a real OS keychain
 4. SQLite WAL + fsync gives durable, atomic single-file writes.
 5. The user's passphrase entropy + the pepper jointly resist offline cracking; the pepper alone makes the file useless to a thief who lacks the keychain item.
 
+## BIP-39 recovery seed
+
+At vault creation Cloak generates a fresh 256-bit entropy, encodes it as a
+24-word English BIP-39 mnemonic, and derives a 32-byte recovery key from
+the standard BIP-39 seed (`PBKDF2-HMAC-SHA512`, 2048 iterations, salt
+`"mnemonic"`, empty BIP-39 passphrase — first 32 bytes). The master key is
+wrapped twice and stored side-by-side in the `meta` row:
+
+- `wrap_aead` — under `wrap_key = Argon2id(passphrase, pepper)` with AAD
+  `cloak.master.v1`. Used by `cloak unlock`.
+- `recovery_wrap_aead` — under the recovery key with AAD
+  `cloak.recovery.v1`. Used by `cloak restore`.
+
+The mnemonic itself is shown to the user once at vault creation and never
+persisted; Cloak does not retain a copy. `cloak restore` re-derives the
+master key from the seed and re-wraps it under a fresh passphrase,
+leaving the recovery wrap intact so the same words keep working. `cloak
+backup verify` confirms a candidate seed round-trips the recovery wrap
+without performing a restore.
+
+**Threat implications.** A vault-file thief now also needs to be a
+mnemonic-paper thief to bypass the passphrase. Users who write the seed
+down on paper and store it offline keep the same `A3` posture as before:
+file-only access still requires either the passphrase **or** the seed,
+both of which live outside the file. Users who store the seed alongside
+the vault file in the same backup degrade `A3`: if the backup leaks, so
+does access. The recovery seed is documented as "treat like the
+passphrase" wherever it is mentioned in user-facing output.
+
+The recovery path is **CLI-only** — there is no IPC method or MCP tool
+that can read or use the recovery wrap. The same-UID `A2` attacker who
+can talk to the daemon socket does not gain a new privilege from this
+feature.
+
 ## Residual risks accepted for v0.9.0-rc2
 
 - No certificate pinning on outbound HTTP.

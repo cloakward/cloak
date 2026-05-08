@@ -156,6 +156,8 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
         p.mem_kib, p.t_cost, p.p_cost
     );
     println!("      pepper stored in OS keychain (service=dev.cloak account=vault.pepper)");
+    println!();
+    super::recovery_display::print_mnemonic_warning(&result.mnemonic);
     Ok(())
 }
 

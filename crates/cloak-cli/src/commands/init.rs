@@ -1,7 +1,10 @@
 //! `cloak init` — create a fresh vault.
 
 use anyhow::Result;
+use cloak_core::audit::AuditResult;
 
+use super::audit_log;
+use super::recovery_display::print_mnemonic_warning;
 use super::{open_vault, Context, SystemError};
 use crate::prompt::prompt_passphrase_twice;
 
@@ -9,6 +12,9 @@ use crate::prompt::prompt_passphrase_twice;
 /// exists at that path. Prompts for the passphrase twice (or reads
 /// `CLOAK_PASSPHRASE` for tests) and then prints the autotuned KDF
 /// parameters so the user has a record of what their vault uses.
+///
+/// Also generates and prints a 24-word BIP-39 recovery mnemonic ONCE.
+/// Cloak does not keep a copy; the user must write the words down.
 pub fn run(ctx: &Context) -> Result<()> {
     let mut vault = open_vault(ctx)?;
     if vault.is_initialized()? {
@@ -31,6 +37,12 @@ pub fn run(ctx: &Context) -> Result<()> {
         p.mem_kib, p.t_cost, p.p_cost
     );
     println!();
-    println!("Your vault is encrypted at rest. Lose your passphrase = lose your secrets.");
+    print_mnemonic_warning(&result.mnemonic);
+    audit_log::append(
+        "cli.init",
+        None,
+        AuditResult::Ok,
+        Some("vault initialized; recovery mnemonic generated".into()),
+    );
     Ok(())
 }

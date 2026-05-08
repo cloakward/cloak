@@ -138,6 +138,13 @@ impl From<&Error> for RpcError {
             Error::InvalidPassphrase => {
                 rpc_error("invalid-params", "invalid passphrase or tampered vault")
             }
+            // Recovery-seed paths never traverse the IPC boundary —
+            // `cloak restore` / `cloak backup *` are CLI-only and the
+            // MCP shim has no access to the mnemonic. We still map the
+            // variants to a typed RPC code so a stray library use from
+            // an in-process daemon test surfaces something sensible.
+            Error::InvalidMnemonic => rpc_error("invalid-params", "invalid recovery mnemonic"),
+            Error::NoRecoveryWrap => rpc_error("internal-error", "vault has no recovery wrap"),
             Error::Keychain(m) => rpc_error("internal-error", format!("keychain: {m}")),
             Error::Storage(_) => rpc_error("internal-error", "storage error"),
             Error::Io(_) => rpc_error("internal-error", "io error"),

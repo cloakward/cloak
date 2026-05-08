@@ -272,3 +272,220 @@ fn add_duplicate_fails() {
         .failure()
         .stderr(predicate::str::contains("already exists"));
 }
+
+// -------------------------------------------------------------------------
+// BIP-39 recovery seed
+// -------------------------------------------------------------------------
+
+/// Pull the 24-word phrase out of `cloak init`'s stdout. The mnemonic
+/// is printed in a 4-column grid where each cell looks like ` 7. word`,
+/// so we parse the grid lines and reassemble in word-index order.
+fn parse_mnemonic_from_init(stdout: &str) -> String {
+    use std::collections::BTreeMap;
+    let mut by_idx: BTreeMap<u32, String> = BTreeMap::new();
+    // Walk every whitespace-separated token. Matching tokens look like
+    // "NN.", with the next non-empty token being the lowercase word.
+    let tokens: Vec<&str> = stdout.split_whitespace().collect();
+    let mut i = 0;
+    while i + 1 < tokens.len() {
+        let head = tokens[i];
+        if let Some(rest) = head.strip_suffix('.') {
+            if let Ok(idx) = rest.parse::<u32>() {
+                if (1..=24).contains(&idx) {
+                    let candidate = tokens[i + 1];
+                    if !candidate.is_empty() && candidate.chars().all(|c| c.is_ascii_lowercase()) {
+                        by_idx.entry(idx).or_insert_with(|| candidate.to_string());
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    assert_eq!(by_idx.len(), 24, "expected 24 words in init stdout");
+    by_idx.into_values().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn init_prints_24_word_mnemonic_and_warning() {
+    let dir = TempDir::new().unwrap();
+    let (mut init, _) = cloak(&dir);
+    let out = init.arg("init").output().expect("init runs");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("WRITE THESE 24 WORDS"),
+        "init must surface the recovery-seed warning"
+    );
+    let mnemonic = parse_mnemonic_from_init(&stdout);
+    assert_eq!(
+        mnemonic.split_whitespace().count(),
+        24,
+        "init should print 24 words"
+    );
+}
+
+#[test]
+fn backup_verify_round_trips_mnemonic() {
+    let dir = TempDir::new().unwrap();
+    let (mut init, _) = cloak(&dir);
+    let out = init.arg("init").output().expect("init runs");
+    assert!(out.status.success());
+    let mnemonic = parse_mnemonic_from_init(&String::from_utf8_lossy(&out.stdout));
+
+    let (mut verify, _) = cloak(&dir);
+    verify
+        .arg("backup")
+        .arg("verify")
+        .env("CLOAK_MNEMONIC", &mnemonic)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("matches this vault"));
+}
+
+#[test]
+fn backup_verify_rejects_wrong_mnemonic() {
+    let dir = TempDir::new().unwrap();
+    let (mut init, _) = cloak(&dir);
+    init.arg("init").assert().success();
+
+    // 24 valid wordlist entries that almost certainly fail the BIP-39
+    // checksum against this vault.
+    let bogus = "abandon abandon abandon abandon abandon abandon \
+                 abandon abandon abandon abandon abandon abandon \
+                 abandon abandon abandon abandon abandon abandon \
+                 abandon abandon abandon abandon abandon abandon";
+    let (mut verify, _) = cloak(&dir);
+    verify
+        .arg("backup")
+        .arg("verify")
+        .env("CLOAK_MNEMONIC", bogus)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid recovery mnemonic"));
+}
+
+#[test]
+fn restore_recovers_after_passphrase_loss() {
+    let dir = TempDir::new().unwrap();
+
+    // 1. Create a vault, capture the mnemonic, store a secret.
+    let (mut init, _) = cloak(&dir);
+    let out = init.arg("init").output().expect("init runs");
+    assert!(out.status.success());
+    let mnemonic = parse_mnemonic_from_init(&String::from_utf8_lossy(&out.stdout));
+
+    let (mut add, _) = cloak(&dir);
+    add.arg("add")
+        .arg("APIKEY")
+        .write_stdin("super-secret-payload\n")
+        .assert()
+        .success();
+
+    // 2. "Lose" the passphrase: switch CLOAK_PASSPHRASE to a new value
+    //    and confirm the original is no longer accepted by `show`.
+    let path = dir.path().join("vault.cloak");
+    let mut bad_show = Command::cargo_bin("cloak").unwrap();
+    bad_show
+        .arg("--vault")
+        .arg(&path)
+        .arg("--no-biometric")
+        .env("CLOAK_PASSPHRASE", "totally-different-pass")
+        .env("RUST_LOG", "off")
+        .arg("show")
+        .arg("APIKEY")
+        .arg("--allow-redirect")
+        .assert()
+        .failure();
+
+    // 3. Restore using the mnemonic + a new passphrase.
+    let mut restore = Command::cargo_bin("cloak").unwrap();
+    restore
+        .arg("--vault")
+        .arg(&path)
+        .arg("--no-biometric")
+        .env("CLOAK_PASSPHRASE", "fresh-recovery-pass")
+        .env("CLOAK_MNEMONIC", &mnemonic)
+        .env("RUST_LOG", "off")
+        .arg("restore")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Vault restored"));
+
+    // 4. The new passphrase now decrypts the original secret.
+    let mut show = Command::cargo_bin("cloak").unwrap();
+    show.arg("--vault")
+        .arg(&path)
+        .arg("--no-biometric")
+        .env("CLOAK_PASSPHRASE", "fresh-recovery-pass")
+        .env("RUST_LOG", "off")
+        .arg("show")
+        .arg("APIKEY")
+        .arg("--allow-redirect")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("super-secret-payload"));
+}
+
+#[test]
+fn restore_rejects_invalid_mnemonic() {
+    let dir = TempDir::new().unwrap();
+    let (mut init, _) = cloak(&dir);
+    init.arg("init").assert().success();
+
+    let (mut restore, _) = cloak(&dir);
+    restore
+        .arg("restore")
+        .env("CLOAK_MNEMONIC", "not even close to a real seed phrase")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid recovery mnemonic"));
+}
+
+#[test]
+fn restore_writes_audit_entry() {
+    use std::fs;
+    let dir = TempDir::new().unwrap();
+    let (mut init, _) = cloak(&dir);
+    let out = init.arg("init").output().expect("init runs");
+    let mnemonic = parse_mnemonic_from_init(&String::from_utf8_lossy(&out.stdout));
+
+    // Point the CLI at a controlled audit-log location via XDG_DATA_HOME
+    // (cloak picks `dirs::data_dir()` which honors that on Linux; on
+    // macOS we rely on the binary writing under `$HOME/Library` so we
+    // override HOME instead). We do both so the test is cross-platform.
+    let data_root = dir.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+
+    let path = dir.path().join("vault.cloak");
+    let mut restore = Command::cargo_bin("cloak").unwrap();
+    restore
+        .arg("--vault")
+        .arg(&path)
+        .arg("--no-biometric")
+        .env("CLOAK_PASSPHRASE", "fresh-pass")
+        .env("CLOAK_MNEMONIC", &mnemonic)
+        .env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
+        .env("RUST_LOG", "off")
+        .arg("restore")
+        .assert()
+        .success();
+
+    // Audit lives at one of `<data_dir>/cloak/audit.jsonl`. Walk both
+    // candidate locations and look for our entry.
+    let candidates = [
+        data_root.join("cloak/audit.jsonl"),
+        dir.path()
+            .join("Library/Application Support/cloak/audit.jsonl"),
+    ];
+    let body = candidates
+        .iter()
+        .find_map(|p| fs::read_to_string(p).ok())
+        .expect("audit file written somewhere under the test root");
+    assert!(
+        body.contains("cli.restore"),
+        "audit log should record the restore: {body}"
+    );
+}
