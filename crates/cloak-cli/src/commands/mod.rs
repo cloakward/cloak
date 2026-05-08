@@ -375,13 +375,21 @@ pub fn run() -> Result<ExitCode> {
             "(no vault found at {} — running setup wizard first)",
             ctx.vault_path.display()
         );
-        setup::run(
+        let setup_exit = setup::run(
             &ctx,
             setup::SetupOptions {
                 non_interactive: false,
                 ..Default::default()
             },
         )?;
+        // If the wizard refused to print the recovery seed (no TTY,
+        // no /dev/tty, no override) we propagate that as the process
+        // exit code immediately; chaining into the user's intended
+        // command would be confusing because the vault now exists but
+        // the seed was never shown.
+        if setup_exit != 0 {
+            return Ok(ExitCode::from(setup_exit));
+        }
         eprintln!();
     }
 
@@ -401,9 +409,9 @@ pub fn run() -> Result<ExitCode> {
                 from_dxt,
             },
         )
-        .map(|_| ExitCode::SUCCESS),
+        .map(ExitCode::from),
         Command::Doctor => doctor::run_with_exit(&ctx),
-        Command::Init => init::run(&ctx).map(|_| ExitCode::SUCCESS),
+        Command::Init => init::run(&ctx).map(ExitCode::from),
         Command::Add { name, kind, tags } => {
             add::run(&ctx, &name, kind.into(), tags).map(|_| ExitCode::SUCCESS)
         }

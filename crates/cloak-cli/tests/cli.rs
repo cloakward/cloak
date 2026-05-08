@@ -41,6 +41,10 @@ fn cloak(dir: &TempDir) -> (Command, PathBuf) {
     // production behaviour is covered by
     // `crates/cloak-core/tests/rollback_mirror.rs`.
     cmd.env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1");
+    // `assert_cmd` runs the binary with no PTY, so `cloak init` would
+    // refuse to print the BIP-39 mnemonic to non-TTY stdout. Opt into
+    // the test-only escape hatch documented in `recovery_display`.
+    cmd.env("CLOAK_ALLOW_MNEMONIC_STDOUT", "1");
     (cmd, path)
 }
 

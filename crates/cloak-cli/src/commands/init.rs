@@ -15,7 +15,11 @@ use crate::prompt::prompt_passphrase_twice;
 ///
 /// Also generates and prints a 24-word BIP-39 recovery mnemonic ONCE.
 /// Cloak does not keep a copy; the user must write the words down.
-pub fn run(ctx: &Context) -> Result<()> {
+/// Returns the exit code as a `u8` so the dispatcher can decide
+/// whether to short-circuit auto-wizard chains. `0` means success,
+/// `2` means we refused to print the recovery seed (vault still
+/// initialized).
+pub fn run(ctx: &Context) -> Result<u8> {
     let mut vault = open_vault(ctx)?;
     if vault.is_initialized()? {
         return Err(SystemError::boxed(format!(
@@ -37,12 +41,15 @@ pub fn run(ctx: &Context) -> Result<()> {
         p.mem_kib, p.t_cost, p.p_cost
     );
     println!();
-    print_mnemonic_warning(&result.mnemonic);
+    // The vault is on disk regardless of whether we manage to surface
+    // the seed; the audit entry should reflect that. Print first, then
+    // log, then propagate a non-zero exit if the printer refused.
+    let printed = print_mnemonic_warning(&result.mnemonic);
     audit_log::append(
         "cli.init",
         None,
         AuditResult::Ok,
         Some("vault initialized; recovery mnemonic generated".into()),
     );
-    Ok(())
+    Ok(if printed { 0 } else { 2 })
 }
