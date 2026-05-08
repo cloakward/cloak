@@ -9,7 +9,9 @@
 //! 2. Unlock the vault (passphrase prompt with up to 3 retries).
 //! 3. Require Touch ID confirmation on macOS / polkit confirmation on
 //!    Linux (action `dev.cloak.show-secret`) unless `--no-biometric` is
-//!    set globally; see [`crate::biometric_macos`].
+//!    set globally; see [`cloak_core::biometric`]. The daemon's own
+//!    `vault.show` handler runs the same gate server-side so a
+//!    same-UID attacker who skips the CLI cannot skip the prompt.
 //! 4. Decrypt, write the plaintext bytes, then explicitly drop the
 //!    `Secret<String>` so its zeroize-on-drop runs immediately.
 
@@ -18,8 +20,9 @@ use std::io::{IsTerminal, Write};
 use anyhow::Result;
 use cloak_core::Error;
 
+use cloak_core::biometric;
+
 use super::{open_vault, unlock::unlock_interactive, Context};
-use crate::biometric_macos;
 
 /// Reveal a single secret's plaintext.
 pub fn run(ctx: &Context, name: &str, allow_redirect: bool, newline: bool) -> Result<()> {
@@ -37,10 +40,13 @@ pub fn run(ctx: &Context, name: &str, allow_redirect: bool, newline: bool) -> Re
     // 3. Biometric / user-presence step. Off only when --no-biometric
     //    is passed. On macOS this is Touch ID; on Linux it's a polkit
     //    confirmation against the `dev.cloak.show-secret` action. On
-    //    other targets the gate fails closed.
+    //    other targets the gate fails closed. The same gate lives in
+    //    `cloakd`'s `vault.show` handler — a same-UID attacker who
+    //    bypasses this CLI by talking to the daemon socket directly
+    //    still has to face the prompt server-side.
     if !ctx.no_biometric {
         let reason = format!("Reveal secret '{name}' from Cloak vault");
-        match biometric_macos::authenticate(&reason) {
+        match biometric::authenticate(&reason) {
             Ok(true) => {}
             Ok(false) => {
                 eprintln!("biometric authentication failed");

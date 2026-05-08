@@ -30,6 +30,7 @@ use crate::crypto::{
     Secret,
 };
 use crate::error::{Error, Result};
+use crate::recovery::{self, RecoveryMnemonic, FORMAT_BIP39_V1};
 use crate::store::{MetaRow, SecretRow, SqliteStore};
 
 /// Current vault format version.
@@ -109,11 +110,18 @@ pub struct SecretMetadata {
 }
 
 /// Result of `Vault::initialize` — surfaces the autotuned Argon2id
-/// parameters so callers can show them to the user.
-#[derive(Debug, Clone)]
+/// parameters so callers can show them to the user, plus the freshly
+/// generated 24-word BIP-39 recovery mnemonic. The mnemonic is **only**
+/// returned here (and on demand via [`Vault::reveal_recovery_mnemonic`]
+/// — except that the mnemonic itself is not stored, so on-demand reveal
+/// is impossible; we surface this contract by returning it from
+/// `initialize` and never persisting it).
 pub struct InitResult {
     /// Argon2id cost parameters chosen by autotune.
     pub kdf_params: KdfParams,
+    /// Fresh 24-word BIP-39 mnemonic. Show to the user once and then
+    /// drop. Cloak does not keep a copy.
+    pub mnemonic: RecoveryMnemonic,
 }
 
 /// Snapshot of vault state for `cloak status`.
@@ -147,13 +155,93 @@ pub struct Vault {
 impl Vault {
     /// Open an existing vault file or create an empty one (locked,
     /// uninitialized) if missing.
+    ///
+    /// On open, if the vault is initialized, the file's monotonic
+    /// counter is compared against the OS-keychain mirror (or the
+    /// `CLOAK_PEPPER_FILE`-sibling counter file). A file counter that is
+    /// *less* than the mirror is read-side rollback and is rejected with
+    /// [`Error::VaultRollbackDetected`]. A file counter that is *greater*
+    /// refreshes the mirror (legitimate external bump, e.g. an rsync
+    /// from a paired device). A missing mirror is seeded from the file
+    /// (first run after upgrade).
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let store = SqliteStore::open(path)?;
-        Ok(Self {
+        let v = Self {
             path: path.to_path_buf(),
             store,
             master: None,
-        })
+        };
+        v.check_rollback_on_open()?;
+        Ok(v)
+    }
+
+    /// Compare the file counter to the keychain mirror. See the
+    /// `open_or_create` docstring for the rule table.
+    fn check_rollback_on_open(&self) -> Result<()> {
+        // Uninitialized (no `meta` row) → nothing to compare. The very
+        // first `initialize` call will seed both the file counter and
+        // the mirror.
+        let meta = match self.store.get_meta()? {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+        let file_counter = meta.monotonic_counter;
+        match crate::keychain::read_keychain_counter() {
+            Ok(Some(mirror)) => {
+                if file_counter < mirror {
+                    tracing::error!(
+                        file_counter,
+                        mirror_counter = mirror,
+                        "vault rollback detected on open: file counter is older than keychain mirror"
+                    );
+                    return Err(Error::VaultRollbackDetected);
+                }
+                if file_counter > mirror {
+                    // Legitimate forward bump (e.g. rsync from paired
+                    // device). Refresh the mirror so subsequent opens
+                    // see equality. A failure here is logged but not
+                    // fatal — the file is the source of truth.
+                    if let Err(e) = crate::keychain::mirror_counter(file_counter) {
+                        tracing::warn!(
+                            error = %e,
+                            file_counter,
+                            "failed to refresh keychain rollback-counter mirror"
+                        );
+                    } else {
+                        tracing::info!(
+                            file_counter,
+                            previous_mirror = mirror,
+                            "refreshed keychain rollback-counter mirror to match vault file"
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                // First run after upgrade (or after a `cloak destroy`).
+                // Seed the mirror from the file.
+                match crate::keychain::mirror_counter(file_counter) {
+                    Ok(()) => tracing::info!(
+                        file_counter,
+                        "seeded keychain rollback counter from vault file (first-time mirror)"
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        file_counter,
+                        "failed to seed keychain rollback-counter mirror; \
+                         read-side rollback detection inactive until next successful write"
+                    ),
+                }
+            }
+            Err(e) => {
+                // Reading the mirror failed (e.g. D-Bus down on Linux,
+                // wrong-length item, world-readable counter file). We
+                // surface this as a typed Keychain error rather than
+                // silently letting an attacker bypass the gate by
+                // breaking the mirror.
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     /// Default vault path (`$DATA_DIR/cloak/vault.cloak`).
@@ -181,6 +269,12 @@ impl Vault {
     /// pepper, generate a 16-byte salt and a 32-byte master key, wrap
     /// it under `wrap_key = KDF(passphrase, salt, pepper)`, and write
     /// the `meta` row.
+    ///
+    /// Also generates a fresh 24-word BIP-39 recovery mnemonic, derives
+    /// a 32-byte recovery key from it (PBKDF2-HMAC-SHA512 per BIP-39),
+    /// and stores a *second* wrap of the master key under the recovery
+    /// key. The mnemonic is returned in [`InitResult`] for one-time
+    /// display; Cloak does **not** keep a copy.
     pub fn initialize(&mut self, passphrase: &Secret<String>) -> Result<InitResult> {
         if self.is_initialized()? {
             return Err(Error::Other("vault already initialized"));
@@ -205,9 +299,16 @@ impl Vault {
         let mut master_v_zero = master_v;
         master_v_zero.zeroize();
 
-        // Wrap the master key.
+        // Wrap the master key under the passphrase-derived key.
         let wrap_nonce = aead::random_nonce()?;
         let wrap_aead = aead::seal(wrap_key.expose_secret(), &wrap_nonce, MASTER_AAD, &master)?;
+
+        // Generate the BIP-39 recovery mnemonic and wrap the master key
+        // under the recovery-derived key as well. Both wraps protect the
+        // SAME master key, so either path unlocks the same secrets.
+        let mnemonic = RecoveryMnemonic::generate()?;
+        let recovery_key = mnemonic.derive_recovery_key()?;
+        let (rec_nonce, rec_aead) = recovery::wrap_master(&recovery_key, &master)?;
 
         let meta = MetaRow {
             format_version: FORMAT_VERSION,
@@ -217,11 +318,28 @@ impl Vault {
             wrap_aead,
             monotonic_counter: 1,
             created_at: Utc::now().to_rfc3339(),
+            recovery_format: Some(FORMAT_BIP39_V1.to_string()),
+            recovery_wrap_nonce: Some(rec_nonce),
+            recovery_wrap_aead: Some(rec_aead),
         };
         self.store.set_meta(&meta)?;
+        // Seed the keychain rollback-counter mirror so the first
+        // post-init `open_or_create` finds equality. Best-effort: if
+        // the keychain is unavailable, the next vault open will seed
+        // it from the file counter via the "missing mirror" branch.
+        if let Err(e) = crate::keychain::mirror_counter(meta.monotonic_counter) {
+            tracing::warn!(
+                error = %e,
+                counter = meta.monotonic_counter,
+                "failed to seed keychain rollback-counter mirror at init"
+            );
+        }
         // Cache so the caller doesn't have to re-unlock immediately.
         self.master = Some(Secret::new(master));
-        Ok(InitResult { kdf_params: params })
+        Ok(InitResult {
+            kdf_params: params,
+            mnemonic,
+        })
     }
 
     /// Unlock the vault by deriving the wrap key, unwrapping the master.
@@ -322,7 +440,7 @@ impl Vault {
             return Err(Error::Other("failed to update inserted secret"));
         }
         tx.commit()?;
-        self.store.bump_counter(self.next_counter()?)?;
+        let _ = self.bump_and_mirror()?;
         Ok(())
     }
 
@@ -347,7 +465,7 @@ impl Vault {
         )?;
         self.store
             .update_secret_value(name, &now_iso, new_version, &nonce, &ct)?;
-        self.store.bump_counter(self.next_counter()?)?;
+        let _ = self.bump_and_mirror()?;
         Ok(())
     }
 
@@ -367,7 +485,7 @@ impl Vault {
     /// Remove a secret.
     pub fn rm(&self, name: &str) -> Result<()> {
         self.store.delete_secret(name)?;
-        self.store.bump_counter(self.next_counter()?)?;
+        let _ = self.bump_and_mirror()?;
         Ok(())
     }
 
@@ -392,6 +510,117 @@ impl Vault {
         &self.path
     }
 
+    /// True iff the vault carries a BIP-39 recovery wrap. False for
+    /// vaults that pre-date the recovery seed feature.
+    pub fn has_recovery_wrap(&self) -> Result<bool> {
+        let meta = match self.store.get_meta()? {
+            Some(m) => m,
+            None => return Ok(false),
+        };
+        Ok(meta.recovery_format.is_some()
+            && meta.recovery_wrap_nonce.is_some()
+            && meta.recovery_wrap_aead.is_some())
+    }
+
+    /// Round-trip a candidate mnemonic against the stored recovery wrap
+    /// without performing a restore. Used by `cloak backup verify` to
+    /// confirm the user wrote the words down correctly.
+    ///
+    /// Returns `Ok(())` on success, [`Error::InvalidMnemonic`] if the
+    /// mnemonic does not unwrap, [`Error::NoRecoveryWrap`] if the vault
+    /// has no recovery wrap.
+    pub fn verify_mnemonic(&self, mnemonic: &RecoveryMnemonic) -> Result<()> {
+        let meta = self
+            .store
+            .get_meta()?
+            .ok_or(Error::VaultFormat("vault not initialized"))?;
+        let (nonce, ct) = match (meta.recovery_wrap_nonce, meta.recovery_wrap_aead) {
+            (Some(n), Some(c)) => (n, c),
+            _ => return Err(Error::NoRecoveryWrap),
+        };
+        if meta.recovery_format.as_deref() != Some(FORMAT_BIP39_V1) {
+            return Err(Error::VaultFormat("unknown recovery format"));
+        }
+        let key = mnemonic.derive_recovery_key()?;
+        // Discard the unwrapped master — we only care about the AEAD-tag check.
+        let master = recovery::unwrap_master(&key, &nonce, &ct)?;
+        // `master` zeroizes on drop.
+        drop(master);
+        Ok(())
+    }
+
+    /// Restore vault access using a BIP-39 mnemonic and a freshly
+    /// chosen passphrase. Re-derives the master key from the recovery
+    /// wrap, autotunes a fresh Argon2id, re-wraps the master under the
+    /// new passphrase + pepper, and replaces the passphrase wrap on
+    /// disk. The recovery wrap itself is left intact (the user may want
+    /// to verify the same mnemonic again later).
+    ///
+    /// On success the vault is unlocked (master cached). The new
+    /// passphrase is what the user types from now on.
+    ///
+    /// Errors:
+    /// - [`Error::InvalidMnemonic`] — wrong words or tampered recovery wrap.
+    /// - [`Error::NoRecoveryWrap`] — vault has no recovery wrap.
+    pub fn restore_with_mnemonic(
+        &mut self,
+        mnemonic: &RecoveryMnemonic,
+        new_passphrase: &Secret<String>,
+    ) -> Result<KdfParams> {
+        let meta = self
+            .store
+            .get_meta()?
+            .ok_or(Error::VaultFormat("vault not initialized"))?;
+        if meta.format_version != FORMAT_VERSION {
+            return Err(Error::UnsupportedVersion(meta.format_version));
+        }
+        let (rec_nonce, rec_ct) = match (meta.recovery_wrap_nonce, meta.recovery_wrap_aead) {
+            (Some(n), Some(c)) => (n, c),
+            _ => return Err(Error::NoRecoveryWrap),
+        };
+        if meta.recovery_format.as_deref() != Some(FORMAT_BIP39_V1) {
+            return Err(Error::VaultFormat("unknown recovery format"));
+        }
+
+        // 1. Derive recovery key, unwrap the master.
+        let recovery_key = mnemonic.derive_recovery_key()?;
+        let master = recovery::unwrap_master(&recovery_key, &rec_nonce, &rec_ct)?;
+
+        // 2. Pick fresh Argon2id params + a fresh salt.
+        let params = kdf::autotune()?;
+        let salt = {
+            let v = aead::random_bytes(16)?;
+            let mut s = [0u8; 16];
+            s.copy_from_slice(&v);
+            s
+        };
+
+        // 3. Re-wrap under the new passphrase.
+        let pepper = crate::keychain::get_or_create_pepper()?;
+        let wrap_key = kdf::derive(new_passphrase, &salt, &pepper, params)?;
+        let wrap_nonce = aead::random_nonce()?;
+        let wrap_aead = aead::seal(
+            wrap_key.expose_secret(),
+            &wrap_nonce,
+            MASTER_AAD,
+            master.expose_secret(),
+        )?;
+
+        // 4. Persist the new passphrase wrap. The recovery wrap is
+        //    untouched so subsequent `cloak backup verify` calls keep
+        //    working.
+        self.store.update_passphrase_wrap(
+            &salt,
+            &kdf::params_to_phc(&params, &salt),
+            &wrap_nonce,
+            &wrap_aead,
+        )?;
+
+        // 5. Cache the master so the caller doesn't need to re-unlock.
+        self.master = Some(master);
+        Ok(params)
+    }
+
     // -- internals --
 
     fn require_master(&self) -> Result<&Secret<[u8; 32]>> {
@@ -404,6 +633,25 @@ impl Vault {
             .get_meta()?
             .ok_or(Error::VaultFormat("vault not initialized"))?;
         Ok(meta.monotonic_counter.saturating_add(1))
+    }
+
+    /// Bump the file counter and best-effort mirror it to the OS
+    /// keychain. The file is the source of truth; if the mirror write
+    /// fails we log a warning but do not fail the surrounding write.
+    /// Returns the new counter value on success.
+    fn bump_and_mirror(&self) -> Result<u64> {
+        let next = self.next_counter()?;
+        self.store.bump_counter(next)?;
+        if let Err(e) = crate::keychain::mirror_counter(next) {
+            tracing::warn!(
+                error = %e,
+                counter = next,
+                "failed to mirror rollback counter to OS keychain; \
+                 vault file counter is authoritative — read-side rollback \
+                 detection may lag until the next successful mirror"
+            );
+        }
+        Ok(next)
     }
 }
 
@@ -452,6 +700,24 @@ mod tests {
     use proptest::prelude::*;
     use tempfile::TempDir;
 
+    /// Disable the OS-keychain rollback-counter mirror for the entire
+    /// test process so the unit tests stay hermetic. The mirror logic
+    /// itself is exercised by dedicated tests that opt back in via a
+    /// scoped enable (see `rollback_mirror_*` tests below).
+    fn disable_rollback_mirror() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: required by std 1.84+ for `set_var`. We set this
+            // once at the start of the first test in the process and
+            // never mutate it again from a unit test, so the absence
+            // of synchronization with other env-var readers is fine.
+            unsafe {
+                std::env::set_var("CLOAK_DISABLE_ROLLBACK_MIRROR", "1");
+            }
+        });
+    }
+
     /// Fast Argon2id params for tests — production values come from
     /// `kdf::autotune()` but we cannot afford that per-test.
     fn fast_params() -> KdfParams {
@@ -465,6 +731,7 @@ mod tests {
     /// Initialize a vault using a deterministic dummy pepper so tests
     /// don't touch the real OS keychain. Returns (TempDir, Vault).
     fn init_test_vault() -> (TempDir, Vault) {
+        disable_rollback_mirror();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("vault.cloak");
         let mut v = Vault::open_or_create(&path).unwrap();
@@ -495,6 +762,9 @@ mod tests {
             wrap_aead,
             monotonic_counter: 1,
             created_at: Utc::now().to_rfc3339(),
+            recovery_format: None,
+            recovery_wrap_nonce: None,
+            recovery_wrap_aead: None,
         })?;
         v.master = Some(Secret::new(master));
         Ok(())
@@ -569,6 +839,7 @@ mod tests {
 
     #[test]
     fn lock_unlock_cycle() {
+        disable_rollback_mirror();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("v.cloak");
         let mut v = Vault::open_or_create(&path).unwrap();
@@ -585,6 +856,7 @@ mod tests {
 
     #[test]
     fn wrong_passphrase_typed_error() {
+        disable_rollback_mirror();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("v.cloak");
         let mut v = Vault::open_or_create(&path).unwrap();
@@ -678,6 +950,150 @@ mod tests {
         assert!(matches!(v.show("a"), Err(Error::Aead(_))));
     }
 
+    /// Hermetic recovery-flow init that *does* generate a mnemonic and
+    /// stores both wraps under a dummy pepper, mirroring `Vault::initialize`
+    /// but with the test KDF params so it runs in milliseconds.
+    fn init_with_recovery_dummy_pepper(
+        v: &mut Vault,
+        passphrase: &[u8],
+    ) -> Result<RecoveryMnemonic> {
+        let salt = [0x55u8; 16];
+        let pepper = Secret::new(vec![0xAAu8; 32]);
+        let pass = Secret::new(String::from_utf8_lossy(passphrase).into_owned());
+        let params = fast_params();
+        let wrap_key = kdf::derive(&pass, &salt, &pepper, params)?;
+        let mb = aead::random_bytes(32)?;
+        let mut master = [0u8; 32];
+        master.copy_from_slice(&mb);
+        let wrap_nonce = aead::random_nonce()?;
+        let wrap_aead = aead::seal(wrap_key.expose_secret(), &wrap_nonce, MASTER_AAD, &master)?;
+        let mnemonic = RecoveryMnemonic::generate()?;
+        let recovery_key = mnemonic.derive_recovery_key()?;
+        let (rec_nonce, rec_aead) = recovery::wrap_master(&recovery_key, &master)?;
+        v.store.set_meta(&MetaRow {
+            format_version: FORMAT_VERSION,
+            salt,
+            kdf_phc: kdf::params_to_phc(&params, &salt),
+            wrap_nonce,
+            wrap_aead,
+            monotonic_counter: 1,
+            created_at: Utc::now().to_rfc3339(),
+            recovery_format: Some(FORMAT_BIP39_V1.to_string()),
+            recovery_wrap_nonce: Some(rec_nonce),
+            recovery_wrap_aead: Some(rec_aead),
+        })?;
+        v.master = Some(Secret::new(master));
+        Ok(mnemonic)
+    }
+
+    /// Hermetic restore that re-wraps under a new passphrase using the
+    /// test KDF params + dummy pepper. Mirrors `Vault::restore_with_mnemonic`
+    /// without paying for production Argon2id.
+    fn restore_with_dummy_pepper(
+        v: &mut Vault,
+        mnemonic: &RecoveryMnemonic,
+        new_passphrase: &[u8],
+    ) -> Result<()> {
+        let meta = v.store.get_meta()?.ok_or(Error::VaultFormat("uninit"))?;
+        let (rec_nonce, rec_ct) = match (meta.recovery_wrap_nonce, meta.recovery_wrap_aead) {
+            (Some(n), Some(c)) => (n, c),
+            _ => return Err(Error::NoRecoveryWrap),
+        };
+        let recovery_key = mnemonic.derive_recovery_key()?;
+        let master = recovery::unwrap_master(&recovery_key, &rec_nonce, &rec_ct)?;
+        let params = fast_params();
+        let salt = [0x66u8; 16];
+        let pepper = Secret::new(vec![0xAAu8; 32]);
+        let pass = Secret::new(String::from_utf8_lossy(new_passphrase).into_owned());
+        let wrap_key = kdf::derive(&pass, &salt, &pepper, params)?;
+        let wrap_nonce = aead::random_nonce()?;
+        let wrap_aead = aead::seal(
+            wrap_key.expose_secret(),
+            &wrap_nonce,
+            MASTER_AAD,
+            master.expose_secret(),
+        )?;
+        v.store.update_passphrase_wrap(
+            &salt,
+            &kdf::params_to_phc(&params, &salt),
+            &wrap_nonce,
+            &wrap_aead,
+        )?;
+        v.master = Some(master);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_roundtrip_with_passphrase_loss() {
+        // Full BIP-39 round-trip: create vault, store a secret, "lose"
+        // the passphrase, restore via mnemonic with a new passphrase,
+        // and decrypt the original secret.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("v.cloak");
+        let mut v = Vault::open_or_create(&path).unwrap();
+        let mnemonic = init_with_recovery_dummy_pepper(&mut v, b"old-pass").unwrap();
+        v.add(
+            "k",
+            SecretKind::Other,
+            vec![],
+            &Secret::new("payload".into()),
+        )
+        .unwrap();
+
+        // Simulate passphrase loss by locking + dropping the master.
+        v.lock();
+        assert!(!v.is_unlocked());
+
+        // Restore with the mnemonic + a fresh passphrase.
+        restore_with_dummy_pepper(&mut v, &mnemonic, b"new-pass").unwrap();
+        assert!(v.is_unlocked());
+        assert_eq!(v.show("k").unwrap().expose_secret(), "payload");
+
+        // The OLD passphrase no longer unlocks.
+        v.lock();
+        let r = unlock_with_dummy_pepper(&mut v, b"old-pass");
+        assert!(matches!(r, Err(Error::InvalidPassphrase)));
+        // The new passphrase does.
+        unlock_with_dummy_pepper(&mut v, b"new-pass").unwrap();
+        assert_eq!(v.show("k").unwrap().expose_secret(), "payload");
+    }
+
+    #[test]
+    fn verify_mnemonic_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("v.cloak");
+        let mut v = Vault::open_or_create(&path).unwrap();
+        let mnemonic = init_with_recovery_dummy_pepper(&mut v, b"p").unwrap();
+        v.verify_mnemonic(&mnemonic).unwrap();
+    }
+
+    #[test]
+    fn verify_mnemonic_rejects_wrong_words() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("v.cloak");
+        let mut v = Vault::open_or_create(&path).unwrap();
+        let _stored = init_with_recovery_dummy_pepper(&mut v, b"p").unwrap();
+        let other = RecoveryMnemonic::generate().unwrap();
+        let r = v.verify_mnemonic(&other);
+        assert!(matches!(r, Err(Error::InvalidMnemonic)));
+    }
+
+    #[test]
+    fn legacy_vault_has_no_recovery_wrap() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("v.cloak");
+        let mut v = Vault::open_or_create(&path).unwrap();
+        // The non-recovery hermetic init writes recovery_* = NULL.
+        init_with_dummy_pepper(&mut v, b"p").unwrap();
+        assert!(!v.has_recovery_wrap().unwrap());
+        let m = RecoveryMnemonic::generate().unwrap();
+        assert!(matches!(v.verify_mnemonic(&m), Err(Error::NoRecoveryWrap)));
+        assert!(matches!(
+            v.restore_with_mnemonic(&m, &Secret::new("x".into())),
+            Err(Error::NoRecoveryWrap)
+        ));
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -687,6 +1103,7 @@ mod tests {
             name in "[a-zA-Z0-9_-]{1,32}",
             value in proptest::collection::vec(any::<u8>(), 0..=256),
         ) {
+            disable_rollback_mirror();
             let dir = TempDir::new().unwrap();
             let path = dir.path().join("v.cloak");
             let mut v = Vault::open_or_create(&path).unwrap();

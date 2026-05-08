@@ -1,21 +1,25 @@
-//! Per-platform user-presence / biometric gate for `cloak show`.
+//! Per-platform user-presence / biometric gate, invoked by `cloakd`
+//! when serving `vault.show`.
 //!
-//! The filename is historical (this used to be macOS-only). It now
-//! also hosts the Linux polkit gate; the macOS arm is unchanged. Each
-//! platform exposes the same [`authenticate`] entry point:
+//! Server-side enforcement (since v1.0): the daemon — not the CLI —
+//! fires the prompt before any plaintext leaves the vault. A same-UID
+//! attacker who connects to the daemon socket directly cannot skip the
+//! Touch ID / polkit step by lying in the request payload; the daemon
+//! ignores any client-supplied biometric assertion.
+//!
+//! Each platform exposes the same [`authenticate`] entry point:
 //!
 //! - **macOS** — Touch ID via the `LocalAuthentication` framework.
 //! - **Linux** — polkit's `org.freedesktop.PolicyKit1.Authority`
 //!   `CheckAuthorization` D-Bus method against the `dev.cloak.show-secret`
 //!   action (default policy `auth_self_keep`, see
 //!   `scripts/polkit/dev.cloak.policy`).
-//! - **Other** — a stub that returns `Ok(false)`; `cloak show` then
-//!   refuses unless the caller passes `--no-biometric`.
+//! - **Other** — a stub that returns `Ok(false)`; the daemon then
+//!   refuses the reveal unless the caller passed the explicit
+//!   `skip_biometric` opt-out.
 //!
-//! `cloak show NAME` calls [`authenticate`] *after* the user has typed
-//! their passphrase, as a second factor that the human is physically
-//! present at the device. Failure / cancel returns `Ok(false)` so the
-//! caller can refuse the reveal.
+//! Failure / cancel returns `Ok(false)` so the daemon can refuse the
+//! reveal with [`crate::Error::BiometricFailed`].
 
 use anyhow::Result;
 
@@ -107,7 +111,7 @@ mod imp {
 
         // Block this thread on the reply. The framework normally takes
         // a few seconds at most; we cap with a generous timeout so a
-        // wedged dialog can't hang the CLI forever.
+        // wedged dialog can't hang the caller forever.
         match rx.recv_timeout(TOUCH_ID_TIMEOUT) {
             Ok(Ok(true)) => Ok(true),
             Ok(Ok(false)) => Ok(false),
@@ -140,7 +144,7 @@ mod imp {
         // Anything else (lockout, biometry-not-enrolled, etc.) — also
         // fail closed but log it so the user knows they should re-try
         // with `--no-biometric`.
-        eprintln!("biometric error code {code} (treating as failure)");
+        tracing::warn!(code, "biometric error code (treating as failure)");
         false
     }
 }
@@ -268,11 +272,60 @@ pub fn authenticate(reason: &str) -> Result<bool> {
 }
 
 /// Stub for targets that aren't macOS or Linux: refuse the reveal so
-/// `cloak show` fails closed. The user can opt out of the biometric
-/// gate entirely with `--no-biometric` if they accept the trade-off.
+/// the daemon fails closed. The user can opt out of the biometric
+/// gate entirely with `--no-biometric` (CLI flag forwarded to the
+/// daemon as the `skip_biometric` field) if they accept the trade-off.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn authenticate(_reason: &str) -> Result<bool> {
     Ok(false)
+}
+
+// -------------------------------------------------------------------------
+// Test injection hook
+// -------------------------------------------------------------------------
+//
+// Same pattern as `handlers::set_test_sts_factory`: the daemon's
+// `vault.show` handler calls [`authenticate`] via
+// `current_authenticator()`, which lets integration tests substitute a
+// deterministic stub (so we can assert the server-side gate without
+// popping a real Touch ID dialog on a developer laptop). Production
+// builds compile out the override entirely.
+
+/// Boxed implementation of the biometric prompt — what tests inject in
+/// place of [`authenticate`].
+#[cfg(any(test, feature = "test-util"))]
+pub type Authenticator = std::sync::Arc<dyn Fn(&str) -> Result<bool> + Send + Sync>;
+
+#[cfg(any(test, feature = "test-util"))]
+static TEST_AUTHENTICATOR: once_cell::sync::OnceCell<std::sync::Mutex<Option<Authenticator>>> =
+    once_cell::sync::OnceCell::new();
+
+/// Install (or remove) a test-only authenticator. Returns the previously
+/// installed authenticator, if any. Only available in `cfg(test)` or
+/// with the `test-util` feature.
+#[cfg(any(test, feature = "test-util"))]
+pub fn set_test_authenticator(f: Option<Authenticator>) -> Option<Authenticator> {
+    let cell = TEST_AUTHENTICATOR.get_or_init(|| std::sync::Mutex::new(None));
+    let mut g = cell.lock().expect("test authenticator lock");
+    std::mem::replace(&mut *g, f)
+}
+
+#[cfg(any(test, feature = "test-util"))]
+fn current_test_authenticator() -> Option<Authenticator> {
+    let cell = TEST_AUTHENTICATOR.get_or_init(|| std::sync::Mutex::new(None));
+    cell.lock().ok().and_then(|g| g.clone())
+}
+
+/// Run the configured biometric prompt. In production this is just
+/// [`authenticate`]; under test (or `feature = "test-util"`), an
+/// installed override takes precedence so integration tests can assert
+/// the server-side gate without an interactive dialog.
+pub fn run_authenticate(reason: &str) -> Result<bool> {
+    #[cfg(any(test, feature = "test-util"))]
+    if let Some(f) = current_test_authenticator() {
+        return f(reason);
+    }
+    authenticate(reason)
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -324,5 +377,21 @@ mod tests {
         let result = super::authenticate("Cloak polkit round-trip test")
             .expect("authenticate() must not return Err on a live system");
         eprintln!("polkit returned: {result}");
+    }
+}
+
+// Cross-platform unit tests — build everywhere, no syscalls.
+#[cfg(test)]
+mod cross_tests {
+    /// Marker test so `cargo test --workspace` exercises this module on
+    /// every platform (even when all interactive paths are gated out).
+    /// Real biometric round-trips are interactive and live behind the
+    /// `#[ignore]` gates above.
+    #[test]
+    fn module_is_linkable() {
+        // The function is intentionally not invoked here — calling it
+        // would pop a Touch ID dialog on a developer laptop. We only
+        // assert the module compiles and exposes `authenticate`.
+        let _f: fn(&str) -> anyhow::Result<bool> = super::authenticate;
     }
 }

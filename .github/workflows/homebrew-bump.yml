@@ -234,14 +234,27 @@ jobs:
         working-directory: homebrew-cloak
         run: |
           set -euo pipefail
-          mkdir -p Formula
-          cp ../tap/Formula/cloak.rb Formula/cloak.rb
 
           git config user.name "cloak-release-bot"
           git config user.email "release-bot@users.noreply.github.com"
 
           BRANCH="bump/cloak-${VERSION}"
-          git checkout -b "$BRANCH"
+
+          # Always branch from the freshest origin/main. If a previous
+          # release's bump PR was merged into main between the moment
+          # this workflow started and the moment it pushes, branching
+          # from the local checkout's HEAD (which actions/checkout@v4
+          # fetched at job start, depth=1) leaves the new branch on a
+          # stale main and the resulting PR conflicts as add/add when
+          # the older formula is already on main. Re-fetch + branch
+          # from the current tip every time.
+          git fetch origin main --depth=1
+          git checkout -B "$BRANCH" origin/main
+
+          # Re-copy the rendered formula AFTER the checkout so the
+          # working tree reflects the version we want to land.
+          mkdir -p Formula
+          cp ../tap/Formula/cloak.rb Formula/cloak.rb
 
           # Stage first, then diff against HEAD. `git diff --quiet`
           # alone misses brand-new (untracked) files — that's what
@@ -255,7 +268,11 @@ jobs:
           fi
 
           git commit -m "cloak ${VERSION}"
-          git push --set-upstream origin "$BRANCH"
+          # `--force-with-lease` is safe here: the branch is bot-owned
+          # and is recreated from origin/main on every run, so any
+          # remote state for `bump/cloak-${VERSION}` is by definition
+          # stale and should be replaced.
+          git push --set-upstream origin "$BRANCH" --force-with-lease
 
           gh pr create \
             --repo cloakward/homebrew-cloak \

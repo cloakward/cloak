@@ -3,11 +3,11 @@
 //! Implementation lives in modules under `src/`. This file is just the
 //! `main()` shim that builds the clap command and dispatches.
 
-// `biometric_macos` ships both a real macOS impl and a non-macOS stub
-// inside the same file (gated internally), so the module is declared
-// unconditionally; gating it at the `mod` line breaks the Linux build
-// because `commands::show` imports it on every target.
-mod biometric_macos;
+// The biometric / user-presence gate now lives in `cloak-core`
+// (`cloak_core::biometric`) so `cloakd` can fire the OS-level prompt
+// itself when serving `vault.show`. The CLI re-exports it for its own
+// in-process local-vault commands (`show`, `export`, `run`, `rm`),
+// which don't go through IPC and keep their own local prompt.
 mod commands;
 mod prompt;
 

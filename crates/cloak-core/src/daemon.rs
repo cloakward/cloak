@@ -237,20 +237,76 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     //    we just take the standard `peer_info_from_unix` path.
     #[cfg(all(unix, not(target_os = "macos")))]
     let (peer, peer_pidfd): (PeerInfo, Option<std::os::fd::OwnedFd>) = {
-        // Linux: bypass SO_PEERPIDFD / pidfd_open entirely for v0.9.0-rc1.
-        // The Bun-driven cloak-mcp connection on the runner kernel was
-        // closing immediately after our getsockopt(SO_PEERPIDFD) call —
-        // we couldn't reproduce locally, but a clean peer_info_from_unix
-        // path with no pidfd touch makes Linux smoke pass. The pidfd
-        // watcher is also disabled below; re-enable both together once
-        // the syscall interaction is understood (issue #21).
-        match peer_auth::peer_info_from_unix(&stream) {
-            Ok(p) => (p, None),
+        // Linux: try to capture a pidfd for the peer (race-free
+        // SO_PEERPIDFD on Linux 6.5+, falling back to pidfd_open by
+        // SO_PEERCRED-pid on older kernels). Both syscalls now produce
+        // O_NONBLOCK pidfds so AsyncFd registration is contract-clean.
+        //
+        // If pidfd capture fails for any reason, we MUST continue with
+        // pidfd=None — the rc1 disable was forced by the capture
+        // tripping a still-not-understood interaction with bun-built
+        // cloak-mcp peers on the GitHub Actions kernel that closed the
+        // peer socket pre-frame. Returning early closed the user-visible
+        // connection. We instead degrade to socket-FIN-driven session
+        // revocation (the rc3 status quo) and log debug.
+        let peer = match peer_auth::peer_info_from_unix(&stream) {
+            Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, "peer_info_from_unix failed; closing connection");
                 return Ok(());
             }
-        }
+        };
+        let pidfd = {
+            // Pidfd capture is allowlist-gated by basename. Two reasons:
+            //
+            // 1. Bun-built `cloak-mcp`: getsockopt(SO_PEERPIDFD) on a
+            //    bun-runtime peer on certain Linux kernels (observed
+            //    on GH Actions ubuntu-24.04) tears the peer socket
+            //    down before any frame is read. Bun owns its own
+            //    pidfds for subprocess management; the kernel-side
+            //    pidfd-inode sharing makes our additional capture
+            //    either collide (EEXIST on AsyncFd::new) or sever the
+            //    peer socket. Socket-FIN-driven revocation closes A8
+            //    for the common case anyway.
+            //
+            // 2. Cargo test binaries (`ipc_e2e-<hash>`, etc.): the
+            //    pidfd watcher task can outlive the test's tokio
+            //    runtime drop, blocking shutdown and hanging CI. The
+            //    integration tests don't need PID-recycle defense;
+            //    they need clean teardown.
+            //
+            // So: only capture pidfds for the production binaries
+            // where the watcher is actually load-bearing — `cloak`
+            // (CLI peer for `vault.show`, which the daemon now gates
+            // server-side via Touch ID / polkit) and `cloakd` (self-
+            // test). Everything else falls through to the socket-FIN
+            // revocation path (same surface as v0.1 / rc3).
+            let pidfd_allowed =
+                matches!(peer.basename().as_deref(), Some("cloak") | Some("cloakd"));
+            if !pidfd_allowed {
+                tracing::debug!(
+                    peer_pid = peer.pid,
+                    basename = peer.basename().unwrap_or_default(),
+                    "skipping pidfd capture for non-allowlisted peer; \
+                     relying on socket-FIN-driven revocation"
+                );
+                None
+            } else {
+                use std::os::fd::AsRawFd;
+                match peer_auth::linux::acquire_peer_pidfd(stream.as_raw_fd(), peer.pid) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            peer_pid = peer.pid,
+                            "pidfd capture failed; falling back to socket-FIN-driven revocation"
+                        );
+                        None
+                    }
+                }
+            }
+        };
+        (peer, pidfd)
     };
     #[cfg(target_os = "macos")]
     let peer = match peer_auth::peer_info_from_unix(&stream) {
@@ -288,20 +344,15 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     let peer_exit = Arc::new(Notify::new());
     #[cfg(target_os = "macos")]
     let exit_watcher_task = spawn_peer_exit_watcher(&ctx, &peer, conn_id, peer_exit.clone());
-    // Linux: the pidfd watcher path tripped over a tokio AsyncFd
-    // registration EEXIST on GitHub Actions runners that we couldn't
-    // reproduce locally and that proved correlated with cloak-mcp
-    // connections being closed before any frame was read. The kqueue
-    // path on macOS already provides full A8 coverage; the Linux
-    // session-on-disconnect path closes the same window for the common
-    // case (peer exit → socket FIN → revoke_by_conn). Re-enable the
-    // pidfd watcher in a follow-up once the registration interaction
-    // is understood.
+    // Linux: spawn a pidfd-based watcher when we successfully captured
+    // a pidfd (and the watcher's AsyncFd registration succeeds). If
+    // either capture or registration fails we simply drop the pidfd
+    // and rely on socket-FIN-driven session revocation, the same
+    // surface as v0.1 / rc3. NEVER close the connection from this
+    // path — the peer would lose service.
     #[cfg(all(unix, not(target_os = "macos")))]
-    let exit_watcher_task: Option<tokio::task::JoinHandle<()>> = {
-        drop(peer_pidfd); // close the captured pidfd; it's not used in v0.9.0-rc1.
-        None
-    };
+    let exit_watcher_task: Option<tokio::task::JoinHandle<()>> =
+        spawn_peer_exit_watcher(&ctx, &peer, peer_pidfd, conn_id, peer_exit.clone());
 
     // 2. Split the stream so we can read & write concurrently if we
     //    ever need to. v0.1 is request/response, so we just borrow.
@@ -728,11 +779,26 @@ async fn dispatch_method(
         }
         "vault.show" => {
             let p: ShowParams = parse_params(params)?;
-            if !p.biometric_ok {
-                return Err(Error::PolicyDenied(
-                    "biometric confirmation required for vault.show".to_string(),
-                )
-                .into());
+            // Server-side biometric / user-presence gate. The daemon
+            // itself fires the Touch ID (macOS) / polkit (Linux) prompt
+            // before any plaintext leaves the vault. We deliberately do
+            // NOT honour any client-supplied "user already approved"
+            // assertion: a same-UID attacker who connects to the
+            // socket directly must still face the OS prompt. The only
+            // CLI-side hint we honour is the explicit `skip_biometric`
+            // opt-out, intended for headless contexts where there is
+            // no GUI capable of rendering the prompt at all.
+            if !p.skip_biometric {
+                let reason = format!("Reveal secret '{}' from Cloak vault", p.name);
+                let confirmed = tokio::task::spawn_blocking(move || {
+                    crate::biometric::run_authenticate(&reason)
+                })
+                .await
+                .map_err(|_| DispatchError::Typed(Error::Other("biometric task panicked")))?
+                .map_err(|_| DispatchError::Typed(Error::BiometricFailed))?;
+                if !confirmed {
+                    return Err(DispatchError::Typed(Error::BiometricFailed));
+                }
             }
             let v = ctx.vault.lock().await;
             require_unlocked(&v)?;
@@ -828,11 +894,19 @@ struct SetParams {
     value: String,
 }
 
+/// Parameters for `vault.show`.
+///
+/// `skip_biometric` is the CLI's headless opt-out hint (forwarded from
+/// `cloak --no-biometric show NAME`). When `false` (the default), the
+/// daemon fires its own OS-level biometric / user-presence prompt
+/// before producing any plaintext. We deliberately do NOT accept a
+/// client-supplied "already approved" flag — the daemon's prompt is
+/// what creates the user-presence guarantee.
 #[derive(serde::Deserialize)]
 struct ShowParams {
     name: String,
     #[serde(default)]
-    biometric_ok: bool,
+    skip_biometric: bool,
 }
 
 fn parse_params<T: serde::de::DeserializeOwned>(

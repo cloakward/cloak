@@ -19,6 +19,7 @@
 #![warn(clippy::all)]
 
 pub mod audit;
+pub mod biometric;
 pub mod crypto;
 pub mod egress;
 pub mod error;
@@ -26,6 +27,7 @@ pub mod handlers;
 pub mod ipc;
 pub mod keychain;
 pub mod policy;
+pub mod recovery;
 pub mod store;
 pub mod vault;
 

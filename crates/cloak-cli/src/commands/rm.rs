@@ -3,8 +3,9 @@
 use anyhow::Result;
 use cloak_core::Error;
 
+use cloak_core::biometric;
+
 use super::{open_vault, unlock::unlock_interactive, Context, SystemError};
-use crate::biometric_macos;
 use crate::prompt::prompt_yes_no;
 
 /// Selector for which secrets to delete.
@@ -75,7 +76,7 @@ pub fn run(ctx: &Context, sel: Selector, yes: bool) -> Result<()> {
     if matches!(sel, Selector::All) {
         unlock_interactive(&mut vault)?;
         if !ctx.no_biometric {
-            match biometric_macos::authenticate("Confirm: delete every secret in the Cloak vault") {
+            match biometric::authenticate("Confirm: delete every secret in the Cloak vault") {
                 Ok(true) => {}
                 _ => anyhow::bail!("biometric confirmation failed; aborting"),
             }
