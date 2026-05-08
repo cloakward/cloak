@@ -692,7 +692,21 @@ pub mod linux {
         }
         // SAFETY: the kernel just allocated `pidfd` for us; it is
         // owned by this thread and not aliased anywhere else.
-        Ok(unsafe { OwnedFd::from_raw_fd(pidfd) })
+        let owned = unsafe { OwnedFd::from_raw_fd(pidfd) };
+        // The kernel returns a blocking fd; tokio::io::unix::AsyncFd
+        // requires non-blocking. Set O_NONBLOCK explicitly. If the
+        // fcntl fails for any reason we drop the fd so the caller's
+        // graceful-fallback chain takes over rather than registering
+        // a half-broken fd into the reactor.
+        let flags = unsafe { libc::fcntl(pidfd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        let rc2 = unsafe { libc::fcntl(pidfd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        if rc2 < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        Ok(owned)
     }
 
     /// Fallback: open a pidfd by PID via the `pidfd_open(2)` syscall.
@@ -702,17 +716,20 @@ pub mod linux {
     /// and we never reach this path on Linux 6.5+ where
     /// `SO_PEERPIDFD` succeeds.
     pub fn pidfd_open_by_pid(pid: i32) -> Result<OwnedFd> {
+        // PIDFD_NONBLOCK (Linux 5.10+) returns a non-blocking pidfd.
+        // tokio::io::unix::AsyncFd documents that the fd MUST be in
+        // non-blocking mode before it's registered with the reactor;
+        // pidfd_open(pid, 0) returns a blocking fd, which violated
+        // that contract and tripped the rc1 disable. The kernel's
+        // ENOSYS / EINVAL fallback for the flag would surface here
+        // as `errno`, propagating into the graceful-fallback chain.
+        const PIDFD_NONBLOCK: libc::c_uint = libc::O_NONBLOCK as libc::c_uint;
         // SAFETY: `pidfd_open` is a thin syscall wrapper. Arguments
         // are a `pid_t` and a `u32` flags word, both passed by value;
         // no pointers are involved. The kernel either returns a
         // freshly-allocated fd or `-1` with `errno` set.
-        let raw = unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_open,
-                pid as libc::pid_t,
-                0u32 as libc::c_uint,
-            )
-        };
+        let raw =
+            unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, PIDFD_NONBLOCK) };
         if raw < 0 {
             return Err(Error::Io(std::io::Error::last_os_error()));
         }
