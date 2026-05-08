@@ -35,7 +35,7 @@
 - **Compromised libsodium build.** We trust the upstream libsodium static binary we link.
 - **Macros / shell aliases that wrap `cloak show`.** A user who pipes `cloak show` to a clipboard manager or a script that exfiltrates is opting into that risk.
 - **The model's *output* containing secret material the user pastes back in.** If the user pastes a secret into a Claude prompt, Cloak cannot help. Cloak's value is making that paste unnecessary.
-- **macOS Gatekeeper notarization.** v1.0 binaries are not Apple-notarized. Users must run `xattr -d com.apple.quarantine`. Notarization is a v1.x deliverable; cosign keyless + SLSA L3 provenance ship with v1.0 and are sufficient to verify the binary is the artifact CI built (`docs/RELEASE.md`).
+- **macOS Gatekeeper notarization.** v1.0 macOS binaries are signed with a Developer ID Application certificate, submitted to Apple's notary service via `xcrun notarytool`, and ship with a notarization ticket — no `xattr -d com.apple.quarantine` needed on a default Gatekeeper configuration. Cosign keyless + SLSA L3 provenance still ship in parallel and remain the canonical "did CI build these exact bytes" check (`docs/RELEASE.md`).
 - **Cross-platform parity.** v1.0 ships macOS + Linux. Windows is deferred to v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)). On Linux the keychain pepper is real (W7 freedesktop Secret Service) and the user-presence gate is enforced via polkit (`dev.cloak.show-secret`, default policy `auth_self_keep`); when no polkit agent is registered, `cloak show` fails closed unless the user passes `--no-biometric`.
 - **Linux desktop pepper via Secret Service.** v1.0 stores the pepper as a libsecret item in the user's default (or `login`) collection. A malicious local app running as the same UID can call `org.freedesktop.secrets` and read the item once the keyring is unlocked; we do not — and cannot, without a separate broker process with its own ACL — distinguish a request originating from `cloakd` from one originating from any other process owned by the same user. Headless / SSH sessions where no keyring agent is running fall back to `CLOAK_PEPPER_FILE` (file mode 0600 enforced).
 - **Operational compromise of the publishing pipeline.** Releases are signed by `release.yml` running with the GitHub Actions OIDC identity; a compromise of that workflow's signing identity would let an attacker mint a "valid" release. The verification step (`docs/RELEASE.md`) binds the signature to a specific workflow path at a specific tag, so substituting an alternative signer would fail `cosign verify-blob`.
@@ -96,7 +96,7 @@ Cloak's primary threat model is a **single-user laptop** with a real OS keychain
 
 - No certificate pinning on outbound HTTP.
 - No swap-disable / mlock on `cloakd`.
-- No Apple notarization on macOS / no SignPath OV signing on Windows. Cosign keyless + SLSA L3 provenance is shipped instead.
+- macOS binaries are now Apple-notarized (Developer ID Application + `notarytool`); SignPath OV signing on Windows is still deferred (Windows itself ships in v1.0.1). Cosign keyless + SLSA L3 provenance ship for every platform regardless.
 - No fuzz-tested IPC parser (1M-iteration target deferred).
 - No formal verification of the audit hash chain.
 - Linux Secret Service has no per-process ACL — see "What Cloak does not defend against" above.

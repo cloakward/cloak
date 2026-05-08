@@ -53,6 +53,72 @@
    `prerelease` bit comes from `release.yml` passing `--prerelease`
    to `gh release create` whenever the tag matches `-rc*|-beta*|-alpha*`.
 
+## macOS notarization
+
+Starting with v1.0, macOS binaries (`cloak`, `cloakd`, `cloak-mcp`) ship
+Apple-notarized via the Developer ID Application + `xcrun notarytool`
+flow built into `release.yml`. End users no longer need to run
+`xattr -d com.apple.quarantine` on the extracted tarballs.
+
+The pipeline, per macOS row:
+
+1. Decodes the Developer ID Application `.p12` from
+   `secrets.APPLE_CERT_P12_BASE64` into a throwaway keychain.
+2. `codesign --force --options runtime --timestamp --sign "Developer ID
+   Application: <NAME> (<TEAM_ID>)"` over each Mach-O binary.
+3. Zips the signed binaries and submits the zip via
+   `xcrun notarytool submit --wait` using an App Store Connect API key
+   (`secrets.APPLE_API_KEY_BASE64` / `APPLE_API_KEY_ID` /
+   `APPLE_API_KEY_ISSUER_ID`).
+4. Runs `xcrun stapler staple` on each binary. Bare Mach-O command-line
+   tools cannot have a ticket stapled in-place (stapler only operates
+   on bundles / dmgs / pkgs); for those Apple's CDN serves the
+   notarization ticket online on first launch — same model as Homebrew
+   bottles.
+5. Tarballs the notarized binaries.
+6. **After** notarization, the cosign keyless `sign` job signs the
+   final tarball, so the cosign certificate covers the notarized bytes
+   the user actually downloads.
+
+If `secrets.APPLE_CERT_P12_BASE64` is empty (forks, dry-runs before the
+secrets are added), every Apple step skips with a `::warning::` and the
+tarballs ship unsigned — same Gatekeeper experience as v0.9.0-rc3.
+
+### Required GitHub Secrets
+
+Add these in **Settings → Secrets and variables → Actions** for the
+`cloakward/cloak` repo:
+
+| Secret | What it is | Where to get it |
+| --- | --- | --- |
+| `APPLE_CERT_P12_BASE64` | Developer ID Application cert + private key as a `.p12`, then `base64 -i cert.p12 \| pbcopy` | Keychain Access → "My Certificates" → right-click "Developer ID Application: <NAME> (<TEAM_ID>)" → Export → `.p12` |
+| `APPLE_CERT_PASSWORD` | The password you set when exporting the `.p12` | You picked it during the export above |
+| `APPLE_API_KEY_BASE64` | The App Store Connect API `.p8` private key, base64-encoded (`base64 -i AuthKey_XXXXXXXX.p8 \| pbcopy`) | https://appstoreconnect.apple.com/access/api → Keys → "+" → role **Developer** → download (one-time download!) |
+| `APPLE_API_KEY_ID` | 10-character alphanumeric Key ID | Shown next to the key on the App Store Connect Keys page |
+| `APPLE_API_KEY_ISSUER_ID` | UUID Issuer ID | Shown at the top of the App Store Connect Keys page |
+| `APPLE_TEAM_ID` | 10-character team ID | https://developer.apple.com/account → Membership details |
+
+### Generating the Developer ID Application certificate
+
+If you don't already have one:
+
+1. https://developer.apple.com/account → Certificates → "+" → **Developer ID Application**.
+2. Generate a CSR via Keychain Access → Certificate Assistant → "Request a Certificate from a Certificate Authority" (save to disk).
+3. Upload the CSR, download the issued `.cer`, double-click to install in your login keychain.
+4. In Keychain Access, expand the certificate to reveal its private key, select both, right-click → **Export 2 items** → `.p12`. Set a password (this becomes `APPLE_CERT_PASSWORD`).
+5. `base64 -i cert.p12 | pbcopy` and paste into `APPLE_CERT_P12_BASE64`.
+
+### Generating the App Store Connect API key
+
+`notarytool` accepts API keys instead of an Apple-ID-and-password
+combo (more robust, no 2FA prompts, can be revoked individually):
+
+1. https://appstoreconnect.apple.com/access/api → **Keys** tab.
+2. Click **+** → name it "Cloak notarytool" → **Access: Developer** is sufficient.
+3. **Download the `.p8`** — this is the only chance you get; the file disappears from the UI immediately after download.
+4. Note the **Key ID** (10 chars) and the **Issuer ID** (UUID at the top of the page).
+5. `base64 -i AuthKey_<KEY_ID>.p8 | pbcopy` → `APPLE_API_KEY_BASE64`.
+
 ## What a release publishes
 
 Every Cloak release tag (`vX.Y.Z`) is built, signed, and provenance-attested
