@@ -19,6 +19,7 @@
 #![warn(clippy::all)]
 
 pub mod audit;
+pub mod biometric;
 pub mod crypto;
 pub mod egress;
 pub mod error;

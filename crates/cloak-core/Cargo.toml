@@ -74,6 +74,15 @@ libc = "0.2"
 security-framework = "3.0"
 security-framework-sys = "2.12"
 core-foundation = "0.10"
+# Server-side biometric / user-presence gate. `cloakd` itself fires the
+# Touch ID prompt before serving `vault.show`; the CLI no longer
+# pre-prompts (see `crates/cloak-core/src/biometric.rs`). A same-UID
+# attacker who connects to the daemon socket directly cannot bypass
+# this — the daemon ignores any client-supplied biometric assertion.
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSString", "NSError"] }
+objc2-local-authentication = { version = "0.2", features = ["LAContext", "LAError", "block2"] }
+block2 = "0.5"
 
 # Linux desktop pepper via Secret Service (libsecret over D-Bus). We use
 # the blocking API: the pepper fetch happens once at unlock, never on the
@@ -85,6 +94,16 @@ core-foundation = "0.10"
 # `crates/cloak-core/src/keychain.rs` (Linux arm).
 [target.'cfg(target_os = "linux")'.dependencies]
 secret-service = { version = "5.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
+# Linux user-presence gate — `cloakd` calls polkit's
+# `org.freedesktop.PolicyKit1.Authority.CheckAuthorization` against the
+# `dev.cloak.show-secret` action before serving `vault.show`. We use
+# the typed proxy from `zbus_polkit` over the synchronous `zbus`
+# blocking API; libsodium remains the only crypto primitive on the
+# secret-protection path. `secret-service` already pulls `zbus` in
+# transitively; we name it directly here so `zbus::blocking::Connection`
+# is in scope and we add `blocking-api` on top.
+zbus = { version = "5", default-features = false, features = ["blocking-api"] }
+zbus_polkit = { version = "5", default-features = false, features = ["blocking-api"] }
 
 [dev-dependencies]
 proptest = { workspace = true }

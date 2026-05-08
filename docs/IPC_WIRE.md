@@ -49,8 +49,8 @@ or
 Error codes are symbolic, lowercase-kebab. Defined codes:
 `peer-not-trusted`, `session-expired`, `unknown-method`, `invalid-params`,
 `vault-locked`, `secret-not-found`, `secret-exists`, `policy-denied`,
-`confirmation-rejected`, `aead-failure`, `audit-broken`,
-`internal-error`.
+`confirmation-rejected`, `biometric-failed`, `aead-failure`,
+`audit-broken`, `internal-error`.
 
 Rate-limit exhaustion surfaces as `policy-denied` with the message
 `rate limited` — the rate-limit bucket lives inside the policy engine
@@ -77,7 +77,7 @@ are emitted directly by the dispatcher
 - **`vault.add`** — params `{ name, kind, tags, value }` → `{ ok: true, version: 1 }`
 - **`vault.set`** — params `{ name, value }` → `{ ok: true, version: N }`
 - **`vault.rm`** — params `{ name }` → `{ ok: true }`
-- **`vault.show`** — params `{ name }` → `{ value: "..." }` — **CLI peer only**, requires biometric flag from CLI in `params.biometric_ok: true`.
+- **`vault.show`** — params `{ name, skip_biometric? }` → `{ value: "..." }` — **CLI peer only**. Before producing any plaintext, `cloakd` itself fires the OS-level biometric / user-presence prompt (Touch ID on macOS, polkit `dev.cloak.show-secret` on Linux). The daemon ignores any client-supplied "user already approved" assertion: a same-UID attacker who connects to the socket directly cannot bypass the prompt by lying in the payload. The optional `skip_biometric: true` is the explicit operator opt-out for headless contexts (forwarded by `cloak --no-biometric show`). On cancel / failure the daemon returns the `biometric-failed` error code.
 - **`vault.status`** → `{ path, record_count, kdf_params, format_version, locked }`
 
 ### Read-only metadata (CLI and MCP)

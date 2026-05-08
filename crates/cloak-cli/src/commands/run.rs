@@ -18,8 +18,9 @@ use std::process::{Command, ExitCode};
 use anyhow::Result;
 
 use super::audit_log;
+use cloak_core::biometric;
+
 use super::{open_vault, unlock::unlock_interactive, Context};
-use crate::biometric_macos;
 
 pub fn run(ctx: &Context, only: Vec<String>, cmdline: Vec<OsString>) -> Result<ExitCode> {
     if cmdline.is_empty() {
@@ -38,7 +39,7 @@ pub fn run(ctx: &Context, only: Vec<String>, cmdline: Vec<OsString>) -> Result<E
         } else {
             format!("Inject {} Cloak secret(s) into a subprocess", only.len())
         };
-        match biometric_macos::authenticate(&reason) {
+        match biometric::authenticate(&reason) {
             Ok(true) => {}
             Ok(false) => anyhow::bail!("biometric authentication failed"),
             Err(e) => anyhow::bail!("biometric authentication failed: {e}"),
