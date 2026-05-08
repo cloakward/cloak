@@ -208,6 +208,7 @@ pub fn delete_pepper() -> Result<()> {
 /// Returns `Ok(None)` if no mirror has been written yet (fresh install or
 /// upgrade from a Cloak that didn't have the mirror).
 pub fn read_keychain_counter() -> Result<Option<u64>> {
+    #[cfg(any(test, feature = "test-util"))]
     if rollback_mirror_disabled() {
         return Ok(None);
     }
@@ -222,6 +223,7 @@ pub fn read_keychain_counter() -> Result<Option<u64>> {
 /// caller should warn but not abort the surrounding write — the file
 /// counter is the source of truth.
 pub fn mirror_counter(value: u64) -> Result<()> {
+    #[cfg(any(test, feature = "test-util"))]
     if rollback_mirror_disabled() {
         return Ok(());
     }
@@ -235,10 +237,18 @@ pub fn mirror_counter(value: u64) -> Result<()> {
 /// set the mirror behaves as if it were absent (reads return `None`,
 /// writes are no-ops). This exists so unit and integration tests in
 /// other crates can exercise the vault without poisoning the OS
-/// keychain or requiring a working session bus. Production builds
-/// MUST NOT set this var.
+/// keychain or requiring a working session bus.
+///
+/// The constant, the helper, and the early-return calls in
+/// `read_keychain_counter` / `mirror_counter` are all gated behind
+/// `#[cfg(any(test, feature = "test-util"))]` so release binaries
+/// compiled without `--features test-util` cannot honor the env var
+/// at all — a same-UID attacker cannot disable A7 read-side rollback
+/// detection by setting it in their environment.
+#[cfg(any(test, feature = "test-util"))]
 const DISABLE_MIRROR_ENV: &str = "CLOAK_DISABLE_ROLLBACK_MIRROR";
 
+#[cfg(any(test, feature = "test-util"))]
 fn rollback_mirror_disabled() -> bool {
     std::env::var_os(DISABLE_MIRROR_ENV)
         .map(|v| v == "1")

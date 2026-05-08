@@ -63,3 +63,9 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
+# Re-import cloak-core with `test-util` so the integration tests under
+# `tests/` can set `CLOAK_DISABLE_ROLLBACK_MIRROR=1` against the test
+# binary they exec. Release builds (the `cloak` bin in `[dependencies]`
+# above) do NOT carry this feature, so a same-UID attacker cannot
+# disable read-side rollback detection by setting the env var.
+cloak-core = { path = "../cloak-core", features = ["test-util"] }
