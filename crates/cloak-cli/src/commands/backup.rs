@@ -18,12 +18,12 @@ use std::io::{self, BufRead, IsTerminal};
 
 use anyhow::{Context as _, Result};
 use cloak_core::audit::AuditResult;
+use cloak_core::biometric;
 use cloak_core::recovery::RecoveryMnemonic;
 use cloak_core::Error;
 
 use super::audit_log;
 use super::{open_vault, unlock::unlock_interactive, Context, SystemError};
-use crate::biometric_macos;
 
 /// `cloak backup mnemonic`. The phrase itself is not stored — Cloak
 /// shows it once at creation and never again. This command surfaces
@@ -54,7 +54,7 @@ pub fn run_mnemonic(ctx: &Context) -> Result<()> {
     unlock_interactive(&mut vault)?;
     if !ctx.no_biometric {
         let reason = "Confirm access to the Cloak recovery seed metadata";
-        match biometric_macos::authenticate(reason) {
+        match biometric::authenticate(reason) {
             Ok(true) => {}
             Ok(false) => {
                 audit_log::append(
