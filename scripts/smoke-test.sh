@@ -77,6 +77,13 @@ cp "$REPO_ROOT/scripts/policy.example.toml" "$HOME/.config/cloak/policy.toml"
 # Test passphrase escape hatch — shared by all `cloak` invocations below.
 export CLOAK_PASSPHRASE="REDACTED-smoke-passphrase"
 
+# `cloak init` displays the BIP-39 recovery seed and refuses to print
+# to a non-TTY stdout (with a `/dev/tty` fallback when available). The
+# CI runner has no TTY at all, so explicitly opt into stdout printing
+# for this hermetic smoke run. This is the test-only escape hatch
+# documented in `crates/cloak-cli/src/commands/recovery_display.rs`.
+export CLOAK_ALLOW_MNEMONIC_STDOUT=1
+
 echo "==> cloak --version"
 "$CLOAK" --version
 
