@@ -5,6 +5,7 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 ## [Unreleased]
 
 ### Added
+- macOS binaries are now Apple-notarized + stapled. No more `xattr -d com.apple.quarantine` needed — `release.yml` codesigns `cloak`, `cloakd`, and `cloak-mcp` with a Developer ID Application cert, submits to `xcrun notarytool`, and staples the ticket before tarballing. Cosign keyless signing still happens AFTER notarization so the cosign cert covers the notarized bytes. Steps gracefully skip (with a `::warning::`) when the Apple secrets aren't configured (e.g. forks).
 - release tarballs include cloak-mcp at bin/cloak-mcp on macOS arm64, macOS x64, and Linux gnu amd64; brew/curl installs ship all three binaries with no npm dependency. (Linux musl + Linux arm64 ship cloak + cloakd only because bun --compile can't cross-target those triples — track in a follow-up issue if needed.)
 - `Cloak.dxt` extension for Claude Desktop — drag-and-drop install, native setup dialogs. Bundles `cloak-mcp` and runs `cloak setup` via OS-native dialog flow on first activation (no terminal commands required). One `.dxt` per platform (macOS arm64/x64, Linux x64/arm64) ships with the GitHub release. Windows `.dxt` deferred to v1.0.1.
 
