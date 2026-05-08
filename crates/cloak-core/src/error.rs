@@ -80,6 +80,14 @@ pub enum Error {
     #[error("confirmation rejected")]
     ConfirmationRejected,
 
+    /// Server-side biometric / user-presence prompt was cancelled,
+    /// timed out, unavailable, or otherwise not confirmed. Returned by
+    /// the daemon's `vault.show` handler before any plaintext is
+    /// produced — a same-UID attacker who connects to the daemon
+    /// socket directly cannot bypass this.
+    #[error("biometric / user-presence not confirmed")]
+    BiometricFailed,
+
     /// Audit log integrity check failed.
     #[error("audit chain broken at line {0}")]
     AuditChainBroken(u64),

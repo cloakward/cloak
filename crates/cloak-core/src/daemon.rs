@@ -277,7 +277,8 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
             //
             // So: only capture pidfds for the production binaries
             // where the watcher is actually load-bearing — `cloak`
-            // (CLI, biometric-gated vault.show) and `cloakd` (self-
+            // (CLI peer for `vault.show`, which the daemon now gates
+            // server-side via Touch ID / polkit) and `cloakd` (self-
             // test). Everything else falls through to the socket-FIN
             // revocation path (same surface as v0.1 / rc3).
             let pidfd_allowed =
@@ -778,11 +779,26 @@ async fn dispatch_method(
         }
         "vault.show" => {
             let p: ShowParams = parse_params(params)?;
-            if !p.biometric_ok {
-                return Err(Error::PolicyDenied(
-                    "biometric confirmation required for vault.show".to_string(),
-                )
-                .into());
+            // Server-side biometric / user-presence gate. The daemon
+            // itself fires the Touch ID (macOS) / polkit (Linux) prompt
+            // before any plaintext leaves the vault. We deliberately do
+            // NOT honour any client-supplied "user already approved"
+            // assertion: a same-UID attacker who connects to the
+            // socket directly must still face the OS prompt. The only
+            // CLI-side hint we honour is the explicit `skip_biometric`
+            // opt-out, intended for headless contexts where there is
+            // no GUI capable of rendering the prompt at all.
+            if !p.skip_biometric {
+                let reason = format!("Reveal secret '{}' from Cloak vault", p.name);
+                let confirmed = tokio::task::spawn_blocking(move || {
+                    crate::biometric::run_authenticate(&reason)
+                })
+                .await
+                .map_err(|_| DispatchError::Typed(Error::Other("biometric task panicked")))?
+                .map_err(|_| DispatchError::Typed(Error::BiometricFailed))?;
+                if !confirmed {
+                    return Err(DispatchError::Typed(Error::BiometricFailed));
+                }
             }
             let v = ctx.vault.lock().await;
             require_unlocked(&v)?;
@@ -878,11 +894,19 @@ struct SetParams {
     value: String,
 }
 
+/// Parameters for `vault.show`.
+///
+/// `skip_biometric` is the CLI's headless opt-out hint (forwarded from
+/// `cloak --no-biometric show NAME`). When `false` (the default), the
+/// daemon fires its own OS-level biometric / user-presence prompt
+/// before producing any plaintext. We deliberately do NOT accept a
+/// client-supplied "already approved" flag — the daemon's prompt is
+/// what creates the user-presence guarantee.
 #[derive(serde::Deserialize)]
 struct ShowParams {
     name: String,
     #[serde(default)]
-    biometric_ok: bool,
+    skip_biometric: bool,
 }
 
 fn parse_params<T: serde::de::DeserializeOwned>(

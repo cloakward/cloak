@@ -17,8 +17,9 @@ use anyhow::Result;
 
 use super::audit_log;
 use super::dotenv::render_dotenv;
+use cloak_core::biometric;
+
 use super::{open_vault, unlock::unlock_interactive, Context};
-use crate::biometric_macos;
 
 /// Run the export. `force` is required when stdout is not a TTY (or
 /// when the destination file already exists).
@@ -46,7 +47,7 @@ pub fn run(ctx: &Context, path: Option<PathBuf>, force: bool) -> Result<()> {
     // Biometric / user-presence step. Mirrors `cloak show`.
     if !ctx.no_biometric {
         let reason = "Export Cloak vault to .env file".to_string();
-        match biometric_macos::authenticate(&reason) {
+        match biometric::authenticate(&reason) {
             Ok(true) => {}
             Ok(false) => anyhow::bail!("biometric authentication failed"),
             Err(e) => anyhow::bail!("biometric authentication failed: {e}"),

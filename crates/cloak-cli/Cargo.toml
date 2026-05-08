@@ -35,28 +35,10 @@ uuid = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.5"
-objc2-foundation = { version = "0.2", features = ["NSString", "NSError"] }
-objc2-local-authentication = { version = "0.2", features = ["LAContext", "LAError", "block2"] }
-block2 = "0.5"
-
-# Linux biometric / user-presence gate goes through polkit's
-# `CheckAuthorization` D-Bus method (see `biometric_macos.rs` Linux arm
-# and `scripts/polkit/dev.cloak.policy`). We use the typed proxy from
-# `zbus_polkit` over the synchronous `zbus` blocking API so the
-# `cloak show` code path stays sync; libsodium remains the only crypto
-# primitive on the secret-protection path.
-#
-# `cloak-core`'s `secret-service` dep (Linux pepper, W7) already pulls
-# `zbus` in as a transitive dep with the `tokio` feature; we name it
-# directly here so the `zbus::blocking::Connection` type is in scope
-# for `cloak-cli`, and we add the `blocking-api` feature on top.
-# zbus's internal `block_on` lazily spins a tokio runtime when the
-# `tokio` feature is on, which is what we want for a sync CLI call.
-[target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5", default-features = false, features = ["blocking-api"] }
-zbus_polkit = { version = "5", default-features = false, features = ["blocking-api"] }
+# The biometric / user-presence gate now lives in `cloak-core`
+# (`cloak_core::biometric`) so `cloakd` can fire the OS-level prompt
+# itself when serving `vault.show`. The CLI re-uses that module via the
+# `cloak-core` library dep — no per-platform CLI deps needed for it.
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

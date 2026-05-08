@@ -120,6 +120,10 @@ impl From<&Error> for RpcError {
             Error::ConfirmationRejected => {
                 rpc_error("confirmation-rejected", "confirmation rejected")
             }
+            Error::BiometricFailed => rpc_error(
+                "biometric-failed",
+                "biometric / user-presence not confirmed",
+            ),
             Error::AuditChainBroken(line) => {
                 rpc_error("audit-broken", format!("audit chain broken at line {line}"))
             }
@@ -370,6 +374,7 @@ mod tests {
             (Error::SecretNotFound("x".into()), "secret-not-found"),
             (Error::PolicyDenied("nope".into()), "policy-denied"),
             (Error::ConfirmationRejected, "confirmation-rejected"),
+            (Error::BiometricFailed, "biometric-failed"),
             (Error::Aead("tag mismatch"), "aead-failure"),
             (Error::AuditChainBroken(7), "audit-broken"),
             (Error::Other("oops"), "internal-error"),
