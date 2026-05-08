@@ -15,11 +15,22 @@ const TEST_PASSPHRASE: &str = "REDACTED-test-passphrase";
 
 /// Build a `cloak` command rooted at a fresh tempdir vault. The caller
 /// owns the `TempDir` so the vault file is cleaned up at end-of-test.
+///
+/// The CLI workflow sets `CLOAK_PEPPER_FILE: target/cloak-ci-pepper`
+/// once per job, but cargo runs these tests in parallel — so multiple
+/// `cloak init` invocations race on `OpenOptions::create_new(true)`
+/// for that single shared file and one of them fails with
+/// `File exists (os error 17)`. Override the env var per test with a
+/// path inside the test's own tempdir so each test gets an isolated
+/// pepper file. This also matches the production deployment posture
+/// (one pepper file per cloakd instance).
 fn cloak(dir: &TempDir) -> (Command, PathBuf) {
     let path = dir.path().join("vault.cloak");
+    let pepper = dir.path().join("pepper");
     let mut cmd = Command::cargo_bin("cloak").expect("binary built");
     cmd.arg("--vault").arg(&path).arg("--no-biometric");
     cmd.env("CLOAK_PASSPHRASE", TEST_PASSPHRASE);
+    cmd.env("CLOAK_PEPPER_FILE", &pepper);
     // Tell tracing-subscriber to be quiet during tests.
     cmd.env("RUST_LOG", "off");
     (cmd, path)
