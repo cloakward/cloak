@@ -257,27 +257,36 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
             }
         };
         let pidfd = {
-            // Skip pidfd capture for bun-built cloak-mcp peers. The
-            // rc1 disable proved that calling getsockopt(SO_PEERPIDFD)
-            // on a connection from a `bun build --compile` binary on
-            // certain Linux kernels (observed on GitHub Actions
-            // ubuntu-24.04) tears the peer socket down before any
-            // frame is read. Bun's runtime opens its own pidfds for
-            // subprocess management; the kernel-side pidfd-inode
-            // sharing appears to make our additional capture either
-            // collide (EEXIST on AsyncFd::new) or sever the peer
-            // socket as a side effect. cloak-mcp peers always
-            // disconnect cleanly via socket-FIN at session end, so
-            // socket-FIN-driven revocation gives the same window as
-            // a watcher-fired revocation in the common case. The
-            // CLI peer (basename "cloak"), where the security value
-            // of the watcher is highest, is unaffected and gets the
-            // full pidfd-watch path.
-            let is_bun_peer = peer.basename().is_some_and(|n| n == "cloak-mcp");
-            if is_bun_peer {
+            // Pidfd capture is allowlist-gated by basename. Two reasons:
+            //
+            // 1. Bun-built `cloak-mcp`: getsockopt(SO_PEERPIDFD) on a
+            //    bun-runtime peer on certain Linux kernels (observed
+            //    on GH Actions ubuntu-24.04) tears the peer socket
+            //    down before any frame is read. Bun owns its own
+            //    pidfds for subprocess management; the kernel-side
+            //    pidfd-inode sharing makes our additional capture
+            //    either collide (EEXIST on AsyncFd::new) or sever the
+            //    peer socket. Socket-FIN-driven revocation closes A8
+            //    for the common case anyway.
+            //
+            // 2. Cargo test binaries (`ipc_e2e-<hash>`, etc.): the
+            //    pidfd watcher task can outlive the test's tokio
+            //    runtime drop, blocking shutdown and hanging CI. The
+            //    integration tests don't need PID-recycle defense;
+            //    they need clean teardown.
+            //
+            // So: only capture pidfds for the production binaries
+            // where the watcher is actually load-bearing — `cloak`
+            // (CLI, biometric-gated vault.show) and `cloakd` (self-
+            // test). Everything else falls through to the socket-FIN
+            // revocation path (same surface as v0.1 / rc3).
+            let pidfd_allowed =
+                matches!(peer.basename().as_deref(), Some("cloak") | Some("cloakd"));
+            if !pidfd_allowed {
                 tracing::debug!(
                     peer_pid = peer.pid,
-                    "skipping pidfd capture for cloak-mcp peer; \
+                    basename = peer.basename().unwrap_or_default(),
+                    "skipping pidfd capture for non-allowlisted peer; \
                      relying on socket-FIN-driven revocation"
                 );
                 None
