@@ -121,6 +121,25 @@ fn file_pepper(path: &std::path::Path) -> Result<Secret<Vec<u8>>> {
     Ok(Secret::new(pepper))
 }
 
+/// macOS Security Framework `OSStatus` for `errSecItemNotFound`.
+///
+/// This is the ONLY `OSStatus` we treat as "no pepper exists yet, create one".
+/// Every other status — `errSecAuthFailed` (-25293) post-sleep transient,
+/// `errSecInteractionNotAllowed` (-25308) locked-headless, `errSecUserCanceled`
+/// (-128), etc. — must propagate so cloakd does not regenerate-and-overwrite a
+/// valid pepper (which would brick the vault). The same constant gates the
+/// rollback-counter read path.
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+/// Decide, from a Security Framework `OSStatus`, whether a `get_generic_password`
+/// failure means "no item exists" (safe to create) versus any other condition
+/// (must propagate). Extracted for unit testing.
+#[cfg(target_os = "macos")]
+fn is_item_not_found(code: i32) -> bool {
+    code == ERR_SEC_ITEM_NOT_FOUND
+}
+
 #[cfg(target_os = "macos")]
 fn keychain_pepper() -> Result<Secret<Vec<u8>>> {
     use security_framework::passwords::{get_generic_password, set_generic_password};
@@ -136,14 +155,32 @@ fn keychain_pepper() -> Result<Secret<Vec<u8>>> {
             }
             Ok(Secret::new(bytes))
         }
-        Err(_) => {
-            // Either missing or another keychain error. Generate a new
-            // pepper and try to store it. If storing fails we report the
-            // store error.
-            let pepper = crate::crypto::aead::random_bytes(PEPPER_LEN)?;
-            set_generic_password(SERVICE, ACCOUNT, &pepper)
-                .map_err(|e| Error::Keychain(format!("set_generic_password: {e}")))?;
-            Ok(Secret::new(pepper))
+        Err(e) => {
+            // `errSecItemNotFound` (-25300) is the legitimate first-install
+            // signal — there is no pepper yet, so we generate and store one.
+            //
+            // ALL OTHER OSStatus values must propagate. In particular:
+            //   - `errSecAuthFailed` (-25293): post-sleep transient, the
+            //     keychain ACL refused the read for a moment.
+            //   - `errSecInteractionNotAllowed` (-25308): keychain locked,
+            //     no UI available (cloakd running headless).
+            //   - `errSecUserCanceled` (-128): user dismissed the unlock
+            //     prompt.
+            // Treating any of these as "missing" would call
+            // `set_generic_password`, which OVERWRITES the existing pepper
+            // and permanently bricks the user's vault (the master-key wrap
+            // can no longer be derived). Mirror the pattern used by
+            // `keychain_counter_read`.
+            if is_item_not_found(e.code()) {
+                let pepper = crate::crypto::aead::random_bytes(PEPPER_LEN)?;
+                set_generic_password(SERVICE, ACCOUNT, &pepper)
+                    .map_err(|e| Error::Keychain(format!("set_generic_password: {e}")))?;
+                Ok(Secret::new(pepper))
+            } else {
+                Err(Error::Keychain(format!(
+                    "get_generic_password({SERVICE}, {ACCOUNT}): {e}"
+                )))
+            }
         }
     }
 }
@@ -801,5 +838,82 @@ mod rollback_counter_tests {
             ),
             other => panic!("expected Keychain error, got {other:?}"),
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    //! macOS keychain pepper-read classification tests.
+    //!
+    //! Background: a previous `Err(_) => create new pepper` arm in
+    //! [`keychain_pepper`] swallowed every Security Framework error,
+    //! including `errSecAuthFailed` (-25293) — a transient that fires
+    //! routinely after a wake-from-sleep — and called
+    //! `set_generic_password`, which **overwrites** the existing pepper.
+    //! That permanently bricks the vault (the master-key wrap can no
+    //! longer be derived). v1.0 BLOCKER fix.
+    //!
+    //! Reproducing the original bug end-to-end requires standing up a
+    //! real Security Framework ACL that fails authentication on demand,
+    //! which is impractical from a unit test (the SF `Error` type cannot
+    //! be constructed from user code). Instead we unit-test the
+    //! classification predicate that gates the regenerate-and-overwrite
+    //! path, plus an `#[ignore]`d cold-start integration test that hits
+    //! the real keychain (mirrors the Linux-side test gating).
+    //!
+    //! Manual reproduction of the original bug for posterity:
+    //!   1. Open vault on a Mac.
+    //!   2. `sudo pmset sleepnow`; wake.
+    //!   3. Within ~2s, run a cloakd op that re-reads the pepper.
+    //!   4. Pre-fix: `Err(errSecAuthFailed)` → silently overwrites the
+    //!      pepper item; subsequent unlocks fail with bad-tag AEAD errors.
+    //!   5. Post-fix: error propagates as `Error::Keychain` and the
+    //!      pepper is preserved; retry succeeds once the keychain
+    //!      transient clears.
+    use super::*;
+
+    /// `errSecItemNotFound` (-25300) is the ONLY status that authorises
+    /// the regenerate-and-overwrite branch.
+    #[test]
+    fn item_not_found_classified_as_missing() {
+        assert!(is_item_not_found(-25300));
+    }
+
+    /// Every other Security Framework status that has been observed in
+    /// the field MUST NOT classify as missing — otherwise cloakd will
+    /// regenerate the pepper and brick the vault.
+    #[test]
+    fn transient_and_locked_errors_are_not_missing() {
+        // errSecAuthFailed — post-sleep transient (the original bug).
+        assert!(!is_item_not_found(-25293));
+        // errSecInteractionNotAllowed — locked keychain, no UI.
+        assert!(!is_item_not_found(-25308));
+        // errSecUserCanceled — user dismissed unlock prompt.
+        assert!(!is_item_not_found(-128));
+        // errSecMissingEntitlement — sandbox/entitlement misconfig.
+        assert!(!is_item_not_found(-34018));
+        // errSecBadReq — generic bad-request.
+        assert!(!is_item_not_found(-909));
+        // 0 ("no error") clearly isn't a missing item either.
+        assert!(!is_item_not_found(0));
+    }
+
+    /// Cold-start: with no pepper present, `keychain_pepper` should
+    /// create a 32-byte pepper and a second call should return the same
+    /// bytes. Gated like the Linux Secret Service tests so it never
+    /// runs unattended in CI (it would prompt for keychain access and
+    /// pollute the developer's login keychain).
+    #[test]
+    #[ignore = "touches the real macOS login keychain; gate with RUN_MACOS_KEYCHAIN_TEST=1"]
+    fn missing_item_creates() {
+        if std::env::var_os("RUN_MACOS_KEYCHAIN_TEST").is_none() {
+            return;
+        }
+        let _ = delete_pepper();
+        let p1 = keychain_pepper().expect("create on miss");
+        assert_eq!(p1.expose_secret().len(), PEPPER_LEN);
+        let p2 = keychain_pepper().expect("hit on second call");
+        assert_eq!(p1.expose_secret(), p2.expose_secret());
+        let _ = delete_pepper();
     }
 }
