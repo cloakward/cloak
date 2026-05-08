@@ -67,6 +67,12 @@ fn seed_vault(path: &Path, counter: u64) {
         wrap_nonce: [0u8; 24],
         wrap_aead: vec![0u8; 48],
         monotonic_counter: counter,
+        // BIP-39 recovery columns (added in v1.0 by PR #69) are nullable
+        // so older vaults continue to open. This test never exercises
+        // the recovery path, so leave them empty.
+        recovery_format: None,
+        recovery_wrap_nonce: None,
+        recovery_wrap_aead: None,
         created_at: "2026-01-01T00:00:00+00:00".to_string(),
     };
     store.set_meta(&meta).expect("set meta");

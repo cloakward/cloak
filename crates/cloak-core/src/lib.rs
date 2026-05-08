@@ -27,6 +27,7 @@ pub mod handlers;
 pub mod ipc;
 pub mod keychain;
 pub mod policy;
+pub mod recovery;
 pub mod store;
 pub mod vault;
 

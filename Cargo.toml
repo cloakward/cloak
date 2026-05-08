@@ -48,6 +48,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 hex = "0.4"
 base64 = "0.22"
 rand = "0.8"
+# BIP-39 mnemonic recovery seed (W11 / v1.0). 256-bit entropy → 24-word
+# English wordlist, PBKDF2-HMAC-SHA512 seed derivation per the standard.
+# `zeroize` feature wires zeroize-on-drop into the Mnemonic / Seed types.
+bip39 = { version = "2.2", default-features = false, features = ["std", "zeroize"] }
 fs2 = "0.4"
 once_cell = "1.20"
 dirs = "5.0"

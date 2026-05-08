@@ -17,8 +17,14 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use crate::error::{Error, Result};
 
 /// Embedded migration scripts, in apply order.
-const MIGRATIONS: &[(u32, &str, &str)] =
-    &[(1, "0001_init", include_str!("../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(u32, &str, &str)] = &[
+    (1, "0001_init", include_str!("../migrations/0001_init.sql")),
+    (
+        2,
+        "0002_recovery_wrap",
+        include_str!("../migrations/0002_recovery_wrap.sql"),
+    ),
+];
 
 /// Newtype around a `rusqlite::Connection` for the vault DB.
 pub struct SqliteStore {
@@ -43,6 +49,16 @@ pub struct MetaRow {
     pub monotonic_counter: u64,
     /// ISO-8601 creation timestamp.
     pub created_at: String,
+    /// Discriminator for the recovery-wrap format. Currently only
+    /// `"bip39-v1"` is defined: 24-word English mnemonic, BIP-39 seed
+    /// (PBKDF2-HMAC-SHA512, 2048 iterations, empty BIP-39 passphrase),
+    /// first 32 bytes used as the recovery key. `None` on vaults that
+    /// pre-date the BIP-39 recovery migration (v0.9.0-rc3 and earlier).
+    pub recovery_format: Option<String>,
+    /// 24-byte AEAD nonce wrapping the master key under the recovery key.
+    pub recovery_wrap_nonce: Option<[u8; 24]>,
+    /// AEAD-wrapped master key (`ct || tag`) under the recovery key.
+    pub recovery_wrap_aead: Option<Vec<u8>>,
 }
 
 /// Raw row read from `secrets` (without decoding the JSON tags).
@@ -149,7 +165,8 @@ impl SqliteStore {
             .conn
             .query_row(
                 "SELECT format_version, salt, kdf_phc, wrap_nonce, wrap_aead, \
-                        monotonic_counter, created_at \
+                        monotonic_counter, created_at, \
+                        recovery_format, recovery_wrap_nonce, recovery_wrap_aead \
                  FROM meta WHERE id = 1",
                 [],
                 |r| {
@@ -163,6 +180,9 @@ impl SqliteStore {
                         r.get::<_, Vec<u8>>(4)?,
                         r.get::<_, i64>(5)? as u64,
                         r.get::<_, String>(6)?,
+                        r.get::<_, Option<String>>(7)?,
+                        r.get::<_, Option<Vec<u8>>>(8)?,
+                        r.get::<_, Option<Vec<u8>>>(9)?,
                     ))
                 },
             )
@@ -181,6 +201,17 @@ impl SqliteStore {
         salt.copy_from_slice(&row.1);
         let mut nonce = [0u8; 24];
         nonce.copy_from_slice(&row.3);
+        let recovery_wrap_nonce = match row.8 {
+            Some(v) => {
+                if v.len() != 24 {
+                    return Err(Error::VaultFormat("meta.recovery_wrap_nonce wrong length"));
+                }
+                let mut n = [0u8; 24];
+                n.copy_from_slice(&v);
+                Some(n)
+            }
+            None => None,
+        };
         Ok(Some(MetaRow {
             format_version: row.0,
             salt,
@@ -189,6 +220,9 @@ impl SqliteStore {
             wrap_aead: row.4,
             monotonic_counter: row.5,
             created_at: row.6,
+            recovery_format: row.7,
+            recovery_wrap_nonce,
+            recovery_wrap_aead: row.9,
         }))
     }
 
@@ -196,8 +230,9 @@ impl SqliteStore {
     pub fn set_meta(&self, m: &MetaRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO meta (id, format_version, salt, kdf_phc, wrap_nonce, \
-                wrap_aead, monotonic_counter, created_at) \
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                wrap_aead, monotonic_counter, created_at, \
+                recovery_format, recovery_wrap_nonce, recovery_wrap_aead) \
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 m.format_version as i64,
                 &m.salt[..],
@@ -206,8 +241,34 @@ impl SqliteStore {
                 &m.wrap_aead,
                 m.monotonic_counter as i64,
                 &m.created_at,
+                &m.recovery_format,
+                m.recovery_wrap_nonce.as_ref().map(|n| n.to_vec()),
+                &m.recovery_wrap_aead,
             ],
         )?;
+        Ok(())
+    }
+
+    /// Replace the passphrase-wrap fields (`wrap_nonce`, `wrap_aead`,
+    /// `salt`, `kdf_phc`) on the singleton meta row. Used by
+    /// `cloak restore` after re-wrapping the master key under a new
+    /// passphrase. The recovery wrap is left intact.
+    pub fn update_passphrase_wrap(
+        &self,
+        salt: &[u8; 16],
+        kdf_phc: &str,
+        wrap_nonce: &[u8; 24],
+        wrap_aead: &[u8],
+    ) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE meta \
+             SET salt = ?1, kdf_phc = ?2, wrap_nonce = ?3, wrap_aead = ?4 \
+             WHERE id = 1",
+            params![&salt[..], kdf_phc, &wrap_nonce[..], wrap_aead],
+        )?;
+        if n != 1 {
+            return Err(Error::VaultFormat("meta missing"));
+        }
         Ok(())
     }
 
@@ -417,7 +478,8 @@ mod tests {
             .conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1);
+        // One row per applied migration; bump as new migrations land.
+        assert_eq!(n, MIGRATIONS.len() as i64);
     }
 
     #[test]
@@ -427,10 +489,11 @@ mod tests {
         // value should fail.
         let r = s.conn.execute(
             "INSERT INTO meta (id, format_version, salt, kdf_phc, wrap_nonce, \
-                wrap_aead, monotonic_counter, created_at) \
+                wrap_aead, monotonic_counter, created_at, \
+                recovery_format, recovery_wrap_nonce, recovery_wrap_aead) \
              VALUES (1, 1, x'00000000000000000000000000000000', '', \
                 x'000000000000000000000000000000000000000000000000', x'', \
-                'not-a-number', '2025-01-01T00:00:00Z')",
+                'not-a-number', '2025-01-01T00:00:00Z', NULL, NULL, NULL)",
             [],
         );
         assert!(r.is_err(), "STRICT should reject text in INTEGER column");
@@ -447,6 +510,9 @@ mod tests {
             wrap_aead: vec![3u8; 48],
             monotonic_counter: 1,
             created_at: "2025-01-01T00:00:00Z".into(),
+            recovery_format: None,
+            recovery_wrap_nonce: None,
+            recovery_wrap_aead: None,
         };
         s.set_meta(&m).unwrap();
         let r = s.get_meta().unwrap().unwrap();

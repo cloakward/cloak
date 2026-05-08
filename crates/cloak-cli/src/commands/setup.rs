@@ -54,7 +54,10 @@ pub struct SetupOptions {
     pub from_dxt: bool,
 }
 
-pub fn run(ctx: &Context, opts: SetupOptions) -> Result<()> {
+/// Returns the exit code as a `u8`. `0` means setup completed (or the
+/// vault was already initialized); `2` means we refused to print the
+/// freshly generated recovery seed because no terminal was reachable.
+pub fn run(ctx: &Context, opts: SetupOptions) -> Result<u8> {
     let theme = ColorfulTheme::default();
     println!();
     println!("Cloak setup wizard.");
@@ -63,7 +66,13 @@ pub fn run(ctx: &Context, opts: SetupOptions) -> Result<()> {
     println!();
 
     // --- 1. Passphrase + vault init ----------------------------------------
-    init_vault(ctx, &theme, &opts)?;
+    // If the mnemonic printer refuses (no TTY, no /dev/tty, no override)
+    // we short-circuit out of the wizard so the user notices — but only
+    // after the vault is on disk. The remaining setup steps are not
+    // worth doing if the user cannot see their seed.
+    if !init_vault(ctx, &theme, &opts)? {
+        return Ok(2);
+    }
 
     // --- 2. Default policy file -------------------------------------------
     // Always run; the function is idempotent and only writes when no
@@ -113,21 +122,26 @@ pub fn run(ctx: &Context, opts: SetupOptions) -> Result<()> {
             PolicyWriteOutcome::AlreadyExists(_) => {}
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 // -------------------------------------------------------------------------
 // Step 1: passphrase + vault init
 // -------------------------------------------------------------------------
 
-fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Result<()> {
+/// Returns `Ok(true)` when the vault is good to go (either already
+/// initialized, or freshly initialized AND the recovery seed was
+/// successfully displayed). Returns `Ok(false)` only when initialization
+/// succeeded but the seed could not be surfaced — the caller must then
+/// stop the wizard and exit non-zero.
+fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Result<bool> {
     let mut vault = open_vault(ctx)?;
     if vault.is_initialized()? {
         println!(
             "[1/5] vault: already initialized at {}",
             ctx.vault_path.display()
         );
-        return Ok(());
+        return Ok(true);
     }
     println!(
         "[1/5] vault: creating a new vault at {}",
@@ -156,7 +170,10 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
         p.mem_kib, p.t_cost, p.p_cost
     );
     println!("      pepper stored in OS keychain (service=dev.cloak account=vault.pepper)");
-    Ok(())
+    println!();
+    Ok(super::recovery_display::print_mnemonic_warning(
+        &result.mnemonic,
+    ))
 }
 
 /// Prompt for a passphrase, scoring it with `zxcvbn`. Refuses scores

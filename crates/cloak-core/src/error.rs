@@ -36,6 +36,16 @@ pub enum Error {
     #[error("invalid passphrase or tampered vault")]
     InvalidPassphrase,
 
+    /// Recovery mnemonic failed to parse / validate, OR the recovery
+    /// wrap could not be opened with the supplied mnemonic.
+    #[error("invalid recovery mnemonic")]
+    InvalidMnemonic,
+
+    /// The vault was created before the BIP-39 recovery seed feature
+    /// shipped and therefore has no recovery wrap to use.
+    #[error("this vault has no recovery seed (created before recovery seed support landed; create a new vault to opt in — migration in v1.1)")]
+    NoRecoveryWrap,
+
     /// Record with the given name already exists.
     #[error("secret already exists: {0}")]
     SecretExists(String),
