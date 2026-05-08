@@ -1,6 +1,6 @@
-# Cloak Quickstart (v0.9.0-rc2, macOS)
+# Cloak Quickstart (v1.0.0, macOS)
 
-> v0.9.0-rc2 (the second release candidate for v1.0) ships macOS + Linux. Windows is deferred to v1.0.1
+> v1.0.0 ships macOS + Linux. Windows is deferred to v1.0.1
 > ([issue #3](https://github.com/cloakward/cloak/issues/3)). On Linux the
 > desktop pepper uses freedesktop Secret Service (W7) and `cloak show`
 > gates the reveal on polkit (`dev.cloak.show-secret`; install
@@ -9,17 +9,11 @@
 > macOS-flavored — swap `~/Library/Application Support` for the XDG
 > equivalent on Linux.
 
-## Gatekeeper note (macOS, unsigned dev builds)
+## Gatekeeper note (macOS)
 
-Cloak v0.9.0-rc2 (and v1.0 going forward) binaries are not Apple-notarized. After downloading a release artifact, macOS Gatekeeper will refuse to run it until you clear the quarantine attribute:
+v1.0.0 release binaries are signed with a Developer ID Application certificate, notarized by Apple, and stapled. Gatekeeper accepts them on first launch with no `xattr` dance. Every release is also cosign-signed with SLSA L3 provenance, which lets you verify the binary is the exact artifact CI built; notarization adds Apple's pre-execution scan on top of that.
 
-```sh
-xattr -d com.apple.quarantine ./cloak ./cloakd ./cloak-mcp
-```
-
-Apple notarization is a v1.x deliverable. The cosign + SLSA L3 attestations on every release are sufficient to verify that the binary you have is the one CI built; notarization adds Apple's pre-execution scan on top of that. We chose to ship without notarization for v0.9.0-rc2 to avoid the Apple Developer Program enrollment and signing-cert renewal treadmill while the project is small.
-
-If you build from source there is no Gatekeeper friction — your local toolchain produces an ad-hoc-signed binary that runs immediately.
+If you build from source there is no Gatekeeper friction either — your local toolchain produces an ad-hoc-signed binary that runs immediately.
 
 ## 1. Build
 
