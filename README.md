@@ -44,30 +44,17 @@ Other ways to install: `npm install -g @cloak-ward/mcp`, drag-and-drop [`Cloak.d
 - **Apple notarized.** Gatekeeper accepts on first launch. Cosign signatures and SLSA L3 provenance on every release if you want to verify.
 - **Open source, Apache-2.0.** Read the code, build from source, change what you want.
 
-## Verify your install
+## What it looks like
 
-```
-$ cloak doctor
-[ok]   binary `cloak` on PATH      /opt/homebrew/bin/cloak
-[ok]   binary `cloakd` on PATH     /opt/homebrew/bin/cloakd
-[ok]   binary `cloak-mcp` on PATH  /opt/homebrew/bin/cloak-mcp
-[ok]   daemon                      running, socket at ~/.cloak/sock
-[ok]   vault                       unlocked, 3 secrets
-[ok]   keychain pepper             present
-[ok]   biometric                   Touch ID available
-[ok]   policy file                 ~/.config/cloak/policy.toml
-[ok]   Claude Desktop              registered
-[ok]   Claude Code                 registered
-[ok]   Cursor                      registered
-```
+> **You:** How much have I spent on OpenAI this billing cycle?
+>
+> **Claude:** Let me check.
+>
+> _Calls `proxy_authenticated_http_request` against `api.openai.com/v1/usage`. Cloak attaches `OPENAI_API_KEY` server-side. The model never sees the value._
+>
+> **Claude:** You've used $47.83 of your $200 monthly limit (24%). Top models: gpt-4o at $31.20, gpt-4o-mini at $16.63. You're 6 days into the cycle, tracking to about $240/month if usage stays flat.
 
-Every tool call your agent makes lands in a hash-chained audit log. The note field never contains secret values.
-
-```
-$ tail -n 2 ~/.local/share/cloak/audit.jsonl
-{"seq":42,"ts":"2026-05-08T19:14:08Z","tool":"tool.proxy_authenticated_http_request","secret":"OPENAI_API_KEY","target":"api.openai.com","result":"ok","peer":{"basename":"cloak-mcp","pid":74221},"prev_hash":"7c8f9a2b…"}
-{"seq":43,"ts":"2026-05-08T19:14:11Z","tool":"tool.sign_request","secret":"AWS_ACCESS_KEY_ID","target":"sts.us-east-1.amazonaws.com","result":"ok","peer":{"basename":"cloak-mcp","pid":74221},"prev_hash":"a1b2c3d4…"}
-```
+The key never entered the model's context. Cloak attached it, made the request, returned only the response body. The action is recorded with the secret name, target host, and a hash-chain link in `~/.local/share/cloak/audit.jsonl`. The value itself is not.
 
 ## Documentation
 
