@@ -46,15 +46,18 @@ Other ways to install: `npm install -g @cloak-ward/mcp`, drag-and-drop [`Cloak.d
 
 ## What it looks like
 
-> **You:** How much have I spent on OpenAI this billing cycle?
+> **You:** What PRs am I being asked to review?
 >
 > **Claude:** Let me check.
 >
-> _Calls `proxy_authenticated_http_request` against `api.openai.com/v1/usage`. Cloak attaches `OPENAI_API_KEY` server-side. The model never sees the value._
+> _Calls `proxy_authenticated_http_request` against `api.github.com/search/issues?q=is:pr+review-requested:@me+state:open`. Cloak attaches `GITHUB_TOKEN` server-side. The model never sees the value._
 >
-> **Claude:** You've used $47.83 of your $200 monthly limit (24%). Top models: gpt-4o at $31.20, gpt-4o-mini at $16.63. You're 6 days into the cycle, tracking to about $240/month if usage stays flat.
+> **Claude:** You have 3 open review requests:
+> - **acmecorp/api#412** — feat: cache layer for `/v1/users` (priya, 2d)
+> - **acmecorp/worker#198** — fix: race in graceful shutdown (alex, 5h)
+> - **acmecorp/sdk-js#67** — docs: clarify rate-limit headers (jay, 1d)
 
-The key never entered the model's context. Cloak attached it, made the request, returned only the response body. The action is recorded with the secret name, target host, and a hash-chain link in `~/.local/share/cloak/audit.jsonl`. The value itself is not.
+The token never entered the model's context. Cloak attached it to the request, returned only the response body. The action is recorded with the secret name, target host, and a hash-chain link in `~/.local/share/cloak/audit.jsonl`; the value itself is not.
 
 ## Documentation
 
