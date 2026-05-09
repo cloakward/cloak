@@ -44,19 +44,30 @@ Other ways to install: `npm install -g @cloak-ward/mcp`, drag-and-drop [`Cloak.d
 - **Apple notarized.** Gatekeeper accepts on first launch. Cosign signatures and SLSA L3 provenance on every release if you want to verify.
 - **Open source, Apache-2.0.** Read the code, build from source, change what you want.
 
-## Use it
-
-Once your client is wired up, ask the agent to do something that needs an API key. The agent will call Cloak's `sign_request` or `proxy_authenticated_http_request` tool. Cloak performs the privileged operation; the agent only sees the response. The plaintext key never leaves the daemon.
+## Verify your install
 
 ```
-> Summarize my OpenAI billing for last month
-
-The agent calls cloak's proxy_authenticated_http_request tool.
-Cloak attaches the OPENAI_API_KEY, makes the request, returns the JSON.
-The model never decrypted anything.
+$ cloak doctor
+[ok]   binary `cloak` on PATH      /opt/homebrew/bin/cloak
+[ok]   binary `cloakd` on PATH     /opt/homebrew/bin/cloakd
+[ok]   binary `cloak-mcp` on PATH  /opt/homebrew/bin/cloak-mcp
+[ok]   daemon                      running, socket at ~/.cloak/sock
+[ok]   vault                       unlocked, 3 secrets
+[ok]   keychain pepper             present
+[ok]   biometric                   Touch ID available
+[ok]   policy file                 ~/.config/cloak/policy.toml
+[ok]   Claude Desktop              registered
+[ok]   Claude Code                 registered
+[ok]   Cursor                      registered
 ```
 
-Every action is recorded in a hash-chained audit log. Run `cloak doctor` to verify your install or `cloak audit` to inspect the trail.
+Every tool call your agent makes lands in a hash-chained audit log. The note field never contains secret values.
+
+```
+$ tail -n 2 ~/.local/share/cloak/audit.jsonl
+{"seq":42,"ts":"2026-05-08T19:14:08Z","tool":"tool.proxy_authenticated_http_request","secret":"OPENAI_API_KEY","target":"api.openai.com","result":"ok","peer":{"basename":"cloak-mcp","pid":74221},"prev_hash":"7c8f9a2b…"}
+{"seq":43,"ts":"2026-05-08T19:14:11Z","tool":"tool.sign_request","secret":"AWS_ACCESS_KEY_ID","target":"sts.us-east-1.amazonaws.com","result":"ok","peer":{"basename":"cloak-mcp","pid":74221},"prev_hash":"a1b2c3d4…"}
+```
 
 ## Documentation
 
