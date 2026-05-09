@@ -1,12 +1,47 @@
 # Cloak
 
-> An MCP-native secrets vault for Claude Desktop and Claude Code.
+> An MCP-native secrets vault for Claude Desktop, Claude Code, Cursor, and friends.
 
-Cloak replaces the prevailing anti-pattern of pasting API keys into prompts (or shoving them into `.env` files that LLMs cheerfully read into context) with a hardened local daemon that **never exposes raw secret material to the model**.
+Pasting `OPENAI_API_KEY` into a chat is the new `rm -rf /`. Once the model has it, it's been logged, cached, and possibly trained on. Cloak gives your AI agent the ability to use your secrets without ever seeing them.
 
-Agents call action-shaped MCP tools — `sign_request`, `proxy_authenticated_http_request`, `mint_short_lived_token` — and the daemon performs the privileged operation on the agent's behalf. Reveal is a deliberate, biometric-gated CLI act, not a tool call.
+<p align="center">
+  <img src="docs/cloak-demo.gif" width="720" alt="Cloak demo: add a secret, agent uses it via sign_request, audit log records the action, plaintext never leaves cloakd">
+</p>
 
-This is **v1.0.0**: the load-bearing security invariants are intact, the post-v0.1 work has landed (real AWS SigV4/STS, Linux Secret Service pepper, cross-platform CI matrix, cosign-signed SLSA L3 releases, BIP-39 24-word recovery seed, server-side biometric enforcement, OS-keychain rollback counter mirror), and Windows + rotation handlers are scoped to v1.0.1 / v1.x.
+## Install
+
+```sh
+brew install cloakward/cloak/cloak    # macOS or Linux
+cloak setup                            # interactive wizard, ~60 seconds
+```
+
+The wizard auto-detects Claude Desktop, Claude Code, Cursor, Windsurf, Continue.dev, Zed, and Codex. Open any of them and they'll route through Cloak.
+
+```sh
+cloak add OPENAI_API_KEY               # echo is OFF
+cloak list                             # what's in the vault
+cloak run -- python my_script.py       # inject as env vars, biometric gated
+```
+
+[![CI](https://github.com/cloakward/cloak/actions/workflows/ci.yml/badge.svg)](https://github.com/cloakward/cloak/actions)
+[![SLSA L3](https://slsa.dev/images/gh-badge-level3.svg)](https://github.com/cloakward/cloak/attestations)
+[![cosign verified](https://img.shields.io/badge/cosign-verified-2ea44f?logo=sigstore)](https://github.com/cloakward/cloak/releases)
+[![npm](https://img.shields.io/npm/v/@cloak-ward/mcp.svg?label=%40cloak-ward%2Fmcp)](https://www.npmjs.com/package/@cloak-ward/mcp)
+[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+---
+
+## How it actually works
+
+Three processes, one trust boundary:
+
+- **`cloakd`** (Rust). Owns the vault. libsodium, SQLite WAL, Argon2id keyed mode. Speaks to the network only when an outbound HTTP call passes the policy.
+- **`cloak`** CLI. The only path that ever returns plaintext. Touch ID on macOS, polkit on Linux. Over SSH it refuses by default.
+- **`cloak-mcp`** (Bun-compiled). The MCP server your agent talks to. Six action-shaped tools, none of which return plaintext: `sign_request`, `proxy_authenticated_http_request`, `mint_short_lived_token`, `list_secret_names`, `get_secret_metadata`, `query_audit`.
+
+There is no `read_secret` tool. The agent says "POST to api.openai.com" and the daemon does the privileged operation; the agent only sees the response. A prompt injection that tries calling `proxy_http` with a malicious URL gets blocked by `allowed_hosts` before any decryption happens.
+
+This is **v1.0.0**. Post-v0.1 work has landed: real AWS SigV4/STS, Linux Secret Service pepper, cross-platform CI, cosign keyless + SLSA L3, BIP-39 recovery seed, server-side biometric, OS-keychain rollback counter mirror, Apple notarization. Windows is v1.0.1.
 
 ---
 
