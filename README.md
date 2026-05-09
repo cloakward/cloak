@@ -18,9 +18,19 @@ cloak setup                            # interactive wizard, ~60 seconds
 The wizard auto-detects Claude Desktop, Claude Code, Cursor, Windsurf, Continue.dev, Zed, and Codex. Open any of them and they'll route through Cloak.
 
 ```sh
-cloak add OPENAI_API_KEY               # echo is OFF
+cloak add OPENAI_API_KEY               # input is hidden as you type
 cloak list                             # what's in the vault
 cloak run -- python my_script.py       # inject as env vars, biometric gated
+```
+
+Prefer to build from source instead of using the signed binaries? Same flow, different first step:
+
+```sh
+git clone https://github.com/cloakward/cloak && cd cloak
+brew install libsodium bun rust
+cargo build --release --workspace
+cd packages/cloak-mcp && bun install && bun build src/server.ts --compile --outfile dist/cloak-mcp && cd ../..
+./target/release/cloak setup
 ```
 
 [![CI](https://github.com/cloakward/cloak/actions/workflows/ci.yml/badge.svg)](https://github.com/cloakward/cloak/actions)
@@ -240,7 +250,25 @@ See `docs/THREAT_MODEL.md` for the full adversary model, `docs/IPC_WIRE.md` for 
 
 ## A note on macOS Gatekeeper
 
-v1.0.0 binaries are signed with a Developer ID Application certificate, notarized by Apple, and stapled — Gatekeeper will accept them on first launch with no `xattr` dance. Every release is also cosign-signed with SLSA L3 provenance, which lets you verify the binary is the exact artifact CI built. See `docs/QUICKSTART.md` for the full verification walkthrough.
+v1.0.0 binaries are signed with a Developer ID Application certificate, notarized by Apple, and stapled. Gatekeeper accepts them on first launch with no `xattr` dance. Every release is also cosign-signed with SLSA L3 provenance, which lets you verify the binary is the exact artifact CI built. See `docs/QUICKSTART.md` for the full verification walkthrough.
+
+## FAQ
+
+**Why does macOS say "Varun Menon will be running in your background"?**
+
+That's me. Cloak v1.0 is signed with my individual Apple Developer ID, so any macOS surface that asks "do you trust this developer?" pulls my legal name from the cert. Apple Developer Program org accounts (with a company name on the cert) require a D-U-N-S number and a registered legal entity, which is a v1.0.1 deliverable rather than a v1.0 blocker. If you'd rather not see my name anywhere, the build-from-source path above produces ad-hoc-signed binaries with no developer identity attached.
+
+**Why is `cloak add` not showing what I type?**
+
+By design. Same pattern as `sudo` or `ssh-keygen`: echo is off so a screen recorder or shoulder surfer doesn't catch the value as you paste. Just type or paste and press enter. The CLI prints a one-liner reminder above the prompt to make this less surprising.
+
+**Why does it ask for a passphrase instead of just Touch ID?**
+
+The passphrase is your real cryptographic secret. It feeds Argon2id alongside the OS-keychain pepper to derive the master key. Touch ID is a presence check on top of that, not a key by itself. Once the daemon is unlocked (one passphrase prompt per session), every subsequent reveal is gated by Touch ID with no passphrase needed. If you want fully-Touch-ID-gated unlock at the cost of trusting the macOS Keychain to hold your unlock material, that's a v1.0.1 opt-in.
+
+**Can I run it without trusting your binaries at all?**
+
+Yes. Clone the repo, `cargo build --release --workspace`, and use the `target/release/` binaries directly. Cosign keyless signatures and SLSA L3 provenance also let you verify the published binaries match the exact CI run that built them.
 
 ## License
 

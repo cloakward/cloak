@@ -108,16 +108,24 @@ pub fn run(ctx: &Context, opts: SetupOptions) -> Result<u8> {
     }
 
     println!();
-    println!("Setup complete. Try `cloak list` or `cloak doctor`.");
+    println!("Setup complete.");
+    println!();
+    println!("What's next:");
+    println!("  cloak add OPENAI_API_KEY    add a secret (input is hidden as you type)");
+    println!("  cloak list                  see what's in the vault");
+    println!("  cloak doctor                verify everything is wired up");
+    println!();
+    println!("Open Claude Desktop / Cursor / any MCP client you registered,");
+    println!("and try asking it to call an API. The agent will route through");
+    println!("Cloak; the model never sees the plaintext.");
     if let Some(o) = policy_outcome {
         match o {
             PolicyWriteOutcome::Wrote(p) => {
                 println!();
-                println!("Note: I wrote a default-deny policy at {}.", p.display());
-                println!("      Edit it to allow specific secrets/hosts before");
-                println!("      Claude (or any MCP client) can call protected tools.");
-                println!("      See `scripts/policy.example.toml` in the Cloak repo");
-                println!("      for a worked example.");
+                println!("Heads up: I wrote a default-deny policy at {}.", p.display());
+                println!("Edit it to allow specific secrets/hosts before any MCP tool");
+                println!("call will succeed. `scripts/policy.example.toml` is a worked");
+                println!("example you can copy from.");
             }
             PolicyWriteOutcome::AlreadyExists(_) => {}
         }
@@ -447,14 +455,30 @@ fn install_and_start_daemon(theme: &ColorfulTheme, opts: &SetupOptions) -> Resul
     let install = if opts.non_interactive {
         true
     } else {
+        println!();
+        println!("[3/5] background daemon (cloakd)");
+        println!();
+        println!("      cloakd holds the unlocked vault state in memory and serves");
+        println!("      MCP requests. You can run it on demand (just run `cloakd &`),");
+        println!("      or install it as a background service that auto-starts on login.");
+        println!();
+        if cfg!(target_os = "macos") {
+            println!("      Heads up: if you install the background service, macOS will");
+            println!("      show a notification like \"<developer name> will be running");
+            println!("      in your background\". That's normal. The signed binaries are");
+            println!("      what you just installed via brew, and you can review the");
+            println!("      service in System Settings > General > Login Items.");
+            println!();
+        }
         Confirm::with_theme(theme)
-            .with_prompt("[3/5] install the cloakd background daemon now?")
-            .default(true)
+            .with_prompt("install cloakd as a background service now?")
+            .default(false)
             .interact()
-            .unwrap_or(true)
+            .unwrap_or(false)
     };
     if !install {
-        println!("      skipped — you can run `cloak daemon install` later");
+        println!("      skipped. Start cloakd manually with `cloakd &` when you need it,");
+        println!("      or run `cloak daemon install` later to enable auto-start.");
         return Ok(());
     }
     let flavour = daemonctl::DaemonFlavour::auto()?;

@@ -31,6 +31,7 @@ pub fn run(ctx: &Context, name: &str, kind: SecretKind, tags: Vec<String>) -> Re
         }
         buf
     } else {
+        eprintln!("(input is hidden as you type. paste or type, then press enter.)");
         rpassword::prompt_password("value: ")?
     };
     let value: Secret<String> = Secret::new(raw_value);
