@@ -2,7 +2,7 @@
 
 > Cloak is beta software. Source builds are the recommended install path
 > until a production release tag has passed the full release gate. Windows
-> is deferred to v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)).
+> is not part of the current release artifacts yet ([issue #3](https://github.com/cloakward/cloak/issues/3)).
 > On Linux the desktop pepper uses freedesktop Secret Service and `cloak show`
 > gates the reveal on polkit (`dev.cloak.show-secret`; install
 > `scripts/polkit/dev.cloak.policy` under `/usr/share/polkit-1/actions/`).

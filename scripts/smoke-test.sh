@@ -53,22 +53,32 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Building release binaries"
-cargo build --release --workspace >/dev/null
+if [[ -n "${CLOAK_SMOKE_BIN_DIR:-}" ]]; then
+  echo "==> Using prebuilt release binaries from $CLOAK_SMOKE_BIN_DIR"
+  CLOAK="$CLOAK_SMOKE_BIN_DIR/cloak"
+  CLOAKD="$CLOAK_SMOKE_BIN_DIR/cloakd"
+  MCP="$CLOAK_SMOKE_BIN_DIR/cloak-mcp"
+else
+  echo "==> Building release binaries"
+  cargo build --release --workspace >/dev/null
 
-CLOAK="$REPO_ROOT/target/release/cloak"
-CLOAKD="$REPO_ROOT/target/release/cloakd"
+  CLOAK="$REPO_ROOT/target/release/cloak"
+  CLOAKD="$REPO_ROOT/target/release/cloakd"
+
+  echo "==> Building cloak-mcp single binary"
+  (
+    cd packages/cloak-mcp
+    bun install >/dev/null 2>&1
+    bun build src/server.ts --compile --outfile dist/cloak-mcp >/dev/null
+  )
+  MCP="$REPO_ROOT/packages/cloak-mcp/dist/cloak-mcp"
+fi
+
 test -x "$CLOAK"
 test -x "$CLOAKD"
-
-echo "==> Building cloak-mcp single binary"
-(
-  cd packages/cloak-mcp
-  bun install >/dev/null 2>&1
-  bun build src/server.ts --compile --outfile dist/cloak-mcp >/dev/null
-)
-MCP="$REPO_ROOT/packages/cloak-mcp/dist/cloak-mcp"
-test -x "$MCP"
+if [[ "${CLOAK_SMOKE_SKIP_MCP:-0}" != "1" ]]; then
+  test -x "$MCP"
+fi
 
 echo "==> Setting up permissive policy at $HOME/.config/cloak/policy.toml"
 mkdir -p "$HOME/.config/cloak"
@@ -132,8 +142,13 @@ echo "==> cloak daemon-unlock (push passphrase to daemon over IPC)"
 # UDS path uses the host bun runtime, not the self-extracted one) and
 # log which path was used.
 echo "==> cloak-mcp --self-test"
-if CLOAK_SOCK="$SOCK_DIR/cloakd.sock" "$MCP" --self-test; then
+if [[ "${CLOAK_SMOKE_SKIP_MCP:-0}" == "1" ]]; then
+  echo "    skipped"
+elif CLOAK_SOCK="$SOCK_DIR/cloakd.sock" "$MCP" --self-test; then
   echo "    (compiled binary path)"
+elif [[ "${CLOAK_SMOKE_STRICT_MCP:-0}" == "1" ]]; then
+  echo "FAIL: cloak-mcp --self-test failed for compiled binary"
+  exit 1
 elif [[ "$(uname -s)" == "Linux" ]]; then
   echo "    compiled binary failed on Linux; trying bun run directly"
   CLOAK_SOCK="$SOCK_DIR/cloakd.sock" bun run "$REPO_ROOT/packages/cloak-mcp/src/server.ts" --self-test

@@ -1,0 +1,149 @@
+name: release-install
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Release tag to install-test (e.g. v1.0.1-rc1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release-install:
+    name: release install (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            target: aarch64-apple-darwin
+            platform: macos
+            skip_mcp: "0"
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            platform: macos
+            skip_mcp: "0"
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            skip_mcp: "0"
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            skip_mcp: "1"
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            skip_mcp: "1"
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install libsodium (macOS)
+        if: matrix.platform == 'macos'
+        run: brew install libsodium
+
+      - name: Install libsodium (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev pkg-config
+
+      - name: Download and extract release tarball
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          stage="cloak-${version}-${TARGET}"
+          mkdir -p "${RUNNER_TEMP}/release"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "${stage}.tar.gz*" \
+            --dir "${RUNNER_TEMP}/release"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "sha256sums.txt*" \
+            --dir "${RUNNER_TEMP}/release"
+          cd "${RUNNER_TEMP}/release"
+          expected="$(awk -v f="${stage}.tar.gz" '$2 == f { print $1 }' sha256sums.txt)"
+          if [ -z "$expected" ]; then
+            echo "::error::sha256sums.txt has no entry for ${stage}.tar.gz"
+            exit 1
+          fi
+          actual="$(openssl dgst -sha256 -r "${stage}.tar.gz" | awk '{ print $1 }')"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::sha256 mismatch for ${stage}.tar.gz"
+            echo "expected: $expected"
+            echo "actual:   $actual"
+            exit 1
+          fi
+          tar -C "${RUNNER_TEMP}/release" -xzf "${RUNNER_TEMP}/release/${stage}.tar.gz"
+          echo "bin_dir=${RUNNER_TEMP}/release/${stage}/bin" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: Verify cosign signatures
+        env:
+          TAG: ${{ inputs.ref }}
+          TARGET: ${{ matrix.target }}
+          COSIGN_EXPERIMENTAL: "1"
+          EXPECTED_ISSUER: "https://token.actions.githubusercontent.com"
+          EXPECTED_IDENTITY_REGEX: "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ inputs.ref }}$"
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          stage="cloak-${version}-${TARGET}"
+          cd "${RUNNER_TEMP}/release"
+          for f in "${stage}.tar.gz" "sha256sums.txt"; do
+            cosign verify-blob \
+              --certificate "${f}.cert" \
+              --signature "${f}.sig" \
+              --certificate-oidc-issuer "$EXPECTED_ISSUER" \
+              --certificate-identity-regexp "$EXPECTED_IDENTITY_REGEX" \
+              "$f"
+          done
+
+      - name: Verify macOS code signatures
+        if: matrix.platform == 'macos'
+        env:
+          BIN_DIR: ${{ steps.release.outputs.bin_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in "$BIN_DIR"/cloak "$BIN_DIR"/cloakd "$BIN_DIR"/cloak-mcp; do
+            test -x "$bin"
+            codesign --verify --strict --verbose=2 "$bin"
+          done
+
+      - name: Check release binary versions
+        env:
+          BIN_DIR: ${{ steps.release.outputs.bin_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BIN_DIR/cloak" --version
+          "$BIN_DIR/cloakd" --version
+
+      - name: Run release artifact smoke test
+        env:
+          CLOAK_SMOKE_BIN_DIR: ${{ steps.release.outputs.bin_dir }}
+          CLOAK_SMOKE_SKIP_MCP: ${{ matrix.skip_mcp }}
+          CLOAK_SMOKE_STRICT_MCP: "1"
+        run: ./scripts/smoke-test.sh

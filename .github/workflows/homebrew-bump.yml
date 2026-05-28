@@ -219,7 +219,7 @@ jobs:
 
       - name: Checkout cloakward/homebrew-cloak
         if: steps.cred.outputs.skip == 'false'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: cloakward/homebrew-cloak
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -243,7 +243,7 @@ jobs:
           # Always branch from the freshest origin/main. If a previous
           # release's bump PR was merged into main between the moment
           # this workflow started and the moment it pushes, branching
-          # from the local checkout's HEAD (which actions/checkout@v4
+          # from the local checkout's HEAD (which actions/checkout@v6
           # fetched at job start, depth=1) leaves the new branch on a
           # stale main and the resulting PR conflicts as add/add when
           # the older formula is already on main. Re-fetch + branch

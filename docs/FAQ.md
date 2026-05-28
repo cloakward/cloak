@@ -2,7 +2,7 @@
 
 ### Why does macOS say "Varun Menon will be running in your background"?
 
-That's me. Cloak v1.0 is signed with my individual Apple Developer ID, so any macOS surface that asks "do you trust this developer?" pulls my legal name from the cert. Apple Developer Program organization accounts (with a company name on the cert) require a D-U-N-S number and a registered legal entity, queued for v1.0.1.
+That's me. Cloak v1.0 is signed with my individual Apple Developer ID, so any macOS surface that asks "do you trust this developer?" pulls my legal name from the cert. Apple Developer Program organization accounts can show a company or product-adjacent legal name, but they require a D-U-N-S number and a registered legal entity. Until Cloak has that organization account, the personal name on signed/notarized macOS downloads is expected.
 
 If you'd rather not see my name, build from source. Self-built binaries are ad-hoc-signed and have no developer identity attached.
 
@@ -49,7 +49,7 @@ If your client supports MCP and isn't on the list, point it at the `cloak-mcp` b
 
 ### Is Windows supported?
 
-Not in v1.0. Windows + SignPath OV signing is v1.0.1 work. Track [`#2`](https://github.com/cloakward/cloak/issues/2).
+Not in the current release artifacts. Windows support and SignPath OV signing are tracked in [`#2`](https://github.com/cloakward/cloak/issues/2).
 
 ### How do I uninstall?
 

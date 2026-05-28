@@ -44,10 +44,10 @@ jobs:
     name: ${{ inputs.action }} ${{ inputs.tag }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Run dist-tag op
@@ -65,7 +65,7 @@ jobs:
           case "$ACTION" in
             add)
               if [ -z "${VERSION:-}" ]; then
-                echo "::error::version input is required for `add`"
+              echo "::error::version input is required for action=add"
                 exit 1
               fi
               echo "==> npm dist-tag add @cloak-ward/mcp@${VERSION} ${TAG}"

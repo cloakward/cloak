@@ -24,6 +24,7 @@ Cloak is beta software. Source builds are the recommended path until the first p
 Current release notes:
 
 - Stable production tags are hard-gated on macOS Developer ID signing and Apple notarization secrets. If those secrets are missing, the macOS release rows fail instead of silently publishing unsigned artifacts.
+- macOS trust prompts for signed downloads may show the individual Apple Developer ID name "Varun Menon". That is expected for the current personal developer account; a product/company signer name requires an Apple organization account.
 - Prerelease/fork preview tags may still be unsigned. Treat them as test builds and expect Gatekeeper friction on macOS.
 - Release tags built by the current workflow sign and SLSA-attest the tarballs, `sha256sums.txt`, and Claude Desktop `.dxt` packages. Older preview `.dxt` assets may not have `.sig` / `.cert` files or SLSA subjects; do not treat those as verified.
 - Windows support and production installer polish are still pending.

@@ -22,7 +22,7 @@
      Linux glibc x86_64 (`x86_64-unknown-linux-gnu`),
      Linux musl x86_64 (`x86_64-unknown-linux-musl`),
      Linux glibc arm64 (`aarch64-unknown-linux-gnu`).
-     Windows is deferred to v1.0.1 — see
+     Windows is not part of the current release artifacts — see
      [issue #2](https://github.com/cloakward/cloak/issues/2).
    - Tarballs each row as `cloak-X.Y.Z-<target>.tar.gz`.
    - Builds Claude Desktop `.dxt` packages for platforms where the
@@ -46,13 +46,19 @@
    draft, click `Publish release` in the GitHub UI.
 6. **Downstream taps and registries.** Tagging triggers
    `homebrew-bump.yml` (Formula PR to `homebrew-cloak`) and
-   `npm-publish.yml` (`@cloak-ward/mcp` to npm via trusted publishing).
+   `npm-publish.yml` (`@cloak-ward/mcp` to npm via trusted publishing,
+   with the repo `NPM_TOKEN` kept as an explicit fallback).
 7. **Docker.** `docker-push.yml` builds a multi-arch (`linux/amd64`,
    `linux/arm64`) `cloakd` image and pushes to GHCR. `:X.Y.Z` and
    `:X.Y` tags are always pushed; `:latest` is appended only when the
    tag name is production-shaped (no `-rc`, `-beta`, `-alpha`, `-pre`,
    or `-dev` suffix), so a tag like `v0.9.0-rc1` does not advance
    `:latest` past production.
+8. **Install-test a published release.** Run `release-install.yml` with
+   the release tag. It downloads the published tarballs, checks
+   `sha256sums.txt`, verifies the cosign signatures, validates macOS code
+   signatures, and executes the same daemon/CLI/MCP smoke path from the
+   shipped binaries on macOS arm64/x64 and Linux x64/arm64 runners.
 
 Production tags are tags that do not match `*-rc*`, `*-beta*`,
 `*-alpha*`, `*-pre*`, or `*-dev*`. Production macOS rows must be signed
@@ -141,7 +147,7 @@ combo (more robust, no 2FA prompts, can be revoked individually):
 Some inputs are intentionally still version-tagged rather than pinned by
 digest/SHA:
 
-- GitHub Actions are pinned to major release tags such as `actions/checkout@v4`.
+- GitHub Actions are pinned to major release tags such as `actions/checkout@v6`.
 - The Rust toolchain follows `rust-toolchain.toml` (`stable` today).
 - The Dockerfile uses Debian/distroless tags rather than image digests.
 - `libsodium-sys-stable` is built with its `fetch-latest` feature, so the

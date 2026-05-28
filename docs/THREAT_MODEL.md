@@ -37,7 +37,7 @@
 - **Macros / shell aliases that wrap `cloak show`.** A user who pipes `cloak show` to a clipboard manager or a script that exfiltrates is opting into that risk.
 - **The model's *output* containing secret material the user pastes back in.** If the user pastes a secret into a Claude prompt, Cloak cannot help. Cloak's value is making that paste unnecessary.
 - **macOS Gatekeeper notarization.** Production macOS release tags are hard-gated on Developer ID signing and Apple notarization in `release.yml`; prerelease/fork preview builds may be unsigned and can require `xattr -d com.apple.quarantine`. Bare Mach-O command-line tools cannot be stapled in-place, so Gatekeeper may fetch the notary ticket online on first launch. Cosign keyless + SLSA L3 provenance remain the canonical "did CI build these exact bytes" check (`docs/RELEASE.md`).
-- **Cross-platform parity.** The beta targets macOS + Linux. Windows is deferred to v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)). On Linux the keychain pepper uses freedesktop Secret Service and the user-presence gate is enforced via polkit (`dev.cloak.show-secret`, default policy `auth_self_keep`); when no polkit agent is registered, `cloak show` fails closed unless the user passes `--no-biometric`.
+- **Cross-platform parity.** The beta targets macOS + Linux. Windows is not part of the current release artifacts yet ([issue #3](https://github.com/cloakward/cloak/issues/3)). On Linux the keychain pepper uses freedesktop Secret Service and the user-presence gate is enforced via polkit (`dev.cloak.show-secret`, default policy `auth_self_keep`); when no polkit agent is registered, `cloak show` fails closed unless the user passes `--no-biometric`.
 - **Linux desktop pepper via Secret Service.** On Linux, Cloak stores the pepper as a libsecret item in the user's default (or `login`) collection. A malicious local app running as the same UID can call `org.freedesktop.secrets` and read the item once the keyring is unlocked; we do not — and cannot, without a separate broker process with its own ACL — distinguish a request originating from `cloakd` from one originating from any other process owned by the same user. Headless / SSH sessions where no keyring agent is running fall back to `CLOAK_PEPPER_FILE` (file mode 0600 enforced).
 - **Operational compromise of the publishing pipeline.** Releases are signed by `release.yml` running with the GitHub Actions OIDC identity; a compromise of that workflow's signing identity would let an attacker mint a "valid" release. The verification step (`docs/RELEASE.md`) binds the signature to a specific workflow path at a specific tag, so substituting an alternative signer would fail `cosign verify-blob`.
 - **Side-channels: cache timing, EM, power.** Argon2id has timing-safety guarantees; everything else is best-effort.
@@ -127,11 +127,11 @@ feature.
 
 - No certificate pinning on outbound HTTP.
 - No swap-disable / mlock on `cloakd`.
-- Production macOS release tags are Developer ID signed and submitted to Apple notarization; prerelease/fork previews may be unsigned. SignPath OV signing on Windows is still deferred (Windows itself ships in v1.0.1). Cosign keyless + SLSA L3 provenance cover tarballs and `.dxt` packages built by the current release workflow.
+- Production macOS release tags are Developer ID signed and submitted to Apple notarization; prerelease/fork previews may be unsigned. SignPath OV signing on Windows is still deferred. Cosign keyless + SLSA L3 provenance cover tarballs and `.dxt` packages built by the current release workflow.
 - No fuzz-tested IPC parser (1M-iteration target deferred).
 - No formal verification of the audit hash chain.
 - Linux Secret Service has no per-process ACL — see "What Cloak does not defend against" above.
-- Windows support is deferred to v1.0.1; do not run v1.0.0 on Windows in production.
+- Windows support is deferred; do not run Cloak on Windows in production yet.
 - v1.0 mirrors the counter into the OS keychain; read-side rollback is now detected on every `Vault::open`. With `CLOAK_PEPPER_FILE` set the mirror is written to a 0600 sibling file (`<vault_dir>/rollback-counter`) instead of the keychain — an attacker who can roll back `vault.cloak` can also roll back the counter file in lockstep, defeating the detection. The OS keychain path provides the real out-of-band guarantee; the file fallback is for environments where the keychain isn't available, with documented weaker guarantees.
 
 Session tokens use constant-time comparison
