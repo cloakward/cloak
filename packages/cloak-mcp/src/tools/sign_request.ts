@@ -1,15 +1,22 @@
 import { z } from "zod";
 import { request } from "../ipc.ts";
 import type { CloakTool, ToolResult } from "./types.ts";
+import {
+  base64Schema,
+  headersSchema,
+  httpMethodSchema,
+  httpUrlSchema,
+  secretNameSchema,
+} from "./validation.ts";
 
 const argsSchema = z
   .object({
-    secret_name: z.string().min(1),
+    secret_name: secretNameSchema,
     scheme: z.enum(["aws-sigv4", "hmac-sha256"]),
-    method: z.string().min(1),
-    url: z.string().min(1),
-    headers: z.record(z.string()).optional(),
-    body_b64: z.string().optional(),
+    method: httpMethodSchema,
+    url: httpUrlSchema,
+    headers: headersSchema.optional(),
+    body_b64: base64Schema.optional(),
   })
   .strict();
 
@@ -17,16 +24,21 @@ const inputSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
   properties: {
-    secret_name: { type: "string", minLength: 1, description: "Name of the stored secret to use as signing key." },
+    secret_name: { type: "string", minLength: 1, maxLength: 256, description: "Name of the stored secret to use as signing key." },
     scheme: { type: "string", enum: ["aws-sigv4", "hmac-sha256"], description: "Signing scheme." },
-    method: { type: "string", minLength: 1, description: "HTTP method, e.g. GET, POST." },
-    url: { type: "string", minLength: 1, description: "Full request URL including query string." },
+    method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], description: "HTTP method." },
+    url: { type: "string", format: "uri", pattern: "^https?://", description: "Full http(s) request URL including query string." },
     headers: {
       type: "object",
-      additionalProperties: { type: "string" },
+      propertyNames: { pattern: "^[A-Za-z0-9!#$%&'*+\\-.^_`|~]+$" },
+      additionalProperties: { type: "string", maxLength: 8192, not: { pattern: "[\\r\\n]" } },
       description: "Optional request headers (case-insensitive keys handled by daemon).",
     },
-    body_b64: { type: "string", description: "Optional base64-encoded request body." },
+    body_b64: {
+      type: "string",
+      pattern: "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+      description: "Optional standard base64-encoded request body.",
+    },
   },
   required: ["secret_name", "scheme", "method", "url"],
   additionalProperties: false,

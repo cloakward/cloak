@@ -158,7 +158,7 @@ pub fn run_verify(ctx: &Context) -> Result<()> {
 }
 
 fn read_mnemonic_input() -> Result<String> {
-    if let Ok(s) = std::env::var("CLOAK_MNEMONIC") {
+    if let Some(s) = crate::test_mode::env_var("CLOAK_MNEMONIC")? {
         return Ok(s);
     }
     let stdin = io::stdin();

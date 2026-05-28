@@ -1,9 +1,9 @@
 //! End-to-end tests for the `cloak` binary.
 //!
 //! These run the compiled `cloak` binary via [`assert_cmd`] against a
-//! tempdir vault. The `CLOAK_PASSPHRASE` env var bypasses the
-//! interactive passphrase prompt — it's a test-only escape hatch
-//! documented in [`cloak_cli::prompt`]. We never go through Touch ID;
+//! tempdir vault. `CLOAK_UNSAFE_TEST_MODE=1` enables test-only env
+//! overrides like `CLOAK_PASSPHRASE`; normal CLI use must not honor
+//! those variables silently. We never go through Touch ID;
 //! `--no-biometric` short-circuits that.
 
 use assert_cmd::Command;
@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 const TEST_PASSPHRASE: &str = "REDACTED-test-passphrase";
+const TEST_MODE_ENV: &str = "CLOAK_UNSAFE_TEST_MODE";
 
 /// Build a `cloak` command rooted at a fresh tempdir vault. The caller
 /// owns the `TempDir` so the vault file is cleaned up at end-of-test.
@@ -29,6 +30,7 @@ fn cloak(dir: &TempDir) -> (Command, PathBuf) {
     let pepper = dir.path().join("pepper");
     let mut cmd = Command::cargo_bin("cloak").expect("binary built");
     cmd.arg("--vault").arg(&path).arg("--no-biometric");
+    cmd.env(TEST_MODE_ENV, "1");
     cmd.env("CLOAK_PASSPHRASE", TEST_PASSPHRASE);
     cmd.env("CLOAK_PEPPER_FILE", &pepper);
     // Tell tracing-subscriber to be quiet during tests.
@@ -277,6 +279,131 @@ fn add_duplicate_fails() {
         .stderr(predicate::str::contains("already exists"));
 }
 
+#[test]
+fn test_only_passphrase_env_requires_unsafe_guard() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.cloak");
+    let pepper = dir.path().join("pepper");
+    let mut cmd = Command::cargo_bin("cloak").unwrap();
+    cmd.arg("--vault")
+        .arg(&path)
+        .arg("--no-biometric")
+        .env("CLOAK_PASSPHRASE", TEST_PASSPHRASE)
+        .env("CLOAK_PEPPER_FILE", &pepper)
+        .env("RUST_LOG", "off")
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(TEST_MODE_ENV));
+}
+
+// -------------------------------------------------------------------------
+// .env import / export
+// -------------------------------------------------------------------------
+
+#[test]
+fn dotenv_import_export_round_trips_escaped_values() {
+    let dir = TempDir::new().unwrap();
+    let (mut init, _) = cloak(&dir);
+    init.arg("init").assert().success();
+
+    let input = dir.path().join("input.env");
+    std::fs::write(
+        &input,
+        "QUOTE=\"say \\\"hello\\\"\"\nBACKSLASH=\"C:\\\\tmp\\\\cloak\"\nMULTILINE=\"line one\\nline two\"\n",
+    )
+    .unwrap();
+
+    let (mut import, _) = cloak(&dir);
+    import.arg("import").arg(&input).assert().success();
+
+    let output = dir.path().join("roundtrip.env");
+    let (mut export, _) = cloak(&dir);
+    export
+        .arg("export")
+        .arg(&output)
+        .arg("--force")
+        .assert()
+        .success();
+    let exported = std::fs::read_to_string(output).unwrap();
+    assert!(exported.contains("QUOTE=\"say \\\"hello\\\"\"\n"));
+    assert!(exported.contains("BACKSLASH=\"C:\\\\tmp\\\\cloak\"\n"));
+    assert!(exported.contains("MULTILINE=\"line one\\nline two\"\n"));
+}
+
+#[test]
+fn import_replace_requires_confirmation_before_deleting() {
+    let dir = TempDir::new().unwrap();
+    let (mut init, _) = cloak(&dir);
+    init.arg("init").assert().success();
+
+    let (mut add_keep, _) = cloak(&dir);
+    add_keep
+        .arg("add")
+        .arg("KEEP")
+        .write_stdin("old\n")
+        .assert()
+        .success();
+    let (mut add_delete, _) = cloak(&dir);
+    add_delete
+        .arg("add")
+        .arg("DELETE_ME")
+        .write_stdin("gone\n")
+        .assert()
+        .success();
+
+    let input = dir.path().join("replace.env");
+    std::fs::write(&input, "KEEP=new\n").unwrap();
+
+    let (mut replace, _) = cloak(&dir);
+    replace
+        .arg("import")
+        .arg(&input)
+        .arg("--replace")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cancelled"));
+
+    let (mut list, _) = cloak(&dir);
+    list.arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DELETE_ME"));
+    let (mut show_keep, _) = cloak(&dir);
+    show_keep
+        .arg("show")
+        .arg("KEEP")
+        .arg("--allow-redirect")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("old"));
+
+    let (mut replace_yes, _) = cloak(&dir);
+    replace_yes
+        .arg("import")
+        .arg(&input)
+        .arg("--replace")
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 removed"));
+
+    let (mut list_after, _) = cloak(&dir);
+    list_after
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DELETE_ME").not());
+    let (mut show_after, _) = cloak(&dir);
+    show_after
+        .arg("show")
+        .arg("KEEP")
+        .arg("--allow-redirect")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("new"));
+}
+
 // -------------------------------------------------------------------------
 // BIP-39 recovery seed
 // -------------------------------------------------------------------------
@@ -396,6 +523,7 @@ fn restore_recovers_after_passphrase_loss() {
         .arg("--vault")
         .arg(&path)
         .arg("--no-biometric")
+        .env(TEST_MODE_ENV, "1")
         .env("CLOAK_PASSPHRASE", "totally-different-pass")
         .env("CLOAK_PEPPER_FILE", &pepper)
         .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
@@ -412,6 +540,7 @@ fn restore_recovers_after_passphrase_loss() {
         .arg("--vault")
         .arg(&path)
         .arg("--no-biometric")
+        .env(TEST_MODE_ENV, "1")
         .env("CLOAK_PASSPHRASE", "fresh-recovery-pass")
         .env("CLOAK_MNEMONIC", &mnemonic)
         .env("CLOAK_PEPPER_FILE", &pepper)
@@ -428,6 +557,7 @@ fn restore_recovers_after_passphrase_loss() {
     show.arg("--vault")
         .arg(&path)
         .arg("--no-biometric")
+        .env(TEST_MODE_ENV, "1")
         .env("CLOAK_PASSPHRASE", "fresh-recovery-pass")
         .env("CLOAK_PEPPER_FILE", &pepper)
         .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
@@ -477,6 +607,7 @@ fn restore_writes_audit_entry() {
         .arg("--vault")
         .arg(&path)
         .arg("--no-biometric")
+        .env(TEST_MODE_ENV, "1")
         .env("CLOAK_PASSPHRASE", "fresh-pass")
         .env("CLOAK_MNEMONIC", &mnemonic)
         .env("CLOAK_PEPPER_FILE", &pepper)

@@ -104,10 +104,9 @@ async fn rpc(stream: &mut UnixStream, req: Request) -> Response {
 /// via a per-test RAII guard) avoids a race where two tests running on
 /// parallel threads each save/restore the override and one drop's
 /// `None` lands in the middle of the other's `vault.show` call. The
-/// stub is "deny" so that any `vault.show` without an explicit
-/// `skip_biometric: true` opt-out is rejected by the server-side
-/// gate — i.e., a same-UID attacker connecting to the daemon socket
-/// directly cannot bypass the prompt by lying in the payload.
+/// stub is "deny" so that every `vault.show` is rejected by the
+/// server-side gate — i.e., a same-UID attacker connecting to the daemon
+/// socket directly cannot bypass the prompt by lying in the payload.
 fn install_deny_authenticator_once() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -258,9 +257,7 @@ async fn ipc_e2e_handshake_and_basic_flow() {
     //    directly (which is exactly what this test is doing — there
     //    is no `cloak` CLI in the loop) cannot bypass the prompt by
     //    supplying any "user already approved" assertion in the
-    //    payload. The daemon ignores client-supplied biometric flags;
-    //    only the explicit operator opt-out (`skip_biometric: true`)
-    //    is honoured below.
+    //    payload. The daemon ignores all client-supplied biometric flags.
     let resp = rpc(
         &mut stream,
         Request {
@@ -299,10 +296,7 @@ async fn ipc_e2e_handshake_and_basic_flow() {
         resp.error
     );
 
-    // 9. vault.show with the explicit operator opt-out
-    //    (`skip_biometric: true`) bypasses the prompt and returns the
-    //    value. This is the documented headless-context escape hatch
-    //    forwarded by `cloak --no-biometric show NAME`.
+    // 9. A legacy `skip_biometric: true` field must also be ignored.
     let resp = rpc(
         &mut stream,
         Request {
@@ -313,8 +307,17 @@ async fn ipc_e2e_handshake_and_basic_flow() {
         },
     )
     .await;
-    assert!(resp.error.is_none(), "show: {:?}", resp.error);
-    assert_eq!(resp.result.unwrap()["value"], json!("ghp_redacted_test"));
+    assert!(
+        resp.result.is_none(),
+        "show leaked plaintext: {:?}",
+        resp.result
+    );
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("biometric-failed"),
+        "client-supplied skip_biometric must be ignored by the daemon, got {:?}",
+        resp.error
+    );
 
     // 10. Bogus token → session-expired.
     let resp = rpc(
@@ -412,13 +415,11 @@ async fn ipc_e2e_mcp_peer_cannot_call_cli_only_methods() {
 /// the daemon trusted a CLI-side `biometric_ok: true` flag and would
 /// have returned the plaintext. v1.0 fires the OS-level prompt
 /// **server-side** in `cloakd` itself and ignores any client-supplied
-/// biometric assertion: the only escape hatch is the explicit
-/// `skip_biometric: true` opt-out for documented headless contexts.
+/// biometric assertion.
 ///
 /// We install an "always deny" biometric stub so the test asserts the
 /// server-side gate without popping a real Touch ID dialog. With the
-/// stub installed, any `vault.show` that is NOT explicitly opted-out
-/// must fail with `biometric-failed`.
+/// stub installed, every `vault.show` must fail with `biometric-failed`.
 #[tokio::test]
 async fn ipc_e2e_same_uid_attacker_cannot_bypass_biometric() {
     install_deny_authenticator_once();
@@ -541,9 +542,8 @@ async fn ipc_e2e_same_uid_attacker_cannot_bypass_biometric() {
         );
     }
 
-    // ---- Sanity: the explicit operator opt-out (`skip_biometric`)
-    //      DOES bypass the prompt — that's the documented headless
-    //      escape hatch forwarded by `cloak --no-biometric show`.
+    // ---- Regression: the legacy `skip_biometric` field must not
+    //      bypass the daemon-side prompt.
     let resp = rpc(
         &mut stream,
         Request {
@@ -555,11 +555,16 @@ async fn ipc_e2e_same_uid_attacker_cannot_bypass_biometric() {
     )
     .await;
     assert!(
-        resp.error.is_none(),
+        resp.result.is_none(),
+        "skip_biometric leaked plaintext: {:?}",
+        resp.result
+    );
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("biometric-failed"),
         "skip_biometric path: {:?}",
         resp.error
     );
-    assert_eq!(resp.result.unwrap()["value"], json!("must-not-leak"));
 
     drop(stream);
     shutdown.notify_waiters();

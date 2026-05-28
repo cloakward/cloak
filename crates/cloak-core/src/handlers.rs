@@ -85,13 +85,15 @@ fn policy_tool_name(tool: &str) -> &'static str {
     }
 }
 
-/// Append a single audit entry, swallowing audit-write errors (logging
-/// only). We never want a failed audit to mask the real outcome.
-async fn audit_one(audit: &Mutex<AuditLog>, draft: AuditDraft) {
+/// Append a single audit entry. Privileged tool calls fail closed if the
+/// audit trail cannot be written.
+async fn audit_one(audit: &Mutex<AuditLog>, draft: AuditDraft) -> Result<()> {
     let mut g = audit.lock().await;
     if let Err(e) = g.append(draft) {
-        tracing::warn!(error = %e, "audit append failed");
+        tracing::error!(error = %e, "audit append failed");
+        return Err(Error::Other("audit append failed"));
     }
+    Ok(())
 }
 
 /// Parse a JSON `Value` as `T`, returning `Error::IpcFraming("invalid params")`
@@ -160,7 +162,7 @@ async fn enforce_policy(
                 note: Some(reason.clone()),
             },
         )
-        .await;
+        .await?;
         return Err(Error::PolicyDenied(reason));
     }
 
@@ -178,7 +180,7 @@ async fn enforce_policy(
                 note: Some("rate limited".to_string()),
             },
         )
-        .await;
+        .await?;
         return Err(Error::PolicyDenied("rate limited".to_string()));
     }
     Ok(())
@@ -294,7 +296,7 @@ pub async fn sign_request(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value>
                     note: Some(format!("unknown scheme: {other}")),
                 },
             )
-            .await;
+            .await?;
             return Err(Error::IpcFraming("unknown sign_request scheme"));
         }
     };
@@ -310,7 +312,7 @@ pub async fn sign_request(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value>
             note: Some(scheme_label.to_string()),
         },
     )
-    .await;
+    .await?;
 
     Ok(json!({ "headers": new_headers }))
 }
@@ -481,6 +483,9 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
     let p: ProxyHttpParams = parse_params(params)?;
 
     let mut url = url::Url::parse(&p.url).map_err(|_| Error::IpcFraming("invalid url"))?;
+    if url.scheme() != "https" && !test_allows_plaintext_proxy(&url) {
+        return Err(Error::IpcFraming("proxy_http requires https"));
+    }
     let host = url.host_str().map(str::to_string);
 
     enforce_policy(
@@ -592,7 +597,7 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                     note: Some(format!("egress error: {e}")),
                 },
             )
-            .await;
+            .await?;
             return Err(e);
         }
     };
@@ -608,7 +613,7 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
             note: Some(format!("status={}", resp.status)),
         },
     )
-    .await;
+    .await?;
 
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp.body);
     // Header keys are already lowercased by `egress::execute`.
@@ -617,6 +622,19 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
         "headers": resp.headers,
         "body_b64": body_b64,
     }))
+}
+
+fn test_allows_plaintext_proxy(_url: &url::Url) -> bool {
+    #[cfg(any(test, feature = "test-util"))]
+    {
+        _url.scheme() == "http"
+            && _url.host_str() == Some("127.0.0.1")
+            && std::env::var_os("CLOAK_TEST_ALLOW_HTTP_EGRESS").is_some()
+    }
+    #[cfg(not(any(test, feature = "test-util")))]
+    {
+        false
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -742,7 +760,7 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                             note: Some("kind=aws-sts secret-shape-invalid".to_string()),
                         },
                     )
-                    .await;
+                    .await?;
                     return Err(Error::Other("aws-sts: secret must be 'AKID:SECRET'"));
                 }
             };
@@ -785,7 +803,7 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                             )),
                         },
                     )
-                    .await;
+                    .await?;
                     return Err(Error::Other("aws-sts: GetSessionToken failed"));
                 }
             };
@@ -806,7 +824,7 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                             )),
                         },
                     )
-                    .await;
+                    .await?;
                     return Err(Error::Other(
                         "aws-sts: GetSessionToken returned no credentials",
                     ));
@@ -843,7 +861,7 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                     )),
                 },
             )
-            .await;
+            .await?;
 
             Ok(json!({
                 "token": token,
@@ -862,7 +880,7 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                     note: Some(format!("kind={other} unsupported")),
                 },
             )
-            .await;
+            .await?;
             Err(Error::Other("mint_token: kind not supported in v0.1"))
         }
     }
@@ -938,7 +956,7 @@ pub async fn query_audit(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> 
             note: Some(format!("returned {n} entries")),
         },
     )
-    .await;
+    .await?;
 
     let entries_json: Vec<Value> = entries
         .into_iter()

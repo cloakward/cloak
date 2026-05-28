@@ -98,11 +98,12 @@ pub fn run(ctx: &Context) -> Result<()> {
     Ok(())
 }
 
-/// Read the mnemonic from stdin. Honors `CLOAK_MNEMONIC` for tests so
-/// `assert_cmd` cases don't need to wrangle stdin; in interactive mode
-/// it reads until EOF or a blank line.
+/// Read the mnemonic from stdin. Honors `CLOAK_MNEMONIC` only when
+/// `CLOAK_UNSAFE_TEST_MODE=1` is also set so `assert_cmd` cases don't
+/// need to wrangle stdin; in interactive mode it reads until EOF or a
+/// blank line.
 fn read_mnemonic_input() -> Result<String> {
-    if let Ok(s) = std::env::var("CLOAK_MNEMONIC") {
+    if let Some(s) = crate::test_mode::env_var("CLOAK_MNEMONIC")? {
         return Ok(s);
     }
     let stdin = io::stdin();

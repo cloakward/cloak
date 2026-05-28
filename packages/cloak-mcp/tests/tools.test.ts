@@ -65,6 +65,7 @@ describe("tools", () => {
     expect(okParsed.version).toBe(2);
 
     const bad = await dispatchTool("get_secret_metadata", { name: "nope" });
+    expect(bad.isError).toBe(true);
     expect(bad.content[0].text.startsWith("error:")).toBe(true);
     expect(bad.content[0].text).toContain("not_found");
   });
@@ -137,16 +138,32 @@ describe("tools", () => {
     expect(out.content[0].text).toContain("<binary,");
   });
 
-  test("no tool returns plaintext-looking secret material", async () => {
-    // Property-ish: even if the daemon misbehaves and stuffs a 'secret' field
-    // into a metadata response, the shim does not synthesize one. We assert
-    // that what comes back is exactly what the daemon returned (echoed),
-    // so the responsibility is correctly delegated. The shim never injects
-    // a `value`/`secret`/`plaintext` field of its own.
+  test("metadata tools strip unapproved daemon fields", async () => {
     await withMock({
       "mcp.handshake": () => ({ session_token: "tok" }),
-      "vault.list": () => ({ secrets: [{ name: "a", kind: "bearer", tags: [], created_at: "x", updated_at: "x", version: 1 }] }),
-      "vault.get_metadata": () => ({ name: "a", kind: "bearer", tags: [], created_at: "x", updated_at: "x", version: 1 }),
+      "vault.list": () => ({
+        secrets: [
+          {
+            name: "a",
+            kind: "bearer",
+            tags: [],
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+            version: 1,
+            value: "should-not-cross",
+          },
+        ],
+        plaintext: "should-not-cross",
+      }),
+      "vault.get_metadata": () => ({
+        name: "a",
+        kind: "bearer",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        version: 1,
+        secret_value: "should-not-cross",
+      }),
     });
     const ipc = await import("../src/ipc.ts");
     await ipc.handshake();
@@ -158,6 +175,76 @@ describe("tools", () => {
       expect(t.toLowerCase()).not.toContain("\"plaintext\":");
       expect(t.toLowerCase()).not.toContain("\"secret_value\":");
     }
+  });
+
+  test("metadata tools reject invalid daemon shapes", async () => {
+    await withMock({
+      "mcp.handshake": () => ({ session_token: "tok" }),
+      "vault.list": () => ({
+        secrets: [{ name: "a", kind: "bearer", tags: [], created_at: "not-a-date", updated_at: "2026-01-01T00:00:00Z", version: 1 }],
+      }),
+    });
+    const ipc = await import("../src/ipc.ts");
+    await ipc.handshake();
+    const { dispatchTool } = await import("../src/tools/index.ts");
+    const out = await dispatchTool("list_secret_names", {});
+    expect(out.isError).toBe(true);
+    expect(out.content[0].text).toContain("RFC3339");
+  });
+
+  test("tool argument schemas reject unsafe or incomplete inputs", async () => {
+    await withMock({
+      "mcp.handshake": () => ({ session_token: "tok" }),
+      "tool.proxy_http": () => ({ status: 200, headers: {}, body_b64: "" }),
+      "tool.sign_request": () => ({ headers: {} }),
+      "tool.query_audit": () => ({ entries: [] }),
+    });
+    const ipc = await import("../src/ipc.ts");
+    await ipc.handshake();
+    const { dispatchTool } = await import("../src/tools/index.ts");
+
+    const badProxy = await dispatchTool("proxy_authenticated_http_request", {
+      secret_name: "github",
+      method: "GET",
+      url: "https://api.github.com/user",
+      auth_scheme: "header",
+    });
+    expect(badProxy.isError).toBe(true);
+    expect(badProxy.content[0].text).toContain("header_name is required");
+
+    const badSign = await dispatchTool("sign_request", {
+      secret_name: "aws",
+      scheme: "hmac-sha256",
+      method: "TRACE",
+      url: "https://example.com",
+      body_b64: "not-base64",
+    });
+    expect(badSign.isError).toBe(true);
+    expect(badSign.content[0].text).toContain("Invalid enum value");
+    expect(badSign.content[0].text).toContain("base64");
+
+    const badAudit = await dispatchTool("query_audit", {
+      since: "2026-01-01",
+      limit: 1001,
+    });
+    expect(badAudit.isError).toBe(true);
+    expect(badAudit.content[0].text).toContain("RFC3339");
+
+    const plaintextProxy = await dispatchTool("proxy_authenticated_http_request", {
+      secret_name: "github",
+      method: "GET",
+      url: "http://api.github.com/user",
+      auth_scheme: "bearer",
+    });
+    expect(plaintextProxy.isError).toBe(true);
+    expect(plaintextProxy.content[0].text).toContain("https");
+  });
+
+  test("unknown tools are marked as MCP tool errors", async () => {
+    const { dispatchTool } = await import("../src/tools/index.ts");
+    const out = await dispatchTool("does_not_exist", {});
+    expect(out.isError).toBe(true);
+    expect(out.content[0].text).toContain("unknown tool");
   });
 
   test("tool descriptions match the locked contract", async () => {
@@ -173,7 +260,7 @@ describe("tools", () => {
       "Compute authentication headers for an outbound HTTP request using a stored secret as the signing key. Supports AWS SigV4 and generic HMAC-SHA256. Returns only the computed headers — the underlying secret is never disclosed. Use this when an API requires request signing rather than a bearer token.",
     );
     expect(desc("proxy_authenticated_http_request")).toBe(
-      "Send an HTTP request to a host on the user's allowlist, with the named secret attached by the daemon as authentication. The request and response transit the local daemon, never this tool. Returns status, headers, and base64-encoded body. The auth header is stripped from the echoed request metadata. Use this to call APIs (GitHub, OpenAI, Stripe, etc.) without ever handling the key.",
+      "Send an HTTPS request to a host on the user's allowlist, with the named secret attached by the daemon as authentication. The request and response transit the local daemon, never this tool. Returns status, headers, and base64-encoded body. The auth header is stripped from the echoed request metadata. Use this to call APIs (GitHub, OpenAI, Stripe, etc.) without ever handling the key.",
     );
     expect(desc("mint_short_lived_token")).toBe(
       "Mint a short-lived derived token from a long-lived parent secret. Examples: STS session credentials from an AWS access key, an installation token from a GitHub App private key, a scoped PAT from a parent PAT. Returns the derived token and its expiry. The long-lived parent never leaves the daemon.",

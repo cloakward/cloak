@@ -17,6 +17,18 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  osv-dependency-scan:
+    name: osv dependency scan
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.3.8
+    permissions:
+      actions: read
+      contents: read
+    with:
+      upload-sarif: false
+      scan-args: |-
+        --lockfile=Cargo.lock
+        --lockfile=packages/cloak-mcp/bun.lock
+
   security:
     name: security
     runs-on: ubuntu-24.04
@@ -29,7 +41,7 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.2.9"
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2

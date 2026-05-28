@@ -21,7 +21,7 @@ After the daemon is unlocked once per session, every reveal is gated by Touch ID
 Yes, two ways:
 
 1. **Build from source.** `cargo build --release --workspace` produces ad-hoc-signed binaries with no developer identity attached. Same code, your build.
-2. **Verify the signed releases.** Every release ships cosign keyless signatures and SLSA L3 provenance. You can confirm the published binaries match the exact CI run that built them.
+2. **Verify the signed releases.** Release tags built by the current workflow ship cosign keyless signatures and SLSA L3 provenance for tarballs, `sha256sums.txt`, and `.dxt` packages. Older preview `.dxt` assets may be unsigned; require matching `.sig` / `.cert` files and a SLSA subject before trusting them.
 
 ### Does Cloak phone home, telemetry, anything?
 

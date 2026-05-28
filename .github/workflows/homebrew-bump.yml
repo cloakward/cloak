@@ -26,7 +26,7 @@ permissions:
 jobs:
   bump:
     name: Bump cloakward/homebrew-cloak
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check tap credential
         id: cred
@@ -206,7 +206,7 @@ jobs:
               bin.install "bin/cloak"
               bin.install "bin/cloakd"
               # cloak-mcp is bundled in the macOS arm64, macOS x64, and Linux
-              # gnu amd64 tarballs (the platforms `bun --compile` can target
+              # gnu amd64 tarballs (the platforms \`bun --compile\` can target
               # from the release runners). Install if present.
               bin.install "bin/cloak-mcp" if File.exist?("bin/cloak-mcp")
             end

@@ -1,9 +1,8 @@
 # Cloak release process and verification
 
 > Audience: maintainers cutting a release, and downstream users verifying
-> one. The verification half (cosign + slsa-verifier) is what landed in
-> W9b; the cutting-a-release half is documented here so a fresh
-> contributor can do it without reverse-engineering the workflow.
+> one. This is the source of truth for what the current release workflow
+> verifies and what remains beta/pre-production.
 
 ## Cutting a release (maintainer steps)
 
@@ -26,14 +25,17 @@
      Windows is deferred to v1.0.1 — see
      [issue #2](https://github.com/cloakward/cloak/issues/2).
    - Tarballs each row as `cloak-X.Y.Z-<target>.tar.gz`.
-   - Aggregates `sha256sums.txt`.
-   - Cosign-keyless-signs every tarball and the checksum file (OIDC token
-     from GitHub Actions; identity is the workflow path at the tag ref).
+   - Builds Claude Desktop `.dxt` packages for platforms where the
+     `cloak-mcp` binary exists in the tarball.
+   - Aggregates `sha256sums.txt` across tarballs and `.dxt` packages.
+   - Cosign-keyless-signs every tarball, every `.dxt`, and the checksum
+     file (OIDC token from GitHub Actions; identity is the workflow path
+     at the tag ref).
    - Generates a SLSA L3 provenance attestation
      (`multiple.intoto.jsonl`) via the `slsa-framework/slsa-github-generator`
      reusable workflow.
    - Re-runs `cosign verify-blob` and `slsa-verifier verify-artifact`
-     in a separate verification job. The verify job pulls the
+     in a separate verification job for every tarball and `.dxt`. The verify job pulls the
      `signed-bundle` and SLSA provenance artifacts directly from the
      workflow's artifact storage (not from the draft release, since
      `gh release download` cannot see drafts). The bytes verified are
@@ -48,17 +50,33 @@
 7. **Docker.** `docker-push.yml` builds a multi-arch (`linux/amd64`,
    `linux/arm64`) `cloakd` image and pushes to GHCR. `:X.Y.Z` and
    `:X.Y` tags are always pushed; `:latest` is appended only when the
-   release event flags `prerelease == false` (so a tag like
-   `v0.9.0-rc1` does not advance `:latest` past production). The
-   `prerelease` bit comes from `release.yml` passing `--prerelease`
-   to `gh release create` whenever the tag matches `-rc*|-beta*|-alpha*`.
+   tag name is production-shaped (no `-rc`, `-beta`, `-alpha`, `-pre`,
+   or `-dev` suffix), so a tag like `v0.9.0-rc1` does not advance
+   `:latest` past production.
+
+Production tags are tags that do not match `*-rc*`, `*-beta*`,
+`*-alpha*`, `*-pre*`, or `*-dev*`. Production macOS rows must be signed
+and notarized; the workflow fails if the Apple secrets listed below are
+missing. Prerelease/fork preview tags may skip Apple signing/notarization,
+but those macOS artifacts are explicitly unsigned and should not be
+marketed as production builds.
 
 ## macOS notarization
 
-Starting with v1.0, macOS binaries (`cloak`, `cloakd`, `cloak-mcp`) ship
-Apple-notarized via the Developer ID Application + `xcrun notarytool`
-flow built into `release.yml`. End users no longer need to run
-`xattr -d com.apple.quarantine` on the extracted tarballs.
+Stable production macOS binaries (`cloak`, `cloakd`, `cloak-mcp`) must be
+Developer ID signed and submitted to Apple's notary service via the
+`release.yml` flow. The workflow refuses to build a production macOS
+tarball if any required Apple secret is absent.
+
+Prerelease/fork preview tags may skip this flow when the secrets are not
+available. Those artifacts are unsigned/unnotarized previews and can
+require `xattr -d com.apple.quarantine` after download.
+
+Bare command-line Mach-O binaries cannot be stapled in-place like `.pkg`,
+`.dmg`, or `.app` bundles. The workflow still submits the signed binaries
+to Apple's notary service; Gatekeeper may need an online ticket lookup on
+first launch. A future packaged installer can provide an offline-stapled
+ticket.
 
 The pipeline, per macOS row:
 
@@ -70,19 +88,18 @@ The pipeline, per macOS row:
    `xcrun notarytool submit --wait` using an App Store Connect API key
    (`secrets.APPLE_API_KEY_BASE64` / `APPLE_API_KEY_ID` /
    `APPLE_API_KEY_ISSUER_ID`).
-4. Runs `xcrun stapler staple` on each binary. Bare Mach-O command-line
-   tools cannot have a ticket stapled in-place (stapler only operates
-   on bundles / dmgs / pkgs); for those Apple's CDN serves the
-   notarization ticket online on first launch — same model as Homebrew
-   bottles.
-5. Tarballs the notarized binaries.
+4. Attempts `xcrun stapler staple` on each binary and logs a notice when
+   stapler rejects a bare Mach-O. In that case the notarization ticket is
+   served by Apple online during Gatekeeper's first-launch check.
+5. Tarballs the signed/notarized binaries.
 6. **After** notarization, the cosign keyless `sign` job signs the
    final tarball, so the cosign certificate covers the notarized bytes
    the user actually downloads.
 
-If `secrets.APPLE_CERT_P12_BASE64` is empty (forks, dry-runs before the
-secrets are added), every Apple step skips with a `::warning::` and the
-tarballs ship unsigned — same Gatekeeper experience as v0.9.0-rc3.
+If any required Apple secret is empty on a production tag, the macOS row
+fails. If any required Apple secret is empty on a prerelease tag, the row
+logs a `::warning::`, skips signing/notarization, and produces an
+unsigned preview tarball.
 
 ### Required GitHub Secrets
 
@@ -119,19 +136,51 @@ combo (more robust, no 2FA prompts, can be revoked individually):
 4. Note the **Key ID** (10 chars) and the **Issuer ID** (UUID at the top of the page).
 5. `base64 -i AuthKey_<KEY_ID>.p8 | pbcopy` → `APPLE_API_KEY_BASE64`.
 
+## Moving inputs to review before production
+
+Some inputs are intentionally still version-tagged rather than pinned by
+digest/SHA:
+
+- GitHub Actions are pinned to major release tags such as `actions/checkout@v4`.
+- The Rust toolchain follows `rust-toolchain.toml` (`stable` today).
+- The Dockerfile uses Debian/distroless tags rather than image digests.
+- `libsodium-sys-stable` is built with its `fetch-latest` feature, so the
+  upstream libsodium source selected by that build script is also a moving
+  input.
+
+Bun was an obvious `latest` input and is pinned to `1.2.9` in CI/release
+workflows. Before cutting a production tag, review the remaining moving
+inputs in the workflow run summary, Cargo build output, and Docker build
+log. Do not publish a production release if an unexpected action,
+toolchain, base-image, or libsodium update landed in the same run; either
+pin it first or cut a new tag after review.
+
 ## What a release publishes
 
-Every Cloak release tag (`vX.Y.Z`) is built, signed, and provenance-attested
-by `.github/workflows/release.yml`. Each platform tarball ships with:
+Every Cloak release tag (`vX.Y.Z`) cut by the current workflow is built,
+signed, and provenance-attested by `.github/workflows/release.yml`. Each
+platform tarball ships with:
 
 - `cloak-<version>-<target>.tar.gz` — the release archive
 - `cloak-<version>-<target>.tar.gz.sig` — cosign keyless signature
 - `cloak-<version>-<target>.tar.gz.cert` — cosign Fulcio certificate
 
+Claude Desktop extension packages ship for platforms where `cloak-mcp` was
+built:
+
+- `Cloak-<version>-<platform>.dxt` — Claude Desktop extension archive
+- `Cloak-<version>-<platform>.dxt.sig` — cosign keyless signature
+- `Cloak-<version>-<platform>.dxt.cert` — cosign Fulcio certificate
+
 Plus, attached once per release:
 
-- `sha256sums.txt` (and `.sig` / `.cert`) — aggregate hash file
+- `sha256sums.txt` (and `.sig` / `.cert`) — aggregate hash file covering
+  tarballs and `.dxt` packages
 - `multiple.intoto.jsonl` — SLSA L3 provenance attestation
+
+Older preview releases may include `.dxt` files without matching `.sig`,
+`.cert`, or SLSA subject entries. Treat those `.dxt` files as unsigned
+convenience assets.
 
 ## Prerequisites
 
@@ -161,6 +210,9 @@ cosign verify-blob \
 
 The verifier prints `Verified OK` on success.
 
+For a `.dxt`, use the same command shape with the `.dxt` filename and its
+matching `.dxt.sig` / `.dxt.cert` files.
+
 ## Verify SLSA L3 provenance
 
 ```sh
@@ -172,8 +224,8 @@ slsa-verifier verify-artifact \
 ```
 
 A passing run binds the artifact's sha256 to a specific GitHub Actions
-build of `release.yml` at the tagged commit — proof the binary was
-produced by the release pipeline and not tampered with after.
+build of `release.yml` at the tagged commit — proof the tarball or `.dxt`
+was produced by the release pipeline and not tampered with after.
 
 ## Cross-check the aggregate hash file
 

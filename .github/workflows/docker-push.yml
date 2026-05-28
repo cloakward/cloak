@@ -175,11 +175,13 @@ jobs:
           else
             echo "Skipping :latest tag (tag is a pre-release)."
           fi
-          # Emit space-joined list for the buildx imagetools call below.
-          echo "list=${tags[*]}" >> "$GITHUB_OUTPUT"
-          # Per-arch source images that the manifest will reference.
-          echo "src_amd64=${base}:${VERSION}-amd64" >> "$GITHUB_OUTPUT"
-          echo "src_arm64=${base}:${VERSION}-arm64" >> "$GITHUB_OUTPUT"
+          {
+            # Emit space-joined list for the buildx imagetools call below.
+            echo "list=${tags[*]}"
+            # Per-arch source images that the manifest will reference.
+            echo "src_amd64=${base}:${VERSION}-amd64"
+            echo "src_arm64=${base}:${VERSION}-arm64"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create multi-arch manifest
         run: |

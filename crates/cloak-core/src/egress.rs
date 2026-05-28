@@ -6,7 +6,7 @@
 //! Build a single `EgressClient` at daemon start and reuse it. The client
 //! is configured with:
 //! - rustls TLS (no native-tls / OpenSSL),
-//! - a hard limit of 3 redirects,
+//! - redirects disabled (no credential forwarding across hosts/schemes),
 //! - a 30-second total timeout per request.
 //!
 //! Transport failures are surfaced as `Error::Other("egress: ...")` —
@@ -32,13 +32,13 @@ pub struct EgressClient {
 }
 
 impl EgressClient {
-    /// Construct a fresh client with rustls TLS, a 3-redirect cap, and a
+    /// Construct a fresh client with rustls TLS, redirects disabled, and a
     /// 30-second per-request timeout. Returns `Error::Other` (never panics)
     /// if the underlying builder fails.
     pub fn new() -> Result<Self> {
         let inner = reqwest::Client::builder()
             .use_rustls_tls()
-            .redirect(reqwest::redirect::Policy::limited(3))
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|_| Error::Other("egress: failed to build http client"))?;

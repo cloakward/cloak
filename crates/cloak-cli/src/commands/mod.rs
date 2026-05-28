@@ -180,6 +180,9 @@ pub enum Command {
         /// `--update` plus delete vault entries not in the file.
         #[arg(long)]
         replace: bool,
+        /// Skip confirmation when `--replace` would delete vault entries.
+        #[arg(short = 'y', long = "yes", requires = "replace")]
+        yes: bool,
     },
 
     /// Export the vault to a `.env` file (Touch ID gated).
@@ -447,6 +450,7 @@ pub fn run() -> Result<ExitCode> {
             path,
             update,
             replace,
+            yes,
         } => {
             let mode = if replace {
                 import::Mode::Replace
@@ -455,7 +459,7 @@ pub fn run() -> Result<ExitCode> {
             } else {
                 import::Mode::SafeAdd
             };
-            import::run(&ctx, path, mode).map(|_| ExitCode::SUCCESS)
+            import::run(&ctx, path, mode, yes).map(|_| ExitCode::SUCCESS)
         }
         Command::Export { path, force } => {
             export::run(&ctx, path, force).map(|_| ExitCode::SUCCESS)

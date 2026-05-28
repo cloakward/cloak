@@ -10,9 +10,9 @@
 //!    `SqliteStore` API rather than calling `Vault::initialize` —
 //!    avoiding the real Argon2id autotune and any keychain ACL prompt.
 //! 3. Invokes `Vault::open_or_create` and asserts the documented
-//!    behaviour: equality is silent, file-greater refreshes the
-//!    mirror, file-less is rejected with `Error::VaultRollbackDetected`,
-//!    and a missing mirror seeds itself from the file.
+//!    behaviour: equality is silent, any mismatch after a mirror exists
+//!    is rejected with `Error::VaultRollbackDetected`, and a missing
+//!    mirror seeds itself from the file.
 //!
 //! Each test is its own integration-test binary, so the env-var
 //! mutation in one test cannot affect another. Within a single binary
@@ -144,7 +144,7 @@ fn rollback_detected_when_file_counter_lower_than_mirror() {
 }
 
 #[test]
-fn file_counter_greater_refreshes_mirror() {
+fn file_counter_greater_than_mirror_is_rejected() {
     let _g = lock_env();
     let dir = tempfile::tempdir().unwrap();
     let pepper = dir.path().join("pepper");
@@ -158,16 +158,17 @@ fn file_counter_greater_refreshes_mirror() {
     }
     assert_eq!(read_counter_file(&pepper), Some(3));
 
-    // Stage 2: a paired device rsynced its newer vault on top —
-    // counter has jumped to 9 with the mirror still at 3. This is
-    // legitimate; open should succeed and refresh the mirror.
+    // Stage 2: the vault file counter jumps to 9 while the mirror is
+    // still at 3. Even though the file counter is greater, accepting it
+    // would let an attacker replay an older vault snapshot and manually
+    // bump its counter, so open must refuse.
     seed_vault(&vault_path, 9);
-    let _v = Vault::open_or_create(&vault_path).expect("forward bump must be accepted");
-    assert_eq!(
-        read_counter_file(&pepper),
-        Some(9),
-        "mirror should track the file counter after a forward bump"
-    );
+    match Vault::open_or_create(&vault_path) {
+        Ok(_) => panic!("counter mismatch must be rejected"),
+        Err(Error::VaultRollbackDetected) => {}
+        Err(e) => panic!("expected VaultRollbackDetected, got {e:?}"),
+    }
+    assert_eq!(read_counter_file(&pepper), Some(3));
 }
 
 #[test]
@@ -206,7 +207,7 @@ fn equality_is_silent_no_op() {
 }
 
 #[test]
-fn write_bumps_both_file_and_mirror() {
+fn out_of_band_write_without_mirror_bump_is_rejected() {
     let _g = lock_env();
     let dir = tempfile::tempdir().unwrap();
     let pepper = dir.path().join("pepper");
@@ -215,31 +216,25 @@ fn write_bumps_both_file_and_mirror() {
 
     // Bring up a vault with counter=1 and a synced mirror.
     seed_vault(&vault_path, 1);
-    let mut v = Vault::open_or_create(&vault_path).expect("seed");
+    let v = Vault::open_or_create(&vault_path).expect("seed");
     assert_eq!(read_counter_file(&pepper), Some(1));
 
-    // Drive a write through the public API. We can't call `add`
-    // because the dummy meta row's wrapped master is bogus — instead
-    // we rebuild the meta with valid wrapping using the real
-    // `initialize`-style path. To keep this test focused on the
-    // mirror, we directly invoke the store's `bump_counter` and
-    // expect the vault not to mirror (since we bypassed the vault).
-    // The "real" write path is exercised by the cloak-core unit
-    // tests via `init_test_vault` + `add` (those have the mirror
-    // disabled to stay hermetic) and by the CLI-level integration
-    // tests. Here we instead verify the open-time refresh is fired
-    // by a subsequent open: simulate a write by bumping the file
-    // counter underneath us and reopening.
+    // Simulate an out-of-band write that only advances the file counter.
+    // The vault must not treat that as legitimate unless the mirror was
+    // advanced by the trusted write path too.
     drop(v);
     let store = SqliteStore::open(&vault_path).unwrap();
     store.bump_counter(2).unwrap();
     drop(store);
 
-    v = Vault::open_or_create(&vault_path).expect("forward bump");
+    match Vault::open_or_create(&vault_path) {
+        Ok(_) => panic!("mismatch must be rejected"),
+        Err(Error::VaultRollbackDetected) => {}
+        Err(e) => panic!("expected VaultRollbackDetected, got {e:?}"),
+    }
     assert_eq!(
         read_counter_file(&pepper),
-        Some(2),
-        "mirror should track the new file counter on reopen"
+        Some(1),
+        "mirror must not be refreshed from an out-of-band file bump"
     );
-    drop(v);
 }

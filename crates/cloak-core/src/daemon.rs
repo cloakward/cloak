@@ -36,7 +36,9 @@ use crate::ipc::{read_request_json, rpc_error, write_response_json, Request, Res
 use crate::peer_auth::{self, PeerInfo, PeerPolicy};
 use crate::policy::PolicyEngine;
 use crate::session::{default_ttl, SessionRecord, SessionStore};
-use crate::vault::{SecretKind, Vault};
+#[cfg(any(test, feature = "test-util"))]
+use crate::vault::SecretKind;
+use crate::vault::Vault;
 
 // =========================================================================
 // Public entry point
@@ -537,15 +539,22 @@ fn spawn_peer_exit_watcher(
 // =========================================================================
 
 /// Methods callable only by the CLI peer (basename == `cloak`).
-const CLI_ONLY_METHODS: &[&str] = &[
-    "vault.show",
-    "vault.add",
-    "vault.set",
-    "vault.rm",
-    "vault.initialize",
-    "vault.unlock",
-    "vault.lock",
-];
+fn is_cli_only_method(m: &str) -> bool {
+    matches!(m, "vault.show" | "vault.unlock" | "vault.lock") || is_test_only_vault_write_method(m)
+}
+
+#[cfg(any(test, feature = "test-util"))]
+fn is_test_only_vault_write_method(m: &str) -> bool {
+    matches!(
+        m,
+        "vault.initialize" | "vault.add" | "vault.set" | "vault.rm"
+    )
+}
+
+#[cfg(not(any(test, feature = "test-util")))]
+fn is_test_only_vault_write_method(_m: &str) -> bool {
+    false
+}
 
 fn known_method(m: &str) -> bool {
     matches!(
@@ -556,18 +565,14 @@ fn known_method(m: &str) -> bool {
             | "vault.list"
             | "vault.get_metadata"
             | "vault.status"
-            | "vault.initialize"
             | "vault.unlock"
             | "vault.lock"
-            | "vault.add"
-            | "vault.set"
-            | "vault.rm"
             | "vault.show"
             | "tool.sign_request"
             | "tool.proxy_http"
             | "tool.mint_token"
             | "tool.query_audit"
-    )
+    ) || is_test_only_vault_write_method(m)
 }
 
 async fn dispatch(ctx: &Arc<DaemonCtx>, peer: &PeerInfo, conn_id: u64, req: Request) -> Response {
@@ -661,7 +666,7 @@ async fn dispatch_method(
 ) -> std::result::Result<Value, DispatchError> {
     // Enforce CLI-only methods. The session is bound at handshake to
     // the peer's basename; we trust that record here.
-    if CLI_ONLY_METHODS.contains(&method)
+    if is_cli_only_method(method)
         && !ctx
             .cli_basenames
             .iter()
@@ -725,7 +730,14 @@ async fn dispatch_method(
             }))
         }
 
-        // ---- vault: management (CLI only) ----
+        // ---- vault: test-only management fixture methods ----
+        //
+        // Production builds do not expose vault initialization or mutation
+        // over IPC; the real CLI opens the vault file directly for these
+        // operations. Integration tests keep these cfg-gated methods so
+        // they can seed a daemon-owned vault without duplicating daemon
+        // startup internals.
+        #[cfg(any(test, feature = "test-util"))]
         "vault.initialize" => {
             let p: PassphraseParams = parse_params(params)?;
             let mut v = ctx.vault.lock().await;
@@ -738,17 +750,7 @@ async fn dispatch_method(
                 }
             }))
         }
-        "vault.unlock" => {
-            let p: PassphraseParams = parse_params(params)?;
-            let mut v = ctx.vault.lock().await;
-            v.unlock(&Secret::new(p.passphrase))?;
-            Ok(json!({ "ok": true }))
-        }
-        "vault.lock" => {
-            let mut v = ctx.vault.lock().await;
-            v.lock();
-            Ok(json!({ "ok": true }))
-        }
+        #[cfg(any(test, feature = "test-util"))]
         "vault.add" => {
             let p: AddParams = parse_params(params)?;
             let v = ctx.vault.lock().await;
@@ -762,6 +764,7 @@ async fn dispatch_method(
             let md = v.get_metadata(&p.name)?;
             Ok(json!({ "ok": true, "version": md.version }))
         }
+        #[cfg(any(test, feature = "test-util"))]
         "vault.set" => {
             let p: SetParams = parse_params(params)?;
             let v = ctx.vault.lock().await;
@@ -770,6 +773,7 @@ async fn dispatch_method(
             let md = v.get_metadata(&p.name)?;
             Ok(json!({ "ok": true, "version": md.version }))
         }
+        #[cfg(any(test, feature = "test-util"))]
         "vault.rm" => {
             let p: NameParams = parse_params(params)?;
             let v = ctx.vault.lock().await;
@@ -777,28 +781,35 @@ async fn dispatch_method(
             v.rm(&p.name)?;
             Ok(json!({ "ok": true }))
         }
+
+        // ---- vault: session management (CLI only) ----
+        "vault.unlock" => {
+            let p: PassphraseParams = parse_params(params)?;
+            let mut v = ctx.vault.lock().await;
+            v.unlock(&Secret::new(p.passphrase))?;
+            Ok(json!({ "ok": true }))
+        }
+        "vault.lock" => {
+            let mut v = ctx.vault.lock().await;
+            v.lock();
+            Ok(json!({ "ok": true }))
+        }
         "vault.show" => {
             let p: ShowParams = parse_params(params)?;
             // Server-side biometric / user-presence gate. The daemon
             // itself fires the Touch ID (macOS) / polkit (Linux) prompt
-            // before any plaintext leaves the vault. We deliberately do
-            // NOT honour any client-supplied "user already approved"
-            // assertion: a same-UID attacker who connects to the
-            // socket directly must still face the OS prompt. The only
-            // CLI-side hint we honour is the explicit `skip_biometric`
-            // opt-out, intended for headless contexts where there is
-            // no GUI capable of rendering the prompt at all.
-            if !p.skip_biometric {
-                let reason = format!("Reveal secret '{}' from Cloak vault", p.name);
-                let confirmed = tokio::task::spawn_blocking(move || {
-                    crate::biometric::run_authenticate(&reason)
-                })
-                .await
-                .map_err(|_| DispatchError::Typed(Error::Other("biometric task panicked")))?
-                .map_err(|_| DispatchError::Typed(Error::BiometricFailed))?;
-                if !confirmed {
-                    return Err(DispatchError::Typed(Error::BiometricFailed));
-                }
+            // before any plaintext leaves the vault. No client-supplied
+            // flag may downgrade this requirement: a same-UID process
+            // that connects to the socket directly must face the same
+            // OS prompt as the CLI path.
+            let reason = format!("Reveal secret '{}' from Cloak vault", p.name);
+            let confirmed =
+                tokio::task::spawn_blocking(move || crate::biometric::run_authenticate(&reason))
+                    .await
+                    .map_err(|_| DispatchError::Typed(Error::Other("biometric task panicked")))?
+                    .map_err(|_| DispatchError::Typed(Error::BiometricFailed))?;
+            if !confirmed {
+                return Err(DispatchError::Typed(Error::BiometricFailed));
             }
             let v = ctx.vault.lock().await;
             require_unlocked(&v)?;
@@ -879,6 +890,7 @@ struct NameParams {
     name: String,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 #[derive(serde::Deserialize)]
 struct AddParams {
     name: String,
@@ -888,6 +900,7 @@ struct AddParams {
     value: String,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 #[derive(serde::Deserialize)]
 struct SetParams {
     name: String,
@@ -896,17 +909,14 @@ struct SetParams {
 
 /// Parameters for `vault.show`.
 ///
-/// `skip_biometric` is the CLI's headless opt-out hint (forwarded from
-/// `cloak --no-biometric show NAME`). When `false` (the default), the
-/// daemon fires its own OS-level biometric / user-presence prompt
-/// before producing any plaintext. We deliberately do NOT accept a
-/// client-supplied "already approved" flag — the daemon's prompt is
-/// what creates the user-presence guarantee.
+/// Legacy clients may still send `skip_biometric`; it is accepted for
+/// wire compatibility but ignored. Plaintext reveal is always gated by
+/// the daemon's own OS-level user-presence prompt.
 #[derive(serde::Deserialize)]
 struct ShowParams {
     name: String,
     #[serde(default)]
-    skip_biometric: bool,
+    _skip_biometric: bool,
 }
 
 fn parse_params<T: serde::de::DeserializeOwned>(

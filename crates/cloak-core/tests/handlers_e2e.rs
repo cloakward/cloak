@@ -468,6 +468,13 @@ async fn one_shot_http_server() -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
 async fn proxy_http_allowed_host_round_trip() {
     // Stand up an in-process HTTP server first so we know the port.
     let (port, server_handle) = one_shot_http_server().await;
+    // The production daemon rejects plaintext proxy targets. This
+    // integration test enables the crate's test-only loopback escape
+    // hatch so it can keep using a tiny in-process HTTP server without
+    // weakening release builds.
+    unsafe {
+        std::env::set_var("CLOAK_TEST_ALLOW_HTTP_EGRESS", "1");
+    }
 
     let policy = r#"
         [default]

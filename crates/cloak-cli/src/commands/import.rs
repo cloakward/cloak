@@ -14,6 +14,7 @@ use cloak_core::Error;
 use super::audit_log;
 use super::dotenv::{parse_dotenv, EnvEntry};
 use super::{open_vault, unlock::unlock_interactive, Context};
+use crate::prompt::prompt_yes_no;
 
 /// Conflict policy for `cloak import`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +27,7 @@ pub enum Mode {
     Replace,
 }
 
-pub fn run(ctx: &Context, path: Option<PathBuf>, mode: Mode) -> Result<()> {
+pub fn run(ctx: &Context, path: Option<PathBuf>, mode: Mode, yes: bool) -> Result<()> {
     let path = path.unwrap_or_else(|| PathBuf::from(".env"));
     let entries = parse_dotenv(&path)?;
     if entries.is_empty() {
@@ -43,6 +44,17 @@ pub fn run(ctx: &Context, path: Option<PathBuf>, mode: Mode) -> Result<()> {
     let existing: Vec<String> = vault.list()?.into_iter().map(|m| m.name).collect();
     let existing_set: std::collections::HashSet<&str> =
         existing.iter().map(|s| s.as_str()).collect();
+    let imported_set: std::collections::HashSet<&str> =
+        entries.iter().map(|e| e.key.as_str()).collect();
+    let to_remove: Vec<String> = if mode == Mode::Replace {
+        existing
+            .iter()
+            .filter(|n| !imported_set.contains(n.as_str()))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     if mode == Mode::SafeAdd {
         let collisions: Vec<&str> = entries
@@ -56,6 +68,18 @@ pub fn run(ctx: &Context, path: Option<PathBuf>, mode: Mode) -> Result<()> {
                 collisions.len(),
                 collisions.join(", ")
             );
+        }
+    }
+    if mode == Mode::Replace && !to_remove.is_empty() && !yes {
+        let q = format!(
+            "import --replace will delete {} secret(s) not present in {}:\n  {}\nproceed?",
+            to_remove.len(),
+            path.display(),
+            to_remove.join(", ")
+        );
+        if !prompt_yes_no(&q, false)? {
+            println!("cancelled");
+            return Ok(());
         }
     }
 
@@ -98,19 +122,15 @@ pub fn run(ctx: &Context, path: Option<PathBuf>, mode: Mode) -> Result<()> {
 
     let mut removed = 0u32;
     if mode == Mode::Replace {
-        let imported: std::collections::HashSet<&str> =
-            entries.iter().map(|e| e.key.as_str()).collect();
-        for n in &existing {
-            if !imported.contains(n.as_str()) {
-                vault.rm(n)?;
-                removed += 1;
-                audit_log::append(
-                    "cli.import",
-                    Some(n),
-                    cloak_core::audit::AuditResult::Ok,
-                    Some("replace-delete".into()),
-                );
-            }
+        for n in &to_remove {
+            vault.rm(n)?;
+            removed += 1;
+            audit_log::append(
+                "cli.import",
+                Some(n),
+                cloak_core::audit::AuditResult::Ok,
+                Some("replace-delete".into()),
+            );
         }
     }
 

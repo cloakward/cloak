@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { request } from "../ipc.ts";
 import type { CloakTool, ToolResult } from "./types.ts";
+import { secretNameSchema } from "./validation.ts";
 
 const argsSchema = z
   .object({
-    secret_name: z.string().min(1),
+    secret_name: secretNameSchema,
     kind: z.enum(["aws-sts", "github-app", "gitlab-pat"]),
     scope: z.record(z.unknown()).optional(),
     ttl_seconds: z.number().int().positive().optional(),
@@ -15,7 +16,7 @@ const inputSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
   properties: {
-    secret_name: { type: "string", minLength: 1, description: "Name of the parent (long-lived) secret." },
+    secret_name: { type: "string", minLength: 1, maxLength: 256, description: "Name of the parent (long-lived) secret." },
     kind: {
       type: "string",
       enum: ["aws-sts", "github-app", "gitlab-pat"],

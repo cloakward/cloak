@@ -1,14 +1,16 @@
 # W9b — release pipeline: cosign keyless signing + SLSA L3 provenance.
 #
 # Triggers ONLY on `v*` tag pushes (e.g. v0.9.0-rc1, v1.0.0). Builds release
-# tarballs of `cloak`, `cloakd`, and `cloak-mcp` for the four v1.0 platforms,
-# signs each tarball + the checksum file with cosign keyless via the
+# tarballs of `cloak`, `cloakd`, and `cloak-mcp` for the v1.0 platforms,
+# builds Claude Desktop .dxt packages where cloak-mcp exists, signs every
+# tarball, every .dxt, and the checksum file with cosign keyless via the
 # Actions OIDC token, generates SLSA L3 provenance, and drafts a GitHub
 # Release. A separate verification job re-runs cosign verify-blob and
 # slsa-verifier against the drafted artifacts; if it fails, the release
 # stays in draft and is never published.
 #
-# Action versions are pinned. Standing call from the maintainer:
+# Major action versions are still moving inputs; see docs/RELEASE.md before
+# cutting a production tag. Standing call from the maintainer:
 # macos-26-intel (x86_64) is best-effort — if its runner doesn't
 # allocate, the row fails open via `continue-on-error`, but a downstream
 # guard job fails the workflow if BOTH macOS rows go missing.
@@ -32,6 +34,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  BUN_VERSION: "1.2.9"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -81,10 +84,15 @@ jobs:
       # the produced arm64/x86_64 tarballs still load on macOS 13+.
       MACOSX_DEPLOYMENT_TARGET: "13.0"
       # Apple notarization secrets are read into env so step `if:`
-      # guards can detect whether they're configured (forks / first
-      # release won't have them set; the workflow gracefully skips
-      # codesign + notarize and ships unsigned tarballs in that case).
+      # guards can detect whether they're configured. Stable production
+      # tags fail hard if any required secret is missing; prerelease
+      # preview tags may still produce unsigned macOS tarballs.
       APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+      APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_KEY_ISSUER_ID: ${{ secrets.APPLE_API_KEY_ISSUER_ID }}
+      APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -98,8 +106,14 @@ jobs:
         run: |
           ref="${GITHUB_REF#refs/tags/}"
           version="${ref#v}"
+          prerelease=false
+          case "$ref" in
+            *-rc*|*-beta*|*-alpha*|*-pre*|*-dev*) prerelease=true ;;
+          esac
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
           echo "Release version: ${version}"
+          echo "Prerelease: ${prerelease}"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -119,7 +133,7 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Install cross (musl row)
         if: matrix.cross
@@ -160,18 +174,58 @@ jobs:
       # Order: codesign --options runtime → zip → notarytool submit
       # --wait → unzip → stapler staple → tarball. Cosign keyless
       # signing happens later (in the `sign` job) over the FINAL
-      # notarized tarball, so the cosign cert covers the stapled
-      # bytes the user actually downloads.
+      # notarized tarball, so the cosign cert covers the signed/notarized
+      # bytes the user actually downloads. Bare Mach-O binaries cannot
+      # always be stapled in-place; the notarization ticket may be fetched
+      # online by Gatekeeper on first launch.
       #
-      # Each step is gated on `secrets.APPLE_CERT_P12_BASE64` being
-      # non-empty. If the secret isn't configured (forks, early
-      # release dry-runs), each step logs a `::warning::` and skips,
-      # preserving the rc3 behavior of shipping unsigned/unstapled
-      # macOS binaries that need `xattr -d com.apple.quarantine`.
+      # Stable production tags are not allowed to ship unsigned macOS
+      # artifacts. Prerelease tags may skip signing/notarization for
+      # fork/preflight previews, but the tarballs are then explicitly
+      # unsigned.
       # ---------------------------------------------------------------
+      - name: Apple signing/notarization secret gate
+        id: apple_secrets
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            APPLE_CERT_P12_BASE64 \
+            APPLE_CERT_PASSWORD \
+            APPLE_API_KEY_ID \
+            APPLE_API_KEY_ISSUER_ID \
+            APPLE_API_KEY_BASE64 \
+            APPLE_TEAM_ID \
+          ; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Apple signing/notarization secrets are configured."
+            exit 0
+          fi
+
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          printf -v joined '%s, ' "${missing[@]}"
+          joined="${joined%, }"
+
+          if [ "${{ steps.meta.outputs.prerelease }}" = "true" ]; then
+            echo "::warning::Missing Apple signing/notarization secrets (${joined}); prerelease macOS tarball will be unsigned and unnotarized."
+            exit 0
+          fi
+
+          echo "::error::Missing Apple signing/notarization secrets for production tag: ${joined}"
+          echo "::error::Stable macOS releases must be Developer ID signed and submitted to Apple notarytool."
+          exit 1
+
       - name: Apple codesign — import Developer ID cert into temp keychain
         id: apple_codesign
-        if: ${{ matrix.platform == 'macos' && env.APPLE_CERT_P12_BASE64 != '' }}
+        if: ${{ matrix.platform == 'macos' && steps.apple_secrets.outputs.available == 'true' }}
         env:
           APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
           APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
@@ -206,7 +260,11 @@ jobs:
 
           # Prepend the temp keychain to the search list so codesign
           # can find the identity without disturbing the login keychain.
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          existing_keychains=()
+          while IFS= read -r keychain; do
+            existing_keychains+=("$keychain")
+          done < <(security list-keychains -d user | tr -d '"')
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "${existing_keychains[@]}"
 
           # Resolve the signing identity. We expect exactly one
           # "Developer ID Application: <NAME> (<TEAM_ID>)" identity
@@ -215,6 +273,10 @@ jobs:
             | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
           if [ -z "$IDENTITY" ]; then
             echo "::error::No 'Developer ID Application' identity found in imported keychain."
+            exit 1
+          fi
+          if [[ "$IDENTITY" != *"(${APPLE_TEAM_ID})"* ]]; then
+            echo "::error::Developer ID identity '${IDENTITY}' does not match APPLE_TEAM_ID '${APPLE_TEAM_ID}'."
             exit 1
           fi
           echo "Signing identity: ${IDENTITY}"
@@ -239,10 +301,10 @@ jobs:
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
       - name: Apple codesign — skip notice
-        if: ${{ matrix.platform == 'macos' && env.APPLE_CERT_P12_BASE64 == '' }}
+        if: ${{ matrix.platform == 'macos' && steps.apple_secrets.outputs.available != 'true' }}
         shell: bash
         run: |
-          echo "::warning::APPLE_CERT_P12_BASE64 secret not set — skipping Apple codesign + notarization. Tarball will ship unsigned (Gatekeeper will require xattr -d com.apple.quarantine on download)."
+          echo "::warning::Apple signing/notarization skipped for prerelease preview. Tarball will ship unsigned (Gatekeeper may require xattr -d com.apple.quarantine on download)."
 
       - name: Apple notarize — submit zip and staple binaries
         id: apple_notarize
@@ -317,6 +379,13 @@ jobs:
         shell: bash
         run: |
           security delete-keychain "${{ steps.apple_codesign.outputs.keychain_path }}" || true
+
+      - name: Apple notarize — production assertion
+        if: ${{ matrix.platform == 'macos' && steps.meta.outputs.prerelease != 'true' && steps.apple_notarize.outputs.notarized != 'true' }}
+        shell: bash
+        run: |
+          echo "::error::Production macOS artifacts must be signed and notarized before packaging."
+          exit 1
 
       - name: Stage and tarball release artifacts
         id: pack
@@ -410,10 +479,13 @@ jobs:
 
   # -------------------------------------------------------------------
   # 3. Aggregate sha256sums + cosign keyless sign every artifact.
+  # This waits for dxt-package as well as tarball builds so Claude
+  # Desktop extension assets are covered by the same signatures and SLSA
+  # provenance as the core tarballs.
   # -------------------------------------------------------------------
   sign:
-    name: sign tarballs (cosign keyless)
-    needs: [build, macos-guard]
+    name: sign release artifacts (cosign keyless)
+    needs: [build, macos-guard, dxt-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -429,6 +501,13 @@ jobs:
           path: incoming
           pattern: tarball-*
 
+      - name: Download .dxt artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dxt-incoming
+          pattern: dxt-*
+          merge-multiple: true
+
       - name: Flatten artifacts into ./dist
         shell: bash
         run: |
@@ -436,6 +515,7 @@ jobs:
           mkdir -p dist
           # Each tarball-<target>/ holds one .tar.gz and one .tar.gz.sha256.
           find incoming -type f \( -name "*.tar.gz" -o -name "*.tar.gz.sha256" \) -exec cp {} dist/ \;
+          find dxt-incoming -type f -name "*.dxt" -exec cp {} dist/ \;
           find dist -maxdepth 1 -type f -print
 
       - name: Compute aggregate sha256sums.txt
@@ -447,7 +527,7 @@ jobs:
           # Stable ordering for reproducibility.
           while IFS= read -r f; do
             sha256sum "$f" >> sha256sums.txt
-          done < <(find . -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' | sort)
+          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.dxt' \) -printf '%f\n' | sort)
           cat sha256sums.txt
 
       - name: Install cosign
@@ -455,7 +535,7 @@ jobs:
         with:
           cosign-release: "v2.4.1"
 
-      - name: cosign sign-blob (each tarball + sha256sums.txt)
+      - name: cosign sign-blob (each tarball, .dxt, and sha256sums.txt)
         env:
           COSIGN_EXPERIMENTAL: "1"
         shell: bash
@@ -468,7 +548,7 @@ jobs:
               --output-signature "${f}.sig" \
               --output-certificate "${f}.cert" \
               "${f}"
-          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name 'sha256sums.txt' \) -printf '%f\n' | sort)
+          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.dxt' -o -name 'sha256sums.txt' \) -printf '%f\n' | sort)
           find . -maxdepth 1 -type f \( -name '*.sig' -o -name '*.cert' \) -print
 
       - name: Compute base64 hashes for SLSA generator
@@ -479,11 +559,11 @@ jobs:
           cd dist
           # The SLSA generic generator wants base64 of a sha256sums-style
           # listing of every artifact we want covered by provenance —
-          # that's every tarball plus the sums file itself.
+          # that's every tarball, every .dxt, plus the sums file itself.
           tmp="$(mktemp)"
           while IFS= read -r f; do
             sha256sum "$f" >> "$tmp"
-          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name 'sha256sums.txt' \) -printf '%f\n' | sort)
+          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.dxt' -o -name 'sha256sums.txt' \) -printf '%f\n' | sort)
           encoded="$(base64 -w0 < "$tmp")"
           echo "hashes=${encoded}" >> "$GITHUB_OUTPUT"
 
@@ -495,6 +575,9 @@ jobs:
             dist/*.tar.gz
             dist/*.tar.gz.sig
             dist/*.tar.gz.cert
+            dist/*.dxt
+            dist/*.dxt.sig
+            dist/*.dxt.cert
             dist/sha256sums.txt
             dist/sha256sums.txt.sig
             dist/sha256sums.txt.cert
@@ -504,19 +587,18 @@ jobs:
   # -------------------------------------------------------------------
   # 3b. Cloak.dxt — Claude Desktop Extension package.
   #
-  # Builds one .dxt per platform (macOS arm64/x64, Linux x64/arm64) by
+  # Builds one .dxt per platform (macOS arm64/x64, Linux x64) by
   # reusing the cloak-mcp binary from the same tarball the build job
   # produced. No second build of cloak-mcp — the bytes inside the .dxt
   # are byte-identical to those inside the signed tarball. Windows is
   # deferred to v1.0.1.
   #
-  # This job is intentionally NOT in `sign` — Cloak.dxt is a v0.9.0-rc1
-  # convenience asset, not part of the SLSA-signed core. v1.0.x will
-  # fold .dxt artifacts into the cosign + SLSA provenance scope.
+  # The sign job waits for these artifacts, then signs and provenance-
+  # attests them with the rest of the release payload.
   # -------------------------------------------------------------------
   dxt-package:
     name: dxt package (${{ matrix.platform_tag }})
-    needs: [build, sign]
+    needs: [build, macos-guard]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
@@ -561,7 +643,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ needs.sign.outputs.version }}"
+          version="${{ needs.build.outputs.version }}"
           stage="cloak-${version}-${{ matrix.target }}"
           tarball="incoming/${stage}.tar.gz"
           test -f "$tarball" || { echo "::error::expected $tarball"; exit 1; }
@@ -578,7 +660,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ needs.sign.outputs.version }}"
+          version="${{ needs.build.outputs.version }}"
           ./scripts/build-dxt.sh "$version" "${{ matrix.platform_tag }}" "${{ steps.extract.outputs.mcp }}"
 
       - name: Upload .dxt artifact
@@ -611,8 +693,8 @@ jobs:
   # -------------------------------------------------------------------
   # 5. Draft GitHub Release.
   #
-  # Attaches every tarball, every .sig, every .cert, sha256sums.txt
-  # (+ its sig/cert), and the SLSA provenance jsonl. Notes are pulled
+  # Attaches every tarball, every .dxt, every .sig, every .cert,
+  # sha256sums.txt (+ its sig/cert), and the SLSA provenance jsonl. Notes are pulled
   # from the tag if `--notes-from-tag` finds anything; otherwise the
   # maintainer hand-edits before publishing. The release is created
   # in DRAFT state and only the verification job below decides whether
@@ -620,7 +702,7 @@ jobs:
   # -------------------------------------------------------------------
   release:
     name: draft release
-    needs: [sign, provenance, dxt-package]
+    needs: [sign, provenance]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -645,21 +727,6 @@ jobs:
           # historical footgun (intermittent empty values); pin literally.
           name: multiple.intoto.jsonl
           path: dist
-
-      - name: Download .dxt artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dxt-incoming
-          pattern: dxt-*
-
-      - name: Flatten .dxt artifacts into dist/
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -d dxt-incoming ]; then
-            find dxt-incoming -type f -name '*.dxt' -exec cp {} dist/ \;
-          fi
-          find dist -maxdepth 1 -type f -name '*.dxt' -print || true
 
       - name: List release payload
         shell: bash
@@ -752,7 +819,7 @@ jobs:
         with:
           cosign-release: "v2.4.1"
 
-      - name: cosign verify-blob (each tarball + sha256sums.txt)
+      - name: cosign verify-blob (each tarball, .dxt, and sha256sums.txt)
         env:
           COSIGN_EXPERIMENTAL: "1"
           # Workflow ref must match release.yml on the tagged commit.
@@ -775,7 +842,7 @@ jobs:
               echo "::error::cosign verify-blob FAILED for ${f}"
               fail=1
             fi
-          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name 'sha256sums.txt' \) -printf '%f\n' | sort)
+          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.dxt' -o -name 'sha256sums.txt' \) -printf '%f\n' | sort)
           if [ "$fail" -ne 0 ]; then
             echo "::error::One or more cosign verifications failed. Release stays in DRAFT."
             exit 1
@@ -800,7 +867,7 @@ jobs:
               echo "::error::slsa-verifier FAILED for ${f}"
               fail=1
             fi
-          done < <(find . -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' | sort)
+          done < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.dxt' \) -printf '%f\n' | sort)
           if [ "$fail" -ne 0 ]; then
             echo "::error::SLSA verification failed. Release stays in DRAFT."
             exit 1

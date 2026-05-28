@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { request } from "../ipc.ts";
 import type { CloakTool, ToolResult } from "./types.ts";
+import { secretMetadataSchema, secretNameSchema } from "./validation.ts";
 
 const argsSchema = z
   .object({
-    name: z.string().min(1),
+    name: secretNameSchema,
   })
   .strict();
 
@@ -12,7 +13,7 @@ const inputSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
   properties: {
-    name: { type: "string", minLength: 1, description: "The secret name." },
+    name: { type: "string", minLength: 1, maxLength: 256, description: "The secret name." },
   },
   required: ["name"],
   additionalProperties: false,
@@ -26,6 +27,7 @@ export const getSecretMetadata: CloakTool = {
   async handler(rawArgs: unknown): Promise<ToolResult> {
     const parsed = argsSchema.parse(rawArgs);
     const result = await request("vault.get_metadata", parsed);
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    const metadata = secretMetadataSchema.parse(result);
+    return { content: [{ type: "text", text: JSON.stringify(metadata) }] };
   },
 };
