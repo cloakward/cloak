@@ -6,6 +6,14 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("cloakd {}", cloak_core::VERSION);
+        return ExitCode::SUCCESS;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {

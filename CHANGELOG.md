@@ -4,6 +4,11 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.1-rc3] - 2026-05-28
+
+### Fixed
+- Added a non-hanging `cloakd --version` / `cloakd -V` path and regression test after the RC2 `release-install` workflow exposed that the daemon started normally instead of printing a version.
+
 ## [1.0.1-rc2] - 2026-05-28
 
 ### Added
