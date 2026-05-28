@@ -2,7 +2,7 @@
 
 > Audience: maintainers cutting a release, and downstream users verifying
 > one. This is the source of truth for what the current release workflow
-> verifies and what remains beta/pre-production.
+> verifies and what remains unsupported or pre-production.
 
 ## Cutting a release (maintainer steps)
 

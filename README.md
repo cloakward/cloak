@@ -19,7 +19,7 @@ Pasting your API key into an AI chat is the new `rm -rf /`. Once the model has i
 
 ## Status
 
-Cloak is beta software. Source builds are the recommended path until the first production release tag passes the current release gate end to end.
+Cloak's macOS and Linux release artifacts are production-gated. Stable tags must pass CI, security scans, smoke tests, Apple signing/notarization, cosign/SLSA verification, downstream publish checks, and published-artifact install tests before being recommended.
 
 Current release notes:
 
@@ -31,20 +31,20 @@ Current release notes:
 
 ## Install
 
-During beta, build from source when you need the most direct trust path:
+For stable releases, install from the signed and verified release channels:
+
+```sh
+brew install cloakward/cloak/cloak
+cloak setup
+```
+
+Build from source when you need the most direct local audit path:
 
 ```sh
 git clone https://github.com/cloakward/cloak
 cd cloak
 cargo build --release --workspace
 cd packages/cloak-mcp && bun install --frozen-lockfile && bun run build
-```
-
-Packaged channels are previews unless the release artifacts include matching signatures/provenance:
-
-```sh
-brew install cloakward/cloak/cloak
-cloak setup
 ```
 
 The setup wizard takes about 60 seconds. It auto-detects Claude Desktop, Claude Code, Cursor, Windsurf, Continue.dev, Zed, and Codex, and wires them all up.

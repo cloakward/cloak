@@ -1,8 +1,10 @@
-# Cloak Quickstart (beta, macOS + Linux)
+# Cloak Quickstart (macOS + Linux)
 
-> Cloak is beta software. Source builds are the recommended install path
-> until a production release tag has passed the full release gate. Windows
-> is not part of the current release artifacts yet ([issue #3](https://github.com/cloakward/cloak/issues/3)).
+> Cloak's stable macOS and Linux release artifacts are production-gated:
+> CI, security scans, smoke tests, Apple signing/notarization, cosign/SLSA
+> verification, downstream publish jobs, and published-artifact install
+> checks must pass before a stable tag is recommended. Windows is not part
+> of the current release artifacts yet ([issue #3](https://github.com/cloakward/cloak/issues/3)).
 > On Linux the desktop pepper uses freedesktop Secret Service and `cloak show`
 > gates the reveal on polkit (`dev.cloak.show-secret`; install
 > `scripts/polkit/dev.cloak.policy` under `/usr/share/polkit-1/actions/`).

@@ -4,6 +4,18 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-05-28
+
+### Added
+- Added the release-install gate for published artifacts: checksum validation, cosign verification, macOS code-signature checks, binary version checks, and shipped-binary smoke tests across macOS and Linux targets.
+
+### Changed
+- Promoted the RC3 release-engineering fixes to the stable channel after CI, security, smoke, release signing/notarization, provenance verification, downstream publish jobs, Homebrew tap update, and release-install checks all passed.
+- Updated README and launch docs to describe stable macOS/Linux artifacts as production-gated while keeping Windows explicitly outside the shipped release artifacts.
+
+### Fixed
+- Added a non-hanging `cloakd --version` / `cloakd -V` path after the RC2 release-install run exposed that the daemon started normally instead of printing a version.
+
 ## [1.0.1-rc3] - 2026-05-28
 
 ### Fixed
