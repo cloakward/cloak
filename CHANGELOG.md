@@ -4,6 +4,16 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.1-rc1] - 2026-05-28
+
+### Security
+- Resolved OSV dependency findings in the Rust and MCP dependency graphs, including removal of the legacy `rustls-webpki` 0.101.x path and pinned MCP transitive overrides for `fast-uri`, `hono`, `ip-address`, and `qs`.
+
+### Fixed
+- Hardened release and security workflows so prerelease tags are marked as prereleases, Docker `latest` is reserved for stable tags, and OSV scanning runs as a normal pinned job with explicit permissions.
+- Updated the smoke test environment guard so test-only passphrase injection requires `CLOAK_UNSAFE_TEST_MODE=1`.
+- Refreshed README and launch docs around open-source installation, prerelease trust, Apple signing/notarization expectations, and publisher naming constraints.
+
 ## [1.0.0] — 2026-05-08
 
 ### Security
