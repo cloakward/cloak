@@ -7,18 +7,7 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-# RUSTSEC-2026-0098 / 0099 / 0104 are panics + name-constraint mishandling
-# in rustls-webpki <0.103.13, reachable only when the application uses
-# rustls TLS / CRL parsing. They are pulled in transitively by
-# aws-smithy-http-client v1.1.12 (rustls 0.21.12 -> rustls-webpki 0.101.7),
-# which is on W1's AWS SDK. Cloak does not parse CRLs and the daemon's own
-# egress uses reqwest+rustls 0.23 (the patched line). Tracking under W1
-# follow-up; revisit when aws-smithy-runtime ships a rustls 0.23 build.
-ignore = [
-  "RUSTSEC-2026-0098",
-  "RUSTSEC-2026-0099",
-  "RUSTSEC-2026-0104",
-]
+ignore = []
 
 [licenses]
 version = 2

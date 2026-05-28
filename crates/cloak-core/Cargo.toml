@@ -58,13 +58,13 @@ url = { workspace = true }
 aws-sigv4 = { version = "1.2", default-features = false, features = ["http1", "sign-http"] }
 
 # `aws-sdk-sts` for `tool.mint_token` kind=aws-sts. We deliberately skip
-# `aws-config` (its `rustls` feature pulls aws-lc-rs via
-# `aws-smithy-runtime/default-https-client`) and build the SdkConfig
-# ourselves via `aws_sdk_sts::config::Config::builder()`. The `rustls`
-# feature on aws-sdk-sts pulls `aws-smithy-runtime/tls-rustls` which uses
-# `legacy-rustls-ring` (ring, NOT aws-lc-rs).
-aws-sdk-sts = { version = "1.40", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
+# `aws-config`, `aws-sdk-sts/rustls`, and `aws-sdk-sts/default-https-client`
+# because those features either use aws-lc-rs or the SDK's legacy rustls
+# 0.21 connector. Instead, `build_real_sts_client` injects an explicit
+# Smithy HTTP client with the modern rustls/ring provider.
+aws-sdk-sts = { version = "1.40", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 aws-credential-types = { version = "1.2", default-features = false, features = ["hardcoded-credentials"] }
+aws-smithy-http-client = { version = "1.1", default-features = false, features = ["rustls-ring"] }
 aws-smithy-runtime-api = { version = "1.7", default-features = false, features = ["client"] }
 aws-smithy-types = { version = "1.2", default-features = false }
 
@@ -109,11 +109,6 @@ zbus_polkit = { version = "5", default-features = false, features = ["blocking-a
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
-# Mock the STS API surface for integration tests so we never hit AWS.
-# Requires aws-sdk-sts to be built with `test-util` for `mock_client!`.
-aws-smithy-mocks = { version = "0.2", default-features = false }
-aws-sdk-sts = { version = "1.40", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest", "test-util"] }
-aws-smithy-types = { version = "1.2", default-features = false }
 http = "1"
 # Re-import the cloak-core crate with the `test-util` feature enabled so
 # integration tests under `tests/` can inject a mocked STS client into
