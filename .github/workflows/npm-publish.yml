@@ -2,7 +2,7 @@
 #
 # Fires when a GitHub Release is published. Two-leg flow:
 #
-#   Leg 1 (preferred): OIDC trusted publishing. npm 9.5+ picks up the
+#   Leg 1 (preferred): OIDC trusted publishing. npm 11.5+ picks up the
 #   token from ACTIONS_ID_TOKEN_REQUEST_URL when `id-token: write` is
 #   set, and `--provenance` attaches a signed provenance attestation.
 #   This is the strict-good path.
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # Honor either the release event's tag or the manual dispatch input.
           ref: ${{ github.event.release.tag_name || inputs.ref }}
@@ -71,11 +71,14 @@ jobs:
           fi
           echo "version sync ok: ${pkg_version}"
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@^11.10.0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
