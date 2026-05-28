@@ -24,7 +24,8 @@
 //! W1 (decision: option A). They use:
 //! - `aws-sigv4` for the V4 algorithm — KAT-verified against the published
 //!   AWS test suite (see `sigv4_kat_get_vanilla`).
-//! - `aws-sdk-sts` (with the `rustls` / ring TLS feature) for STS calls;
+//! - `aws-sdk-sts` with an explicit Smithy HTTP client using rustls/ring
+//!   for STS calls;
 //!   we deliberately avoid `aws-config` to keep aws-lc-rs out of the
 //!   dependency graph (verified by `cargo tree -p cloak-core`).
 
@@ -85,13 +86,15 @@ fn policy_tool_name(tool: &str) -> &'static str {
     }
 }
 
-/// Append a single audit entry, swallowing audit-write errors (logging
-/// only). We never want a failed audit to mask the real outcome.
-async fn audit_one(audit: &Mutex<AuditLog>, draft: AuditDraft) {
+/// Append a single audit entry. Privileged tool calls fail closed if the
+/// audit trail cannot be written.
+async fn audit_one(audit: &Mutex<AuditLog>, draft: AuditDraft) -> Result<()> {
     let mut g = audit.lock().await;
     if let Err(e) = g.append(draft) {
-        tracing::warn!(error = %e, "audit append failed");
+        tracing::error!(error = %e, "audit append failed");
+        return Err(Error::Other("audit append failed"));
     }
+    Ok(())
 }
 
 /// Parse a JSON `Value` as `T`, returning `Error::IpcFraming("invalid params")`
@@ -160,7 +163,7 @@ async fn enforce_policy(
                 note: Some(reason.clone()),
             },
         )
-        .await;
+        .await?;
         return Err(Error::PolicyDenied(reason));
     }
 
@@ -178,7 +181,7 @@ async fn enforce_policy(
                 note: Some("rate limited".to_string()),
             },
         )
-        .await;
+        .await?;
         return Err(Error::PolicyDenied("rate limited".to_string()));
     }
     Ok(())
@@ -294,7 +297,7 @@ pub async fn sign_request(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value>
                     note: Some(format!("unknown scheme: {other}")),
                 },
             )
-            .await;
+            .await?;
             return Err(Error::IpcFraming("unknown sign_request scheme"));
         }
     };
@@ -310,7 +313,7 @@ pub async fn sign_request(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value>
             note: Some(scheme_label.to_string()),
         },
     )
-    .await;
+    .await?;
 
     Ok(json!({ "headers": new_headers }))
 }
@@ -481,6 +484,9 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
     let p: ProxyHttpParams = parse_params(params)?;
 
     let mut url = url::Url::parse(&p.url).map_err(|_| Error::IpcFraming("invalid url"))?;
+    if url.scheme() != "https" && !test_allows_plaintext_proxy(&url) {
+        return Err(Error::IpcFraming("proxy_http requires https"));
+    }
     let host = url.host_str().map(str::to_string);
 
     enforce_policy(
@@ -592,7 +598,7 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                     note: Some(format!("egress error: {e}")),
                 },
             )
-            .await;
+            .await?;
             return Err(e);
         }
     };
@@ -608,7 +614,7 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
             note: Some(format!("status={}", resp.status)),
         },
     )
-    .await;
+    .await?;
 
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp.body);
     // Header keys are already lowercased by `egress::execute`.
@@ -617,6 +623,19 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
         "headers": resp.headers,
         "body_b64": body_b64,
     }))
+}
+
+fn test_allows_plaintext_proxy(_url: &url::Url) -> bool {
+    #[cfg(any(test, feature = "test-util"))]
+    {
+        _url.scheme() == "http"
+            && _url.host_str() == Some("127.0.0.1")
+            && std::env::var_os("CLOAK_TEST_ALLOW_HTTP_EGRESS").is_some()
+    }
+    #[cfg(not(any(test, feature = "test-util")))]
+    {
+        false
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -641,36 +660,61 @@ struct MintTokenParams {
 const AWS_STS_MIN_TTL_SECONDS: i64 = 900;
 const AWS_STS_MAX_TTL_SECONDS: i64 = 129_600;
 
-/// Optional STS client factory injected by tests (cfg(test) only) so they
-/// can hand the handler a mocked client without going through the real
-/// configuration path. Production builds (cfg(not(test))) always use
-/// [`build_real_sts_client`].
+/// Minimal AWS STS credential envelope returned by the test token factory.
+#[derive(Clone, Debug)]
+pub struct StsSession {
+    /// Temporary AWS access key ID.
+    pub access_key_id: String,
+    /// Temporary AWS secret access key.
+    pub secret_access_key: String,
+    /// Temporary AWS session token.
+    pub session_token: String,
+    /// Credential expiration as Unix epoch seconds.
+    pub expiration_secs: i64,
+}
+
+/// Future returned by the test STS token factory.
 #[cfg(any(test, feature = "test-util"))]
-pub type StsClientFactory =
-    std::sync::Arc<dyn Fn(&str, &str, &str) -> aws_sdk_sts::Client + Send + Sync>;
+pub type StsTokenFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<StsSession>>> + Send>>;
+
+#[cfg(not(any(test, feature = "test-util")))]
+type StsTokenFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<StsSession>>> + Send>>;
+
+/// Optional STS token factory injected by tests (cfg(test) only) so they
+/// can hand the handler a mocked token response without pulling in the
+/// AWS SDK's legacy test HTTP client. Production builds (cfg(not(test)))
+/// always use [`request_real_sts_session`].
+#[cfg(any(test, feature = "test-util"))]
+pub type StsTokenFactory =
+    std::sync::Arc<dyn Fn(String, String, String, i32) -> StsTokenFuture + Send + Sync>;
+
+#[cfg(not(any(test, feature = "test-util")))]
+type StsTokenFactory = fn(String, String, String, i32) -> StsTokenFuture;
 
 #[cfg(any(test, feature = "test-util"))]
-static AWS_STS_TEST_FACTORY: once_cell::sync::OnceCell<std::sync::Mutex<Option<StsClientFactory>>> =
+static AWS_STS_TEST_FACTORY: once_cell::sync::OnceCell<std::sync::Mutex<Option<StsTokenFactory>>> =
     once_cell::sync::OnceCell::new();
 
 /// Install (or remove) a test-only STS client factory. Returns the
 /// previously installed factory, if any. Only available in `cfg(test)`
 /// or with the `test-util` feature.
 #[cfg(any(test, feature = "test-util"))]
-pub fn set_test_sts_factory(f: Option<StsClientFactory>) -> Option<StsClientFactory> {
+pub fn set_test_sts_factory(f: Option<StsTokenFactory>) -> Option<StsTokenFactory> {
     let cell = AWS_STS_TEST_FACTORY.get_or_init(|| std::sync::Mutex::new(None));
     let mut g = cell.lock().expect("test factory lock");
     std::mem::replace(&mut *g, f)
 }
 
 #[cfg(any(test, feature = "test-util"))]
-fn current_test_sts_factory() -> Option<StsClientFactory> {
+fn current_test_sts_factory() -> Option<StsTokenFactory> {
     let cell = AWS_STS_TEST_FACTORY.get_or_init(|| std::sync::Mutex::new(None));
     cell.lock().ok().and_then(|g| g.clone())
 }
 
 #[cfg(not(any(test, feature = "test-util")))]
-fn current_test_sts_factory() -> Option<fn(&str, &str, &str) -> aws_sdk_sts::Client> {
+fn current_test_sts_factory() -> Option<StsTokenFactory> {
     None
 }
 
@@ -680,14 +724,50 @@ fn current_test_sts_factory() -> Option<fn(&str, &str, &str) -> aws_sdk_sts::Cli
 fn build_real_sts_client(akid: &str, secret: &str, region: &str) -> aws_sdk_sts::Client {
     use aws_credential_types::Credentials;
     use aws_sdk_sts::config::{BehaviorVersion, Region};
+    use aws_smithy_http_client::{tls, Builder as HttpClientBuilder};
 
     let creds = Credentials::from_keys(akid, secret, None);
+    let http_client = HttpClientBuilder::new()
+        .tls_provider(tls::Provider::Rustls(
+            tls::rustls_provider::CryptoMode::Ring,
+        ))
+        .build_https();
     let conf = aws_sdk_sts::Config::builder()
         .behavior_version(BehaviorVersion::latest())
         .region(Region::new(region.to_string()))
         .credentials_provider(creds)
+        .http_client(http_client)
         .build();
     aws_sdk_sts::Client::from_conf(conf)
+}
+
+async fn request_real_sts_session(
+    akid: &str,
+    secret: &str,
+    region: &str,
+    ttl: i32,
+) -> Result<Option<StsSession>> {
+    let client = build_real_sts_client(akid, secret, region);
+    let resp = client
+        .get_session_token()
+        .duration_seconds(ttl)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::debug!(error = %e, "GetSessionToken failed");
+            Error::Other("aws-sts: GetSessionToken failed")
+        })?;
+
+    let Some(creds) = resp.credentials() else {
+        return Ok(None);
+    };
+
+    Ok(Some(StsSession {
+        access_key_id: creds.access_key_id().to_string(),
+        secret_access_key: creds.secret_access_key().to_string(),
+        session_token: creds.session_token().to_string(),
+        expiration_secs: creds.expiration().secs(),
+    }))
 }
 
 /// Handler for `tool.mint_token`.
@@ -742,7 +822,7 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                             note: Some("kind=aws-sts secret-shape-invalid".to_string()),
                         },
                     )
-                    .await;
+                    .await?;
                     return Err(Error::Other("aws-sts: secret must be 'AKID:SECRET'"));
                 }
             };
@@ -756,43 +836,24 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                 _ => "us-east-1".to_string(),
             };
 
-            let client = match current_test_sts_factory() {
-                Some(factory) => (factory)(akid, secret_key, &region),
-                None => build_real_sts_client(akid, secret_key, &region),
+            let session = match current_test_sts_factory() {
+                Some(factory) => {
+                    (factory)(
+                        akid.to_string(),
+                        secret_key.to_string(),
+                        region.clone(),
+                        ttl as i32,
+                    )
+                    .await
+                }
+                None => request_real_sts_session(akid, secret_key, &region, ttl as i32).await,
             };
 
             // Call STS GetSessionToken. On any AWS error, audit + return
             // a constant-message error.
-            let resp = match client
-                .get_session_token()
-                .duration_seconds(ttl as i32)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::debug!(error = %e, "GetSessionToken failed");
-                    audit_one(
-                        ctx.audit,
-                        AuditDraft {
-                            peer: ctx.peer.clone(),
-                            tool: "tool.mint_token".to_string(),
-                            secret: Some(p.secret_name.clone()),
-                            target: None,
-                            result: AuditResult::Error,
-                            note: Some(format!(
-                                "kind=aws-sts ttl={ttl}s region={region} api-error"
-                            )),
-                        },
-                    )
-                    .await;
-                    return Err(Error::Other("aws-sts: GetSessionToken failed"));
-                }
-            };
-
-            let creds = match resp.credentials() {
-                Some(c) => c,
-                None => {
+            let creds = match session {
+                Ok(Some(c)) => c,
+                Ok(None) => {
                     audit_one(
                         ctx.audit,
                         AuditDraft {
@@ -806,23 +867,40 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                             )),
                         },
                     )
-                    .await;
+                    .await?;
                     return Err(Error::Other(
                         "aws-sts: GetSessionToken returned no credentials",
                     ));
                 }
+                Err(e) => {
+                    audit_one(
+                        ctx.audit,
+                        AuditDraft {
+                            peer: ctx.peer.clone(),
+                            tool: "tool.mint_token".to_string(),
+                            secret: Some(p.secret_name.clone()),
+                            target: None,
+                            result: AuditResult::Error,
+                            note: Some(format!(
+                                "kind=aws-sts ttl={ttl}s region={region} api-error"
+                            )),
+                        },
+                    )
+                    .await?;
+                    return Err(e);
+                }
             };
 
-            let expiration_secs = creds.expiration().secs();
+            let expiration_secs = creds.expiration_secs;
             let expiration_dt: DateTime<Utc> =
                 DateTime::<Utc>::from_timestamp(expiration_secs, 0).unwrap_or_else(Utc::now);
 
             // Encode the temporary credentials as a base64'd JSON envelope
             // — this is the documented "token" wire shape.
             let envelope = json!({
-                "access_key_id": creds.access_key_id(),
-                "secret_access_key": creds.secret_access_key(),
-                "session_token": creds.session_token(),
+                "access_key_id": creds.access_key_id,
+                "secret_access_key": creds.secret_access_key,
+                "session_token": creds.session_token,
                 "expiration": expiration_dt.to_rfc3339(),
             });
             let envelope_bytes = serde_json::to_vec(&envelope)
@@ -843,7 +921,7 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                     )),
                 },
             )
-            .await;
+            .await?;
 
             Ok(json!({
                 "token": token,
@@ -862,7 +940,7 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                     note: Some(format!("kind={other} unsupported")),
                 },
             )
-            .await;
+            .await?;
             Err(Error::Other("mint_token: kind not supported in v0.1"))
         }
     }
@@ -938,7 +1016,7 @@ pub async fn query_audit(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> 
             note: Some(format!("returned {n} entries")),
         },
     )
-    .await;
+    .await?;
 
     let entries_json: Vec<Value> = entries
         .into_iter()

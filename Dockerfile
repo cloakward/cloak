@@ -18,7 +18,8 @@
 # crate for core` (#46).
 #
 # Runtime contract:
-#   * Vault state lives at /var/lib/cloak (declared as a VOLUME).
+#   * Vault, audit, policy, and runtime socket state live under
+#     /var/lib/cloak (declared as a VOLUME and wired via XDG env vars).
 #   * The pepper file is read from /run/secrets/cloak-pepper. Mount it
 #     as a Docker secret — never bake it into the image.
 #   * No ports are exposed; IPC is UDS-only.
@@ -83,6 +84,17 @@ RUN set -eux; \
         : > /sodium/.static; \
     fi
 
+# Seed the runtime volume with directories owned by distroless nonroot
+# (uid/gid 65532). Docker named volumes copy this ownership from the
+# image on first use; bind mounts must be owned/chmodded by the operator.
+RUN set -eux; \
+    install -d -m 0700 \
+      /runtime-var-lib-cloak/.local/share/cloak \
+      /runtime-var-lib-cloak/.config/cloak \
+      /runtime-var-lib-cloak/run \
+      /runtime-var-lib-cloak/tmp; \
+    chown -R 65532:65532 /runtime-var-lib-cloak
+
 # -----------------------------------------------------------------------------
 # Stage 2 — runtime (distroless)
 # -----------------------------------------------------------------------------
@@ -105,8 +117,16 @@ COPY --from=builder /cloakd /cloakd
 # `libsodium.so` the linker resolves at runtime. Distroless's dynamic
 # linker searches /usr/lib by default.
 COPY --from=builder /sodium/ /usr/lib/cloak/
+COPY --from=builder --chown=65532:65532 /runtime-var-lib-cloak/ /var/lib/cloak/
 
-# Vault state. Operators are expected to mount a named volume here.
+# Vault/audit/config/runtime state. Operators are expected to mount a named
+# volume here. These env vars make Rust's `dirs` resolution land on the
+# declared volume instead of the distroless user's default home.
+ENV HOME=/var/lib/cloak
+ENV XDG_DATA_HOME=/var/lib/cloak/.local/share
+ENV XDG_CONFIG_HOME=/var/lib/cloak/.config
+ENV XDG_RUNTIME_DIR=/var/lib/cloak/run
+ENV TMPDIR=/var/lib/cloak/tmp
 VOLUME ["/var/lib/cloak"]
 
 # Pepper is mounted as a Docker secret. The daemon reads the path from

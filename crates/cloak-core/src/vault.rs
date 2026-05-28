@@ -160,10 +160,11 @@ impl Vault {
     /// counter is compared against the OS-keychain mirror (or the
     /// `CLOAK_PEPPER_FILE`-sibling counter file). A file counter that is
     /// *less* than the mirror is read-side rollback and is rejected with
-    /// [`Error::VaultRollbackDetected`]. A file counter that is *greater*
-    /// refreshes the mirror (legitimate external bump, e.g. an rsync
-    /// from a paired device). A missing mirror is seeded from the file
-    /// (first run after upgrade).
+    /// [`Error::VaultRollbackDetected`]. Once a mirror exists, any
+    /// mismatch is rejected: accepting a file counter that is greater
+    /// than the mirror would let an attacker swap in an older vault
+    /// snapshot and manually bump its counter. A missing mirror is
+    /// seeded from the file (first run after upgrade).
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let store = SqliteStore::open(path)?;
         let v = Self {
@@ -188,32 +189,13 @@ impl Vault {
         let file_counter = meta.monotonic_counter;
         match crate::keychain::read_keychain_counter() {
             Ok(Some(mirror)) => {
-                if file_counter < mirror {
+                if file_counter != mirror {
                     tracing::error!(
                         file_counter,
                         mirror_counter = mirror,
-                        "vault rollback detected on open: file counter is older than keychain mirror"
+                        "vault rollback detected on open: file counter differs from keychain mirror"
                     );
                     return Err(Error::VaultRollbackDetected);
-                }
-                if file_counter > mirror {
-                    // Legitimate forward bump (e.g. rsync from paired
-                    // device). Refresh the mirror so subsequent opens
-                    // see equality. A failure here is logged but not
-                    // fatal — the file is the source of truth.
-                    if let Err(e) = crate::keychain::mirror_counter(file_counter) {
-                        tracing::warn!(
-                            error = %e,
-                            file_counter,
-                            "failed to refresh keychain rollback-counter mirror"
-                        );
-                    } else {
-                        tracing::info!(
-                            file_counter,
-                            previous_mirror = mirror,
-                            "refreshed keychain rollback-counter mirror to match vault file"
-                        );
-                    }
                 }
             }
             Ok(None) => {
@@ -615,6 +597,7 @@ impl Vault {
             &wrap_nonce,
             &wrap_aead,
         )?;
+        self.bump_and_mirror()?;
 
         // 5. Cache the master so the caller doesn't need to re-unlock.
         self.master = Some(master);

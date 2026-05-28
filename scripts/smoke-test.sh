@@ -74,7 +74,8 @@ echo "==> Setting up permissive policy at $HOME/.config/cloak/policy.toml"
 mkdir -p "$HOME/.config/cloak"
 cp "$REPO_ROOT/scripts/policy.example.toml" "$HOME/.config/cloak/policy.toml"
 
-# Test passphrase escape hatch — shared by all `cloak` invocations below.
+# Test-only escape hatches shared by all `cloak` invocations below.
+export CLOAK_UNSAFE_TEST_MODE=1
 export CLOAK_PASSPHRASE="REDACTED-smoke-passphrase"
 
 # `cloak init` displays the BIP-39 recovery seed and refuses to print

@@ -468,6 +468,13 @@ async fn one_shot_http_server() -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
 async fn proxy_http_allowed_host_round_trip() {
     // Stand up an in-process HTTP server first so we know the port.
     let (port, server_handle) = one_shot_http_server().await;
+    // The production daemon rejects plaintext proxy targets. This
+    // integration test enables the crate's test-only loopback escape
+    // hatch so it can keep using a tiny in-process HTTP server without
+    // weakening release builds.
+    unsafe {
+        std::env::set_var("CLOAK_TEST_ALLOW_HTTP_EGRESS", "1");
+    }
 
     let policy = r#"
         [default]
@@ -629,11 +636,7 @@ async fn query_audit_returns_entries_when_allowed() {
 /// envelope decodes back to those credentials. No network I/O.
 #[tokio::test]
 async fn mint_token_aws_sts_real_path_with_mock() {
-    use aws_sdk_sts::operation::get_session_token::GetSessionTokenOutput;
-    use aws_sdk_sts::types::Credentials as StsCredentials;
-    use aws_smithy_mocks::{mock, mock_client, RuleMode};
-    use aws_smithy_types::DateTime as SmithyDateTime;
-    use cloak_core::handlers::set_test_sts_factory;
+    use cloak_core::handlers::{set_test_sts_factory, StsSession};
 
     let _aws_lock = aws_sts_test_lock().await;
 
@@ -652,23 +655,17 @@ async fn mint_token_aws_sts_real_path_with_mock() {
 
     // Install a thread-safe factory that hands out a fresh mocked client
     // per call (the daemon may call this from a different task).
-    let factory: cloak_core::handlers::StsClientFactory = std::sync::Arc::new(
-        move |_akid: &str, _secret: &str, _region: &str| -> aws_sdk_sts::Client {
-            let creds = StsCredentials::builder()
-                .access_key_id("ASIAMOCKEDEXAMPLE")
-                .secret_access_key("mockedsecret/abcdEXAMPLE")
-                .session_token("FwoGmocksessiontoken==")
-                .expiration(SmithyDateTime::from_secs(expiration_unix))
-                .build()
-                .expect("StsCredentials build");
-            let rule = mock!(aws_sdk_sts::Client::get_session_token)
-                .match_requests(|req| req.duration_seconds() == Some(900))
-                .then_output(move || {
-                    GetSessionTokenOutput::builder()
-                        .credentials(creds.clone())
-                        .build()
-                });
-            mock_client!(aws_sdk_sts, RuleMode::Sequential, &[&rule])
+    let factory: cloak_core::handlers::StsTokenFactory = std::sync::Arc::new(
+        move |_akid: String, _secret: String, _region: String, ttl: i32| {
+            Box::pin(async move {
+                assert_eq!(ttl, 900);
+                Ok(Some(StsSession {
+                    access_key_id: "ASIAMOCKEDEXAMPLE".to_string(),
+                    secret_access_key: "mockedsecret/abcdEXAMPLE".to_string(),
+                    session_token: "FwoGmocksessiontoken==".to_string(),
+                    expiration_secs: expiration_unix,
+                }))
+            })
         },
     );
     let _prev = set_test_sts_factory(Some(factory));
@@ -765,11 +762,7 @@ async fn mint_token_aws_sts_real_path_with_mock() {
 /// regressions.
 #[tokio::test]
 async fn no_leak_invariant_for_aws_handlers() {
-    use aws_sdk_sts::operation::get_session_token::GetSessionTokenOutput;
-    use aws_sdk_sts::types::Credentials as StsCredentials;
-    use aws_smithy_mocks::{mock, mock_client, RuleMode};
-    use aws_smithy_types::DateTime as SmithyDateTime;
-    use cloak_core::handlers::set_test_sts_factory;
+    use cloak_core::handlers::{set_test_sts_factory, StsSession};
 
     let _aws_lock = aws_sts_test_lock().await;
 
@@ -788,25 +781,16 @@ async fn no_leak_invariant_for_aws_handlers() {
     const AKID: &str = "AKIAQQQLEAKSENTINEL1";
     const SECRET: &str = "verysensitiveSecretMarker9999//+abcd";
 
-    let factory: cloak_core::handlers::StsClientFactory = std::sync::Arc::new(
-        |_akid: &str, _secret: &str, _region: &str| -> aws_sdk_sts::Client {
-            let creds = StsCredentials::builder()
-                .access_key_id("ASIATEMPMOCK")
-                .secret_access_key("tempsecret")
-                .session_token("tempsession==")
-                .expiration(SmithyDateTime::from_secs(
-                    chrono::Utc::now().timestamp() + 900,
-                ))
-                .build()
-                .expect("creds");
-            let rule = mock!(aws_sdk_sts::Client::get_session_token)
-                .match_requests(|_req| true)
-                .then_output(move || {
-                    GetSessionTokenOutput::builder()
-                        .credentials(creds.clone())
-                        .build()
-                });
-            mock_client!(aws_sdk_sts, RuleMode::Sequential, &[&rule])
+    let factory: cloak_core::handlers::StsTokenFactory = std::sync::Arc::new(
+        |_akid: String, _secret: String, _region: String, _ttl: i32| {
+            Box::pin(async move {
+                Ok(Some(StsSession {
+                    access_key_id: "ASIATEMPMOCK".to_string(),
+                    secret_access_key: "tempsecret".to_string(),
+                    session_token: "tempsession==".to_string(),
+                    expiration_secs: chrono::Utc::now().timestamp() + 900,
+                }))
+            })
         },
     );
     let _prev = set_test_sts_factory(Some(factory));

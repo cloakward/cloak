@@ -8,7 +8,7 @@
 //! - Passphrase confirmation is compared in constant time via
 //!   [`subtle::ConstantTimeEq`] before being returned.
 //! - A hidden `CLOAK_PASSPHRASE` env override exists for integration tests
-//!   (and emits a stderr warning if used outside of `cargo test`).
+//!   and is honored only when `CLOAK_UNSAFE_TEST_MODE=1` is also set.
 
 use anyhow::{Context, Result};
 use cloak_core::crypto::Secret;
@@ -17,16 +17,14 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
 /// Env var that, if set, replaces all interactive passphrase prompts with
-/// its value. Intended for `assert_cmd` integration tests; we still warn on
-/// stderr when set in a TTY context so it's not silently honored in
-/// production.
+/// its value. Intended for `assert_cmd` integration tests and gated by
+/// `CLOAK_UNSAFE_TEST_MODE=1`.
 const TEST_PASSPHRASE_ENV: &str = "CLOAK_PASSPHRASE";
 
 /// Read a passphrase from stdin without echo. Honors `CLOAK_PASSPHRASE` if
-/// set (test-only escape hatch — emits a stderr warning when stdout is a
-/// TTY because that's almost certainly a misconfiguration).
+/// set with `CLOAK_UNSAFE_TEST_MODE=1`.
 pub fn prompt_passphrase(label: &str) -> Result<Secret<String>> {
-    if let Ok(p) = std::env::var(TEST_PASSPHRASE_ENV) {
+    if let Some(p) = crate::test_mode::env_var(TEST_PASSPHRASE_ENV)? {
         if io::stdout().is_terminal() {
             eprintln!(
                 "warning: CLOAK_PASSPHRASE is set; using it instead of prompting (test-only)"
@@ -45,7 +43,7 @@ pub fn prompt_passphrase(label: &str) -> Result<Secret<String>> {
 /// prefix matched.
 pub fn prompt_passphrase_twice() -> Result<Secret<String>> {
     // Honor the test override exactly once: skip confirmation entirely.
-    if let Ok(p) = std::env::var(TEST_PASSPHRASE_ENV) {
+    if let Some(p) = crate::test_mode::env_var(TEST_PASSPHRASE_ENV)? {
         if io::stdout().is_terminal() {
             eprintln!(
                 "warning: CLOAK_PASSPHRASE is set; using it instead of prompting (test-only)"

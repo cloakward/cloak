@@ -1,9 +1,8 @@
 # Cloak release process and verification
 
 > Audience: maintainers cutting a release, and downstream users verifying
-> one. The verification half (cosign + slsa-verifier) is what landed in
-> W9b; the cutting-a-release half is documented here so a fresh
-> contributor can do it without reverse-engineering the workflow.
+> one. This is the source of truth for what the current release workflow
+> verifies and what remains beta/pre-production.
 
 ## Cutting a release (maintainer steps)
 
@@ -26,14 +25,17 @@
      Windows is deferred to v1.0.1 — see
      [issue #2](https://github.com/cloakward/cloak/issues/2).
    - Tarballs each row as `cloak-X.Y.Z-<target>.tar.gz`.
-   - Aggregates `sha256sums.txt`.
-   - Cosign-keyless-signs every tarball and the checksum file (OIDC token
-     from GitHub Actions; identity is the workflow path at the tag ref).
+   - Builds Claude Desktop `.dxt` packages for platforms where the
+     `cloak-mcp` binary exists in the tarball.
+   - Aggregates `sha256sums.txt` across tarballs and `.dxt` packages.
+   - Cosign-keyless-signs every tarball, every `.dxt`, and the checksum
+     file (OIDC token from GitHub Actions; identity is the workflow path
+     at the tag ref).
    - Generates a SLSA L3 provenance attestation
      (`multiple.intoto.jsonl`) via the `slsa-framework/slsa-github-generator`
      reusable workflow.
    - Re-runs `cosign verify-blob` and `slsa-verifier verify-artifact`
-     in a separate verification job. The verify job pulls the
+     in a separate verification job for every tarball and `.dxt`. The verify job pulls the
      `signed-bundle` and SLSA provenance artifacts directly from the
      workflow's artifact storage (not from the draft release, since
      `gh release download` cannot see drafts). The bytes verified are
@@ -48,10 +50,110 @@
 7. **Docker.** `docker-push.yml` builds a multi-arch (`linux/amd64`,
    `linux/arm64`) `cloakd` image and pushes to GHCR. `:X.Y.Z` and
    `:X.Y` tags are always pushed; `:latest` is appended only when the
-   release event flags `prerelease == false` (so a tag like
-   `v0.9.0-rc1` does not advance `:latest` past production). The
-   `prerelease` bit comes from `release.yml` passing `--prerelease`
-   to `gh release create` whenever the tag matches `-rc*|-beta*|-alpha*`.
+   tag name is production-shaped (no `-rc`, `-beta`, `-alpha`, `-pre`,
+   or `-dev` suffix), so a tag like `v0.9.0-rc1` does not advance
+   `:latest` past production.
+
+Production tags are tags that do not match `*-rc*`, `*-beta*`,
+`*-alpha*`, `*-pre*`, or `*-dev*`. Production macOS rows must be signed
+and notarized; the workflow fails if the Apple secrets listed below are
+missing. Prerelease/fork preview tags may skip Apple signing/notarization,
+but those macOS artifacts are explicitly unsigned and should not be
+marketed as production builds.
+
+## macOS notarization
+
+Stable production macOS binaries (`cloak`, `cloakd`, `cloak-mcp`) must be
+Developer ID signed and submitted to Apple's notary service via the
+`release.yml` flow. The workflow refuses to build a production macOS
+tarball if any required Apple secret is absent.
+
+Prerelease/fork preview tags may skip this flow when the secrets are not
+available. Those artifacts are unsigned/unnotarized previews and can
+require `xattr -d com.apple.quarantine` after download.
+
+Bare command-line Mach-O binaries cannot be stapled in-place like `.pkg`,
+`.dmg`, or `.app` bundles. The workflow still submits the signed binaries
+to Apple's notary service; Gatekeeper may need an online ticket lookup on
+first launch. A future packaged installer can provide an offline-stapled
+ticket.
+
+The pipeline, per macOS row:
+
+1. Decodes the Developer ID Application `.p12` from
+   `secrets.APPLE_CERT_P12_BASE64` into a throwaway keychain.
+2. `codesign --force --options runtime --timestamp --sign "Developer ID
+   Application: <NAME> (<TEAM_ID>)"` over each Mach-O binary.
+3. Zips the signed binaries and submits the zip via
+   `xcrun notarytool submit --wait` using an App Store Connect API key
+   (`secrets.APPLE_API_KEY_BASE64` / `APPLE_API_KEY_ID` /
+   `APPLE_API_KEY_ISSUER_ID`).
+4. Attempts `xcrun stapler staple` on each binary and logs a notice when
+   stapler rejects a bare Mach-O. In that case the notarization ticket is
+   served by Apple online during Gatekeeper's first-launch check.
+5. Tarballs the signed/notarized binaries.
+6. **After** notarization, the cosign keyless `sign` job signs the
+   final tarball, so the cosign certificate covers the notarized bytes
+   the user actually downloads.
+
+If any required Apple secret is empty on a production tag, the macOS row
+fails. If any required Apple secret is empty on a prerelease tag, the row
+logs a `::warning::`, skips signing/notarization, and produces an
+unsigned preview tarball.
+
+### Required GitHub Secrets
+
+Add these in **Settings → Secrets and variables → Actions** for the
+`cloakward/cloak` repo:
+
+| Secret | What it is | Where to get it |
+| --- | --- | --- |
+| `APPLE_CERT_P12_BASE64` | Developer ID Application cert + private key as a `.p12`, then `base64 -i cert.p12 \| pbcopy` | Keychain Access → "My Certificates" → right-click "Developer ID Application: <NAME> (<TEAM_ID>)" → Export → `.p12` |
+| `APPLE_CERT_PASSWORD` | The password you set when exporting the `.p12` | You picked it during the export above |
+| `APPLE_API_KEY_BASE64` | The App Store Connect API `.p8` private key, base64-encoded (`base64 -i AuthKey_XXXXXXXX.p8 \| pbcopy`) | https://appstoreconnect.apple.com/access/api → Keys → "+" → role **Developer** → download (one-time download!) |
+| `APPLE_API_KEY_ID` | 10-character alphanumeric Key ID | Shown next to the key on the App Store Connect Keys page |
+| `APPLE_API_KEY_ISSUER_ID` | UUID Issuer ID | Shown at the top of the App Store Connect Keys page |
+| `APPLE_TEAM_ID` | 10-character team ID | https://developer.apple.com/account → Membership details |
+
+### Generating the Developer ID Application certificate
+
+If you don't already have one:
+
+1. https://developer.apple.com/account → Certificates → "+" → **Developer ID Application**.
+2. Generate a CSR via Keychain Access → Certificate Assistant → "Request a Certificate from a Certificate Authority" (save to disk).
+3. Upload the CSR, download the issued `.cer`, double-click to install in your login keychain.
+4. In Keychain Access, expand the certificate to reveal its private key, select both, right-click → **Export 2 items** → `.p12`. Set a password (this becomes `APPLE_CERT_PASSWORD`).
+5. `base64 -i cert.p12 | pbcopy` and paste into `APPLE_CERT_P12_BASE64`.
+
+### Generating the App Store Connect API key
+
+`notarytool` accepts API keys instead of an Apple-ID-and-password
+combo (more robust, no 2FA prompts, can be revoked individually):
+
+1. https://appstoreconnect.apple.com/access/api → **Keys** tab.
+2. Click **+** → name it "Cloak notarytool" → **Access: Developer** is sufficient.
+3. **Download the `.p8`** — this is the only chance you get; the file disappears from the UI immediately after download.
+4. Note the **Key ID** (10 chars) and the **Issuer ID** (UUID at the top of the page).
+5. `base64 -i AuthKey_<KEY_ID>.p8 | pbcopy` → `APPLE_API_KEY_BASE64`.
+
+## Moving inputs to review before production
+
+Some inputs are intentionally still version-tagged rather than pinned by
+digest/SHA:
+
+- GitHub Actions are pinned to major release tags such as `actions/checkout@v4`.
+- The Rust toolchain follows `rust-toolchain.toml` (`stable` today).
+- The Dockerfile uses Debian/distroless tags rather than image digests.
+- `libsodium-sys-stable` is built with its `fetch-latest` feature, so the
+  upstream libsodium source selected by that build script is also a moving
+  input.
+
+Bun was an obvious `latest` input and is pinned to `1.2.9` in CI/release
+workflows. Before cutting a production tag, review the remaining moving
+inputs in the workflow run summary, Cargo build output, and Docker build
+log. Do not publish a production release if an unexpected action,
+toolchain, base-image, or libsodium update landed in the same run; either
+pin it first or cut a new tag after review.
 
 ## macOS notarization
 
@@ -121,17 +223,30 @@ combo (more robust, no 2FA prompts, can be revoked individually):
 
 ## What a release publishes
 
-Every Cloak release tag (`vX.Y.Z`) is built, signed, and provenance-attested
-by `.github/workflows/release.yml`. Each platform tarball ships with:
+Every Cloak release tag (`vX.Y.Z`) cut by the current workflow is built,
+signed, and provenance-attested by `.github/workflows/release.yml`. Each
+platform tarball ships with:
 
 - `cloak-<version>-<target>.tar.gz` — the release archive
 - `cloak-<version>-<target>.tar.gz.sig` — cosign keyless signature
 - `cloak-<version>-<target>.tar.gz.cert` — cosign Fulcio certificate
 
+Claude Desktop extension packages ship for platforms where `cloak-mcp` was
+built:
+
+- `Cloak-<version>-<platform>.dxt` — Claude Desktop extension archive
+- `Cloak-<version>-<platform>.dxt.sig` — cosign keyless signature
+- `Cloak-<version>-<platform>.dxt.cert` — cosign Fulcio certificate
+
 Plus, attached once per release:
 
-- `sha256sums.txt` (and `.sig` / `.cert`) — aggregate hash file
+- `sha256sums.txt` (and `.sig` / `.cert`) — aggregate hash file covering
+  tarballs and `.dxt` packages
 - `multiple.intoto.jsonl` — SLSA L3 provenance attestation
+
+Older preview releases may include `.dxt` files without matching `.sig`,
+`.cert`, or SLSA subject entries. Treat those `.dxt` files as unsigned
+convenience assets.
 
 ## Prerequisites
 
@@ -161,6 +276,9 @@ cosign verify-blob \
 
 The verifier prints `Verified OK` on success.
 
+For a `.dxt`, use the same command shape with the `.dxt` filename and its
+matching `.dxt.sig` / `.dxt.cert` files.
+
 ## Verify SLSA L3 provenance
 
 ```sh
@@ -172,8 +290,8 @@ slsa-verifier verify-artifact \
 ```
 
 A passing run binds the artifact's sha256 to a specific GitHub Actions
-build of `release.yml` at the tagged commit — proof the binary was
-produced by the release pipeline and not tampered with after.
+build of `release.yml` at the tagged commit — proof the tarball or `.dxt`
+was produced by the release pipeline and not tampered with after.
 
 ## Cross-check the aggregate hash file
 

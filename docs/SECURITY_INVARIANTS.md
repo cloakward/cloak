@@ -129,8 +129,9 @@ A monotonic counter lives in the vault's `meta` table and is mirrored
 into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`,
 or a 0600 `rollback-counter` file alongside `CLOAK_PEPPER_FILE`).
 `Vault::open_or_create` compares the two and rejects with
-`Error::VaultRollbackDetected` whenever the file counter is below the
-mirror, so read-side rollback is caught before any record is decrypted.
+`Error::VaultRollbackDetected` whenever an existing mirror differs from
+the file counter, so read-side rollback is caught before any record is
+decrypted.
 The write-side gate (`crates/cloak-core/src/store.rs::bump_counter`) is
 covered by `crates/cloak-core/src/vault.rs::tests::rollback_counter_rejected_via_store`;
 the read-side gate end-to-end is covered by

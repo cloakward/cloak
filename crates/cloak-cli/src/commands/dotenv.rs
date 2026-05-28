@@ -68,14 +68,17 @@ fn valid_env_key(key: &str) -> bool {
     chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-/// Strip matching surrounding quotes and trim a trailing inline comment
-/// when the value is unquoted.
+/// Strip matching surrounding quotes, unescape double-quoted values,
+/// and trim a trailing inline comment when the value is unquoted.
 fn dequote(s: &str) -> String {
     let s = s.trim();
     if s.len() >= 2 {
         let first = s.as_bytes()[0];
         let last = s.as_bytes()[s.len() - 1];
-        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+        if first == b'"' && last == b'"' {
+            return unescape_double_quoted(&s[1..s.len() - 1]);
+        }
+        if first == b'\'' && last == b'\'' {
             return s[1..s.len() - 1].to_string();
         }
     }
@@ -85,6 +88,32 @@ fn dequote(s: &str) -> String {
         return s[..idx].trim_end().to_string();
     }
     s.to_string()
+}
+
+fn unescape_double_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('$') => out.push('$'),
+            Some('`') => out.push('`'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Render entries to a `.env` body, double-quoting values that contain
@@ -167,5 +196,20 @@ mod tests {
         assert!(body.contains("A=b\n"));
         assert!(body.contains("B=\"with space\"\n"));
         assert!(body.contains("C=\"with\\\"quote\"\n"));
+    }
+
+    #[test]
+    fn quoted_escapes_round_trip() {
+        let entries = vec![
+            ("QUOTE".into(), "with \"quotes\"".into()),
+            ("BACKSLASH".into(), "C:\\tmp\\cloak".into()),
+            ("MULTILINE".into(), "line one\nline two".into()),
+            ("LITERAL".into(), "\\n stays literal".into()),
+        ];
+        let body = render_dotenv(&entries);
+        let parsed = parse_dotenv_str(&body);
+        let round_tripped: Vec<(String, String)> =
+            parsed.into_iter().map(|e| (e.key, e.value)).collect();
+        assert_eq!(round_tripped, entries);
     }
 }

@@ -15,8 +15,7 @@
 //!   action (default policy `auth_self_keep`, see
 //!   `scripts/polkit/dev.cloak.policy`).
 //! - **Other** — a stub that returns `Ok(false)`; the daemon then
-//!   refuses the reveal unless the caller passed the explicit
-//!   `skip_biometric` opt-out.
+//!   refuses the reveal.
 //!
 //! Failure / cancel returns `Ok(false)` so the daemon can refuse the
 //! reveal with [`crate::Error::BiometricFailed`].
@@ -198,7 +197,7 @@ mod imp {
             Err(e) => {
                 tracing::warn!(
                     %e,
-                    "polkit unavailable, falling back to refusal — pass --no-biometric to bypass"
+                    "polkit unavailable; refusing user-presence request"
                 );
                 return Ok(false);
             }
@@ -210,7 +209,7 @@ mod imp {
             Err(e) => {
                 tracing::warn!(
                     %e,
-                    "polkit unavailable, falling back to refusal — pass --no-biometric to bypass"
+                    "polkit unavailable; refusing user-presence request"
                 );
                 return Ok(false);
             }
@@ -221,7 +220,7 @@ mod imp {
             Err(e) => {
                 tracing::warn!(
                     %e,
-                    "polkit unavailable, falling back to refusal — pass --no-biometric to bypass"
+                    "polkit unavailable; refusing user-presence request"
                 );
                 return Ok(false);
             }
@@ -256,7 +255,7 @@ mod imp {
                 // file not installed) or polkit itself is not running.
                 tracing::warn!(
                     %e,
-                    "polkit unavailable, falling back to refusal — pass --no-biometric to bypass"
+                    "polkit unavailable; refusing user-presence request"
                 );
                 Ok(false)
             }
@@ -272,9 +271,7 @@ pub fn authenticate(reason: &str) -> Result<bool> {
 }
 
 /// Stub for targets that aren't macOS or Linux: refuse the reveal so
-/// the daemon fails closed. The user can opt out of the biometric
-/// gate entirely with `--no-biometric` (CLI flag forwarded to the
-/// daemon as the `skip_biometric` field) if they accept the trade-off.
+/// the daemon fails closed.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn authenticate(_reason: &str) -> Result<bool> {
     Ok(false)

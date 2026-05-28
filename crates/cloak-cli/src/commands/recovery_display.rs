@@ -18,11 +18,11 @@
 //!   3. `/dev/tty` is unavailable (containers, CI, daemons) -> refuse
 //!      with a stderr message and exit code 2.
 //!
-//! `CLOAK_ALLOW_MNEMONIC_STDOUT=1` bypasses the check. It exists for
-//! the integration tests in `tests/cli.rs`, which exec the binary
-//! through `assert_cmd` (no PTY). Documented as test-only in the
-//! refusal message so a real user does not lean on it.
+//! `CLOAK_ALLOW_MNEMONIC_STDOUT=1` bypasses the check only when paired
+//! with `CLOAK_UNSAFE_TEST_MODE=1`. It exists for the integration tests
+//! in `tests/cli.rs`, which exec the binary through `assert_cmd` (no PTY).
 
+use anyhow::Result;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Write};
 
@@ -31,6 +31,18 @@ use cloak_core::recovery::RecoveryMnemonic;
 /// Env var that lets the CLI integration tests (and other no-TTY
 /// harnesses) bypass the stdout-is-a-terminal check. Test-only.
 const ALLOW_STDOUT_ENV: &str = "CLOAK_ALLOW_MNEMONIC_STDOUT";
+
+/// Fail before vault initialization when the recovery seed cannot be
+/// displayed through any supported route.
+pub fn preflight_mnemonic_warning() -> Result<()> {
+    let allow_stdout = crate::test_mode::env_flag(ALLOW_STDOUT_ENV)?;
+    if allow_stdout || io::stdout().is_terminal() || controlling_tty_available() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "cannot display recovery seed: stdout is not a terminal and /dev/tty is unavailable; run setup from a terminal"
+    )
+}
 
 /// Print the 24-word recovery mnemonic with a "WRITE THIS DOWN" banner.
 ///
@@ -43,7 +55,13 @@ pub fn print_mnemonic_warning(mnemonic: &RecoveryMnemonic) -> bool {
     let words = mnemonic.words();
 
     // 1. Test/CI escape hatch, or stdout already attached to a TTY.
-    let allow_stdout = std::env::var_os(ALLOW_STDOUT_ENV).is_some_and(|v| v == "1" || v == "true");
+    let allow_stdout = match crate::test_mode::env_flag(ALLOW_STDOUT_ENV) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "{e}");
+            return false;
+        }
+    };
     if allow_stdout || io::stdout().is_terminal() {
         let mut out = io::stdout().lock();
         let _ = write_mnemonic(&mut out, &words);
@@ -70,10 +88,13 @@ pub fn print_mnemonic_warning(mnemonic: &RecoveryMnemonic) -> bool {
     let _ = writeln!(
         io::stderr(),
         "refusing to print recovery seed: stdout is not a terminal and \
-         /dev/tty is unavailable. Set {ALLOW_STDOUT_ENV}=1 to override \
-         (test-only; do NOT use in production)."
+         /dev/tty is unavailable. Run this command from a terminal."
     );
     false
+}
+
+fn controlling_tty_available() -> bool {
+    OpenOptions::new().write(true).open("/dev/tty").is_ok()
 }
 
 /// Render the banner + word grid + footer to an arbitrary writer.

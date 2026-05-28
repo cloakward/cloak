@@ -172,14 +172,12 @@ into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`,
 restores `vault.cloak` from a stale backup hits `Error::VaultRollbackDetected`
 *on open*, before any record is decrypted — read-side rollback is
 detected on every `Vault::open_or_create`. The check follows three
-rules: file == mirror is a no-op; file > mirror is a legitimate
-forward bump (e.g. an rsync from a paired device) that refreshes the
-mirror; file < mirror is rejected. A missing mirror (fresh install or
-upgrade from a Cloak that didn't have the mirror) is seeded from the
-file on first open. With `CLOAK_PEPPER_FILE` set the mirror falls back
-to a 0600 file alongside the pepper; in that fallback an attacker who
-can roll back the vault can also roll back the counter file in
-lockstep — see `docs/THREAT_MODEL.md`.
+rules: file == mirror is a no-op; any mismatch after a mirror exists is
+rejected; a missing mirror (fresh install or upgrade from a Cloak that
+didn't have the mirror) is seeded from the file on first open. With
+`CLOAK_PEPPER_FILE` set the mirror falls back to a 0600 file alongside
+the pepper; in that fallback an attacker who can roll back the vault can
+also roll back the counter file in lockstep — see `docs/THREAT_MODEL.md`.
 
 ## Privileged tool dispatch
 

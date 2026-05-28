@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { request } from "../ipc.ts";
 import type { CloakTool, ToolResult } from "./types.ts";
+import { secretListSchema } from "./validation.ts";
 
 const argsSchema = z.object({}).strict();
 
@@ -19,8 +20,9 @@ export const listSecretNames: CloakTool = {
   async handler(rawArgs: unknown): Promise<ToolResult> {
     argsSchema.parse(rawArgs ?? {});
     const result = await request("vault.list", {});
+    const parsed = secretListSchema.parse(result);
     return {
-      content: [{ type: "text", text: JSON.stringify(result) }],
+      content: [{ type: "text", text: JSON.stringify(parsed) }],
     };
   },
 };

@@ -69,15 +69,19 @@ are emitted directly by the dispatcher
 - **`mcp.handshake`** — params `{}` → `{ "session_token": "..." }`. The daemon performs peer auth (UID, PID, code-signature) on the IPC connection and issues a token bound to that peer. The CLI uses `cli.handshake` instead (same semantics, different policy).
 - **`cli.handshake`** — same as above, for the CLI peer.
 
-### Vault management (CLI-only — not exposed to MCP)
+### Vault operations
+
+Vault creation and mutation (`init`, `add`, `set`, `rm`, import/export writes)
+are performed by the `cloak` CLI directly against the local vault file. They
+are not part of the production daemon IPC surface.
+
+The daemon IPC surface exposes only the operations needed for MCP serving and
+daemon-held unlock state:
+
 - **`vault.is_initialized`** → `{ "initialized": bool }`
-- **`vault.initialize`** — params `{ "passphrase": "..." }` → `{ "kdf_params": {...} }`
-- **`vault.unlock`** — params `{ "passphrase": "..." }` → `{ "ok": true }`
-- **`vault.lock`** → `{ "ok": true }`
-- **`vault.add`** — params `{ name, kind, tags, value }` → `{ ok: true, version: 1 }`
-- **`vault.set`** — params `{ name, value }` → `{ ok: true, version: N }`
-- **`vault.rm`** — params `{ name }` → `{ ok: true }`
-- **`vault.show`** — params `{ name, skip_biometric? }` → `{ value: "..." }` — **CLI peer only**. Before producing any plaintext, `cloakd` itself fires the OS-level biometric / user-presence prompt (Touch ID on macOS, polkit `dev.cloak.show-secret` on Linux). The daemon ignores any client-supplied "user already approved" assertion: a same-UID attacker who connects to the socket directly cannot bypass the prompt by lying in the payload. The optional `skip_biometric: true` is the explicit operator opt-out for headless contexts (forwarded by `cloak --no-biometric show`). On cancel / failure the daemon returns the `biometric-failed` error code.
+- **`vault.unlock`** — params `{ "passphrase": "..." }` → `{ "ok": true }` — **CLI peer only**.
+- **`vault.lock`** → `{ "ok": true }` — **CLI peer only**.
+- **`vault.show`** — params `{ name, skip_biometric? }` → `{ value: "..." }` — **CLI peer only**. Before producing any plaintext, `cloakd` itself fires the OS-level biometric / user-presence prompt (Touch ID on macOS, polkit `dev.cloak.show-secret` on Linux). The daemon ignores any client-supplied "user already approved" assertion and also ignores the legacy `skip_biometric` field: a same-UID attacker who connects to the socket directly cannot bypass the prompt by lying in the payload. On cancel / failure the daemon returns the `biometric-failed` error code.
 - **`vault.status`** → `{ path, record_count, kdf_params, format_version, locked }`
 
 ### Read-only metadata (CLI and MCP)

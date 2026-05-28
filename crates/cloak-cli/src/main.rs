@@ -10,6 +10,7 @@
 // which don't go through IPC and keep their own local prompt.
 mod commands;
 mod prompt;
+mod test_mode;
 
 use std::process::ExitCode;
 

@@ -9,9 +9,9 @@ use super::{open_vault, Context, SystemError};
 use crate::prompt::prompt_passphrase_twice;
 
 /// Initialize a new vault at `ctx.vault_path`. Refuses if one already
-/// exists at that path. Prompts for the passphrase twice (or reads
-/// `CLOAK_PASSPHRASE` for tests) and then prints the autotuned KDF
-/// parameters so the user has a record of what their vault uses.
+/// exists at that path. Prompts for the passphrase twice (or reads the
+/// guarded test-only `CLOAK_PASSPHRASE`) and then prints the autotuned
+/// KDF parameters so the user has a record of what their vault uses.
 ///
 /// Also generates and prints a 24-word BIP-39 recovery mnemonic ONCE.
 /// Cloak does not keep a copy; the user must write the words down.

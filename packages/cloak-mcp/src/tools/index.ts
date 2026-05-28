@@ -22,6 +22,7 @@ export async function dispatchTool(name: string, args: unknown): Promise<ToolRes
   if (!tool) {
     return {
       content: [{ type: "text", text: `error: unknown tool '${name}'` }],
+      isError: true,
     };
   }
   try {
@@ -30,6 +31,7 @@ export async function dispatchTool(name: string, args: unknown): Promise<ToolRes
     const msg = err instanceof Error ? err.message : String(err);
     return {
       content: [{ type: "text", text: `error: ${msg}` }],
+      isError: true,
     };
   }
 }

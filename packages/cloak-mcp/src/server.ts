@@ -11,11 +11,12 @@ import {
   ListToolsRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
+import packageJson from "../package.json" with { type: "json" };
 import { tools, dispatchTool } from "./tools/index.ts";
-import { handshake } from "./ipc.ts";
+import { handshakeWithDxtFirstRun } from "./dxt-first-run.ts";
 import { runSelfTest } from "./self-test.ts";
 
-const VERSION = "0.9.0-rc1";
+const VERSION = packageJson.version;
 
 function printVersion(): void {
   process.stdout.write(`cloak-mcp ${VERSION}\n`);
@@ -41,7 +42,7 @@ async function main(): Promise<void> {
 
   // The daemon's peer auth happens at IPC connect; we handshake to obtain
   // a session token that gets attached to subsequent requests.
-  await handshake();
+  await handshakeWithDxtFirstRun();
 
   const server = new Server(
     { name: "cloak-mcp", version: VERSION },

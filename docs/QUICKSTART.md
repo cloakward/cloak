@@ -1,17 +1,29 @@
-# Cloak Quickstart (v1.0.0, macOS)
+# Cloak Quickstart (beta, macOS + Linux)
 
-> v1.0.0 ships macOS + Linux. Windows is deferred to v1.0.1
-> ([issue #3](https://github.com/cloakward/cloak/issues/3)). On Linux the
-> desktop pepper uses freedesktop Secret Service (W7) and `cloak show`
+> Cloak is beta software. Source builds are the recommended install path
+> until a production release tag has passed the full release gate. Windows
+> is deferred to v1.0.1 ([issue #3](https://github.com/cloakward/cloak/issues/3)).
+> On Linux the desktop pepper uses freedesktop Secret Service and `cloak show`
 > gates the reveal on polkit (`dev.cloak.show-secret`; install
-> `scripts/polkit/dev.cloak.policy` under
-> `/usr/share/polkit-1/actions/`). The walkthrough below is
-> macOS-flavored — swap `~/Library/Application Support` for the XDG
-> equivalent on Linux.
+> `scripts/polkit/dev.cloak.policy` under `/usr/share/polkit-1/actions/`).
+> The walkthrough starts macOS-flavored; Linux systemd guidance follows.
 
 ## Gatekeeper note (macOS)
 
-v1.0.0 release binaries are signed with a Developer ID Application certificate, notarized by Apple, and stapled. Gatekeeper accepts them on first launch with no `xattr` dance. Every release is also cosign-signed with SLSA L3 provenance, which lets you verify the binary is the exact artifact CI built; notarization adds Apple's pre-execution scan on top of that.
+Production macOS tags cut by the current release workflow are hard-gated on
+Developer ID signing and Apple notarization secrets. If those secrets are
+missing, stable macOS rows fail rather than publishing unsigned tarballs.
+Prerelease/fork preview builds may still be unsigned and can require
+`xattr -d com.apple.quarantine` after download.
+
+Bare command-line Mach-O binaries cannot be stapled in-place like `.pkg` or
+`.dmg` bundles. The release workflow submits them to Apple's notary service;
+Gatekeeper may need an online ticket lookup on first launch.
+
+Release tags built by the current workflow are also cosign-signed and
+SLSA-attested for tarballs, `sha256sums.txt`, and Claude Desktop `.dxt`
+packages. Older preview `.dxt` files may not be covered; require matching
+`.sig` / `.cert` files and a SLSA subject before treating a `.dxt` as verified.
 
 If you build from source there is no Gatekeeper friction either — your local toolchain produces an ad-hoc-signed binary that runs immediately.
 
@@ -20,8 +32,8 @@ If you build from source there is no Gatekeeper friction either — your local t
 ```sh
 git clone <this-repo>
 cd cloak
-cargo build --release
-cd packages/cloak-mcp && bun install && bun build src/server.ts --compile --outfile dist/cloak-mcp
+cargo build --release --workspace
+cd packages/cloak-mcp && bun install --frozen-lockfile && bun run build
 ```
 
 Binaries:
@@ -36,6 +48,66 @@ Binaries:
 launchctl list | grep cloakd     # should show running
 tail -f ~/Library/Logs/cloak/cloakd.err.log
 ```
+
+## 2b. Install the daemon on Linux (systemd user)
+
+Install the binaries somewhere on your user `PATH`:
+
+```sh
+install -Dm755 target/release/cloak ~/.local/bin/cloak
+install -Dm755 target/release/cloakd ~/.local/bin/cloakd
+install -Dm755 packages/cloak-mcp/dist/cloak-mcp ~/.local/bin/cloak-mcp
+```
+
+Install the polkit action so `cloak show` can perform a user-presence check:
+
+```sh
+sudo install -Dm644 scripts/polkit/dev.cloak.policy \
+  /usr/share/polkit-1/actions/dev.cloak.policy
+```
+
+Create a per-user systemd unit:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/cloakd.service <<'EOF'
+[Unit]
+Description=Cloak daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/cloakd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now cloakd.service
+journalctl --user -u cloakd -f
+```
+
+On desktop Linux, leave `CLOAK_PEPPER_FILE` unset so Cloak uses
+freedesktop Secret Service. On headless Linux without a Secret Service
+agent, add a file-backed pepper override:
+
+```sh
+mkdir -p ~/.config/systemd/user/cloakd.service.d ~/.config/cloak
+cat > ~/.config/systemd/user/cloakd.service.d/headless-pepper.conf <<'EOF'
+[Service]
+Environment=CLOAK_PEPPER_FILE=%h/.config/cloak/pepper
+EOF
+
+systemctl --user daemon-reload
+systemctl --user restart cloakd.service
+```
+
+Cloak creates the pepper file on first use with mode `0600`; back it up
+separately from the vault. Without that pepper, a copied vault cannot be
+decrypted.
 
 ## 3. Initialize the vault
 
@@ -70,7 +142,7 @@ vault is permanently unrecoverable — that is the design.
 ```sh
 cloak add OPENAI_API_KEY    # paste secret on the prompt (echo off)
 cloak list                  # OPENAI_API_KEY (no value)
-cloak show OPENAI_API_KEY   # Touch ID prompt → prints to TTY
+cloak show OPENAI_API_KEY   # Touch ID / polkit prompt, then prints to TTY
 ```
 
 `cloak show` only writes to a TTY by default. To pipe, you must add `--allow-redirect` (and accept that it leaves your shell history).
@@ -127,9 +199,10 @@ tail -n 20 ~/Library/Application\ Support/cloak/audit.jsonl
 
 ## What's deliberately not here yet
 
-- Linux / Windows installers.
+- Windows installers.
 - Automated secret rotation (`cloak rotate NAME`).
-- `.env` import.
-- Signed release artifacts.
+- Production `.pkg` / `.dmg` with offline-stapled notarization tickets.
+- Fully pinned-by-digest release infrastructure for every GitHub Action and
+  Docker base image.
 
 See `CHANGELOG.md` for the full deferred list.
