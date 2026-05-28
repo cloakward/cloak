@@ -4,6 +4,17 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.1-rc2] - 2026-05-28
+
+### Added
+- Added a manual `release-install.yml` workflow that downloads published release tarballs, checks `sha256sums.txt`, verifies cosign signatures, validates macOS code signatures, and runs the daemon/CLI/MCP smoke path from shipped binaries across hosted macOS and Linux runners.
+- Extended `scripts/smoke-test.sh` so the same smoke path can run against prebuilt release binaries instead of only source-built binaries.
+
+### Changed
+- Updated first-party GitHub Actions, artifact, Docker, and npm dist-tag workflows to Node 24-compatible action majors.
+- Documented that signed macOS downloads currently show the personal Apple Developer ID name "Varun Menon" until Cloak has an Apple organization account.
+- Clarified that `NPM_TOKEN` remains an intentional npm publish fallback and that Windows is not part of the current release artifacts.
+
 ## [1.0.1-rc1] - 2026-05-28
 
 ### Security
