@@ -209,19 +209,12 @@ mod tests {
 
     #[test]
     fn parse_rejects_bad_checksum() {
-        // Take a valid mnemonic and replace the last word with another
-        // wordlist entry that almost certainly fails the checksum.
-        let m = RecoveryMnemonic::generate().unwrap();
-        let mut ws = m.words();
-        let last = ws.pop().unwrap();
-        // Pick a different wordlist word to flip the checksum.
-        let replacement = if last == "abandon" {
-            "ability"
-        } else {
-            "abandon"
-        };
-        ws.push(replacement.to_string());
-        let bad = ws.join(" ");
+        // Fixed BIP-39 vector with the valid final word ("art") replaced
+        // by a wordlist entry that does not match the checksum.
+        let bad = "abandon abandon abandon abandon abandon abandon \
+                   abandon abandon abandon abandon abandon abandon \
+                   abandon abandon abandon abandon abandon abandon \
+                   abandon abandon abandon abandon abandon abandon";
         let r = RecoveryMnemonic::parse(&bad);
         assert!(matches!(r, Err(Error::InvalidMnemonic)));
     }
