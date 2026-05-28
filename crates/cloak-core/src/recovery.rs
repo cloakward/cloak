@@ -215,7 +215,7 @@ mod tests {
                    abandon abandon abandon abandon abandon abandon \
                    abandon abandon abandon abandon abandon abandon \
                    abandon abandon abandon abandon abandon abandon";
-        let r = RecoveryMnemonic::parse(&bad);
+        let r = RecoveryMnemonic::parse(bad);
         assert!(matches!(r, Err(Error::InvalidMnemonic)));
     }
 
