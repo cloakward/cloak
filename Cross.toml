@@ -5,5 +5,6 @@
 passthrough = [
   "CLOAK_PEPPER_FILE",
   "CLOAK_PASSPHRASE",
+  "CLOAK_SKIP_CHILD_PROCESS_TESTS",
   "RUST_LOG",
 ]

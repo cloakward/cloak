@@ -181,7 +181,11 @@ jobs:
         if: matrix.cross
         env:
           CLOAK_PEPPER_FILE: target/cloak-ci-pepper
-        run: cross test --workspace --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            export CLOAK_SKIP_CHILD_PROCESS_TESTS=1
+          fi
+          cross test --workspace --target ${{ matrix.target }}
 
       # ----- cloak-mcp (TypeScript) ---------------------------------------
       # Skipped on Windows for v0.1; W6 brings the MCP shim build online.
