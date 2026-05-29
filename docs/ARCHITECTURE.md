@@ -204,7 +204,7 @@ file in lockstep — see `docs/THREAT_MODEL.md`.
 ## Privileged tool dispatch
 
 Every privileged tool handler in `crates/cloak-core/src/handlers.rs`
-follows the same five-step recipe (`crates/cloak-core/src/handlers.rs:1-20`):
+follows the same ordered recipe (`crates/cloak-core/src/handlers.rs:1-22`):
 
 1. Parse + validate parameters (typed, no free-form JSON).
 2. Resolve the policy `EvalContext` from `(tool, secret_name, secret_kind,
@@ -215,8 +215,11 @@ follows the same five-step recipe (`crates/cloak-core/src/handlers.rs:1-20`):
    closed; there is no confirmation side-channel yet.
 4. Run the rate-limit gate (token bucket per `(tool, peer, secret)`).
    On exhaustion, audit `Denied` and return `Error::PolicyDenied("rate limited")`.
-5. Only now read the secret from the unlocked vault, perform the operation,
-   audit `Ok` (or `Error` on a downstream failure), and return.
+5. Only now read the secret from the unlocked vault.
+6. For side-effecting network tools (`proxy_http`, AWS STS token minting),
+   append a durable `Started` audit entry before making the outbound request.
+7. Perform the operation, audit `Ok` (or `Error` on a downstream failure),
+   and return.
 
 The order is load-bearing: a denied call cannot decrypt
 (`crates/cloak-core/src/handlers.rs:109-185`).
