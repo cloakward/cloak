@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use cloak_core::peer_auth::{linux as linux_pa, PeerIdentity, PeerIdentityKind};
+use cloak_core::Error;
 use tokio::net::{UnixListener, UnixStream};
 
 /// Resolve a pidfd for the *peer* of a connected `UnixStream` and read
@@ -50,6 +51,13 @@ fn linux_kernel_supports_so_peerpidfd() -> Option<bool> {
     let major = parts.next()?.parse::<u64>().ok()?;
     let minor = parts.next()?.parse::<u64>().ok()?;
     Some(major > 6 || (major == 6 && minor >= 5))
+}
+
+fn is_enosys(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Io(io) if io.raw_os_error() == Some(libc::ENOSYS)
+    )
 }
 
 #[tokio::test]
@@ -102,7 +110,20 @@ async fn session_revoked_when_peer_process_exits() {
         .spawn()
         .expect("spawn sleep");
     let child_pid = child.id() as i32;
-    let child_pidfd = linux_pa::pidfd_open_by_pid(child_pid).expect("pidfd_open");
+    let child_pidfd = match linux_pa::pidfd_open_by_pid(child_pid) {
+        Ok(fd) => fd,
+        Err(e) if std::env::var_os("CLOAK_SKIP_CHILD_PROCESS_TESTS").is_some() && is_enosys(&e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("skipping pidfd_open watcher test in emulated cross runner: {e}");
+            return;
+        }
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("pidfd_open: {e}");
+        }
+    };
     let watcher = linux_pa::PidfdWatcher::new(child_pidfd, child_pid).expect("PidfdWatcher::new");
 
     // SIGKILL the child and wait for the watcher to fire.
