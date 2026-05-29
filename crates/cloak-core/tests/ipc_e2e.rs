@@ -223,7 +223,7 @@ async fn ipc_e2e_handshake_and_basic_flow() {
                 "name": "github_token",
                 "kind": "api_key",
                 "tags": ["prod"],
-                "value": "ghp_redacted_test"
+                "value": "REDACTED_TEST_GITHUB_TOKEN"
             }),
             session_token: Some(token.clone()),
         },

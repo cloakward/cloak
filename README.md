@@ -118,6 +118,7 @@ Cloak's load-bearing security properties are tracked in [`docs/SECURITY_INVARIAN
 - **Threat model** [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
 - **MCP tool spec** [`docs/spec/mcp-tools.md`](docs/spec/mcp-tools.md)
 - **FAQ** [`docs/FAQ.md`](docs/FAQ.md)
+- **Privacy disclosure** [`docs/PRIVACY.md`](docs/PRIVACY.md)
 
 ## License
 

@@ -31,24 +31,24 @@ describe("tools", () => {
   test("redacts authorization schemes in daemon error text", async () => {
     const { redactText } = await import("../src/tools/validation.ts");
 
-    const bearer = redactText("cloakd error: Authorization: Bearer sk-live-abc123");
-    expect(bearer).not.toContain("sk-live-abc123");
+    const bearer = redactText("cloakd error: Authorization: Bearer bearer-secret-demo-abc123");
+    expect(bearer).not.toContain("bearer-secret-demo-abc123");
     expect(bearer).toContain("[redacted]");
 
     const basic = redactText("upstream failed with Authorization: Basic dXNlcjpwYXNz");
     expect(basic).not.toContain("dXNlcjpwYXNz");
     expect(basic).toContain("[redacted]");
 
-    const token = redactText("upstream failed with Authorization: token ghp_live_secret123");
-    expect(token).not.toContain("ghp_live_secret123");
+    const token = redactText("upstream failed with Authorization: token REDACTED_TEST_GITHUB_TOKEN");
+    expect(token).not.toContain("REDACTED_TEST_GITHUB_TOKEN");
     expect(token).toContain("[redacted]");
 
     const apiKey = redactText("upstream failed with Authorization: ApiKey sk_live_secret123");
     expect(apiKey).not.toContain("sk_live_secret123");
     expect(apiKey).toContain("[redacted]");
 
-    const jsonApiKey = redactText('upstream error {"api_key":"sk-live-abc123"}');
-    expect(jsonApiKey).not.toContain("sk-live-abc123");
+    const jsonApiKey = redactText('upstream error {"api_key":"json-secret-demo-abc123"}');
+    expect(jsonApiKey).not.toContain("json-secret-demo-abc123");
     expect(jsonApiKey).toContain('"api_key":"[redacted]"');
 
     const jsonClientSecret = redactText("upstream error {'client_secret':'shh'}");
@@ -62,7 +62,7 @@ describe("tools", () => {
       "vault.list": () => ({
         __error: {
           code: "upstream",
-          message: 'upstream error {"api_key":"sk-live-abc123"}',
+          message: 'upstream error {"api_key":"json-secret-demo-abc123"}',
         },
       }),
     });
@@ -71,7 +71,7 @@ describe("tools", () => {
     const { dispatchTool } = await import("../src/tools/index.ts");
     const out = await dispatchTool("list_secret_names", {});
     expect(out.isError).toBe(true);
-    expect(out.content[0].text).not.toContain("sk-live-abc123");
+    expect(out.content[0].text).not.toContain("json-secret-demo-abc123");
     expect(out.content[0].text).toContain('"api_key":"[redacted]"');
   });
 

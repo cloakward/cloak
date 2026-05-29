@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
@@ -158,6 +159,80 @@ impl SqliteStore {
     /// Borrow the underlying connection (for tests / advanced queries).
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Compute a deterministic digest of the logical vault contents.
+    ///
+    /// This is not a confidentiality primitive; it is the state commitment
+    /// stored outside the vault for read-side rollback detection. It binds the
+    /// plaintext monotonic counter to the rest of the SQLite state, so an old
+    /// snapshot cannot be accepted merely by editing `meta.monotonic_counter`.
+    pub fn rollback_state_digest(&self) -> Result<[u8; 32]> {
+        let mut h = Sha256::new();
+        hash_bytes(&mut h, "domain", b"cloak.rollback-state.v1");
+
+        match self.get_meta()? {
+            Some(meta) => {
+                hash_bytes(&mut h, "meta.present", &[1]);
+                hash_bytes(
+                    &mut h,
+                    "meta.format_version",
+                    &meta.format_version.to_be_bytes(),
+                );
+                hash_bytes(&mut h, "meta.salt", &meta.salt);
+                hash_bytes(&mut h, "meta.kdf_phc", meta.kdf_phc.as_bytes());
+                hash_bytes(&mut h, "meta.wrap_nonce", &meta.wrap_nonce);
+                hash_bytes(&mut h, "meta.wrap_aead", &meta.wrap_aead);
+                hash_bytes(
+                    &mut h,
+                    "meta.monotonic_counter",
+                    &meta.monotonic_counter.to_be_bytes(),
+                );
+                hash_bytes(&mut h, "meta.created_at", meta.created_at.as_bytes());
+                hash_opt_str(
+                    &mut h,
+                    "meta.recovery_format",
+                    meta.recovery_format.as_deref(),
+                );
+                hash_opt_bytes(
+                    &mut h,
+                    "meta.recovery_wrap_nonce",
+                    meta.recovery_wrap_nonce.as_ref().map(|n| n.as_slice()),
+                );
+                hash_opt_bytes(
+                    &mut h,
+                    "meta.recovery_wrap_aead",
+                    meta.recovery_wrap_aead.as_deref(),
+                );
+            }
+            None => hash_bytes(&mut h, "meta.present", &[0]),
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, kind, tags, created_at, updated_at, version, nonce, ciphertext \
+             FROM secrets ORDER BY id",
+        )?;
+        let iter = stmt.query_map([], row_to_secret)?;
+        let mut count = 0u64;
+        for row in iter {
+            let row = row?;
+            count = count.saturating_add(1);
+            hash_bytes(&mut h, "secret.id", &row.id.to_be_bytes());
+            hash_bytes(&mut h, "secret.name", row.name.as_bytes());
+            hash_bytes(&mut h, "secret.kind", row.kind.as_bytes());
+            hash_bytes(&mut h, "secret.tags", row.tags_json.as_bytes());
+            hash_bytes(&mut h, "secret.created_at", row.created_at.as_bytes());
+            hash_bytes(&mut h, "secret.updated_at", row.updated_at.as_bytes());
+            hash_bytes(&mut h, "secret.version", &row.version.to_be_bytes());
+            hash_bytes(&mut h, "secret.nonce", &row.nonce);
+            hash_bytes(&mut h, "secret.ciphertext", &row.ciphertext);
+        }
+        hash_bytes(&mut h, "secret.count", &count.to_be_bytes());
+
+        let digest = h.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        Ok(out)
     }
 
     // --- meta -------------------------------------------------------
@@ -402,6 +477,33 @@ impl SqliteStore {
             .conn
             .query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0))?;
         Ok(n as u64)
+    }
+}
+
+fn hash_bytes(h: &mut Sha256, label: &str, bytes: &[u8]) {
+    h.update((label.len() as u32).to_be_bytes());
+    h.update(label.as_bytes());
+    h.update((bytes.len() as u64).to_be_bytes());
+    h.update(bytes);
+}
+
+fn hash_opt_str(h: &mut Sha256, label: &str, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hash_bytes(h, &format!("{label}.present"), &[1]);
+            hash_bytes(h, label, value.as_bytes());
+        }
+        None => hash_bytes(h, &format!("{label}.present"), &[0]),
+    }
+}
+
+fn hash_opt_bytes(h: &mut Sha256, label: &str, value: Option<&[u8]>) {
+    match value {
+        Some(value) => {
+            hash_bytes(h, &format!("{label}.present"), &[1]);
+            hash_bytes(h, label, value);
+        }
+        None => hash_bytes(h, &format!("{label}.present"), &[0]),
     }
 }
 

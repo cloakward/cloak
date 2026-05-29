@@ -28,11 +28,15 @@ const TEST_MODE_ENV: &str = "CLOAK_UNSAFE_TEST_MODE";
 fn cloak(dir: &TempDir) -> (Command, PathBuf) {
     let path = dir.path().join("vault.cloak");
     let pepper = dir.path().join("pepper");
+    let data_home = dir.path().join("data");
+    std::fs::create_dir_all(&data_home).expect("create per-test data dir");
     let mut cmd = Command::cargo_bin("cloak").expect("binary built");
     cmd.arg("--vault").arg(&path).arg("--no-biometric");
     cmd.env(TEST_MODE_ENV, "1");
     cmd.env("CLOAK_PASSPHRASE", TEST_PASSPHRASE);
     cmd.env("CLOAK_PEPPER_FILE", &pepper);
+    cmd.env("XDG_DATA_HOME", &data_home);
+    cmd.env("HOME", dir.path());
     // Tell tracing-subscriber to be quiet during tests.
     cmd.env("RUST_LOG", "off");
     // Disable the OS-keychain rollback-counter mirror in this child
@@ -134,7 +138,7 @@ fn add_then_list_shows_name() {
     let (mut add, _) = cloak(&dir);
     add.arg("add")
         .arg("OPENAI_API_KEY")
-        .write_stdin("sk-REDACTED\n")
+        .write_stdin("REDACTED_TEST_OPENAI_KEY\n")
         .assert()
         .success()
         .stdout(predicate::str::contains("added: OPENAI_API_KEY"));
@@ -508,6 +512,8 @@ fn backup_verify_requires_passphrase_before_mnemonic_check() {
 
     let path = dir.path().join("vault.cloak");
     let pepper = dir.path().join("pepper");
+    let data_root = dir.path().join("data");
+    std::fs::create_dir_all(&data_root).unwrap();
     let mut verify = Command::cargo_bin("cloak").unwrap();
     verify
         .arg("--vault")
@@ -518,6 +524,8 @@ fn backup_verify_requires_passphrase_before_mnemonic_check() {
         .env("CLOAK_MNEMONIC", &mnemonic)
         .env("CLOAK_PEPPER_FILE", &pepper)
         .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
+        .env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
         .env("RUST_LOG", "off")
         .arg("backup")
         .arg("verify")
@@ -627,6 +635,64 @@ fn audit_adopt_head_recovers_legacy_nonempty_log() {
 }
 
 #[test]
+fn rollback_adopt_state_recovers_legacy_counter_mirror() {
+    let dir = TempDir::new().unwrap();
+    let (mut init, _) = cloak(&dir);
+    init.arg("init").assert().success();
+
+    let legacy_counter = dir.path().join("rollback-counter");
+    std::fs::write(&legacy_counter, 1u64.to_be_bytes()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&legacy_counter, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let (mut list_before, _) = cloak(&dir);
+    list_before
+        .env_remove("CLOAK_DISABLE_ROLLBACK_MIRROR")
+        .arg("list")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "legacy rollback counter mirror requires explicit adoption",
+        ));
+
+    let (mut adopt, _) = cloak(&dir);
+    adopt
+        .env_remove("CLOAK_DISABLE_ROLLBACK_MIRROR")
+        .arg("rollback")
+        .arg("adopt-state")
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rollback state mirror adopted"));
+
+    assert_eq!(std::fs::read(&legacy_counter).unwrap().len(), 40);
+
+    let (mut list_after, _) = cloak(&dir);
+    list_after
+        .env_remove("CLOAK_DISABLE_ROLLBACK_MIRROR")
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(no secrets)"));
+}
+
+#[test]
+fn rollback_adopt_state_requires_yes() {
+    let dir = TempDir::new().unwrap();
+    let (mut cmd, _) = cloak(&dir);
+    cmd.arg("rollback")
+        .arg("adopt-state")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to adopt rollback state without --yes",
+        ));
+}
+
+#[test]
 fn restore_recovers_after_passphrase_loss() {
     let dir = TempDir::new().unwrap();
 
@@ -647,6 +713,8 @@ fn restore_recovers_after_passphrase_loss() {
     //    and confirm the original is no longer accepted by `show`.
     let path = dir.path().join("vault.cloak");
     let pepper = dir.path().join("pepper");
+    let data_root = dir.path().join("data");
+    std::fs::create_dir_all(&data_root).unwrap();
     let mut bad_show = Command::cargo_bin("cloak").unwrap();
     bad_show
         .arg("--vault")
@@ -656,6 +724,8 @@ fn restore_recovers_after_passphrase_loss() {
         .env("CLOAK_PASSPHRASE", "totally-different-pass")
         .env("CLOAK_PEPPER_FILE", &pepper)
         .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
+        .env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
         .env("RUST_LOG", "off")
         .arg("show")
         .arg("APIKEY")
@@ -675,6 +745,8 @@ fn restore_recovers_after_passphrase_loss() {
         .env("CLOAK_PEPPER_FILE", &pepper)
         .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
         .env("CLOAK_ALLOW_MNEMONIC_STDOUT", "1")
+        .env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
         .env("RUST_LOG", "off")
         .arg("restore")
         .assert()
@@ -690,6 +762,8 @@ fn restore_recovers_after_passphrase_loss() {
         .env("CLOAK_PASSPHRASE", "fresh-recovery-pass")
         .env("CLOAK_PEPPER_FILE", &pepper)
         .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
+        .env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
         .env("RUST_LOG", "off")
         .arg("show")
         .arg("APIKEY")

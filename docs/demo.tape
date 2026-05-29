@@ -15,7 +15,7 @@ Set Padding 20
 Type "# the way you've been doing it"
 Sleep 1.5s
 Enter
-Type "echo OPENAI_API_KEY=sk-proj-7c8f... >> .env"
+Type "echo OPENAI_API_KEY=REDACTED_DEMO_OPENAI_KEY >> .env"
 Enter
 Sleep 1.5s
 Type "# claude code helpfully reads .env into context. now the model has it."
@@ -33,7 +33,7 @@ Sleep 1s
 Type "cloak add OPENAI_API_KEY"
 Enter
 Sleep 1.2s
-Type "sk-proj-7c8f9a2b4d6e8c1a3b5d7f9a"
+Type "REDACTED_DEMO_OPENAI_KEY"
 Enter
 Sleep 2s
 

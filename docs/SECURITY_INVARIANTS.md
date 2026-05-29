@@ -139,11 +139,17 @@ the v1.0 fix landed pre-tag.)
 ### S3 — Vault rollback is rejected
 A monotonic counter lives in the vault's `meta` table and is mirrored
 into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`,
-or a 0600 `rollback-counter` file alongside `CLOAK_PEPPER_FILE`).
-`Vault::open_or_create` compares the two and rejects with
-`Error::VaultRollbackDetected` whenever an existing mirror differs from
-the file counter, so read-side rollback is caught before any record is
-decrypted.
+or a 0600 `rollback-counter` file alongside `CLOAK_PEPPER_FILE`) together
+with a SHA-256 commitment to the logical vault state. `Vault::open_or_create`
+compares the file state to the external mirror and rejects with
+`Error::VaultRollbackDetected` whenever an existing mirror differs, so
+read-side rollback is caught before any record is decrypted. Binding the
+mirror to the state digest prevents an attacker from restoring an old
+SQLite snapshot and editing only the plaintext counter to match the current
+mirror.
+Pre-1.0.2 counter-only mirrors are not silently adopted; the operator must
+explicitly run `cloak rollback adopt-state --yes` after reviewing the current
+vault file.
 The write-side gate (`crates/cloak-core/src/store.rs::bump_counter`) is
 covered by `crates/cloak-core/src/vault.rs::tests::rollback_counter_rejected_via_store`;
 the read-side gate end-to-end is covered by

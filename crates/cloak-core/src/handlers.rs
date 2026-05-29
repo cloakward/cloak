@@ -1591,7 +1591,7 @@ mod tests {
             &url,
             &BTreeMap::new(),
             b"",
-            "AKIA1234567890:secretsecret",
+            "TESTACCESSKEYID:secretsecret",
             "us-east-1",
             "execute-api",
             Utc::now(),
@@ -1607,7 +1607,7 @@ mod tests {
         assert!(h
             .get("Authorization")
             .unwrap()
-            .starts_with("AWS4-HMAC-SHA256 Credential=AKIA1234567890/"));
+            .starts_with("AWS4-HMAC-SHA256 Credential=TESTACCESSKEYID/"));
     }
 
     /// AWS published SigV4 KAT: `get-vanilla` from the AWS Signature Version 4

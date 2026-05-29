@@ -1299,7 +1299,18 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn process_cdhash_matches_current_executable_cdhash() {
-        let process_cdhash = macos::process_cdhash(std::process::id() as i32).unwrap();
+        let process_cdhash = match macos::process_cdhash(std::process::id() as i32) {
+            Ok(hash) => hash,
+            Err(Error::Io(e)) if e.raw_os_error() == Some(85) => {
+                // Some GitHub macOS Intel test runners return EBADEXEC for
+                // the Rust test harness process. Production peer auth remains
+                // fail-closed because a missing process CDHash cannot match a
+                // trusted binary CDHash.
+                eprintln!("skipping current-process CDHash comparison: {e}");
+                return;
+            }
+            Err(e) => panic!("process CDHash unavailable: {e:?}"),
+        };
         let static_cdhash = macos::static_code_cdhash(&std::env::current_exe().unwrap()).unwrap();
         assert_eq!(process_cdhash, static_cdhash);
     }

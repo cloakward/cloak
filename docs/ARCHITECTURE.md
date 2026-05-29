@@ -181,18 +181,25 @@ row's name (verified by
 ### Rollback resistance
 
 The `meta.monotonic_counter` lives in the vault file *and* is mirrored
-into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`,
-8 bytes big-endian). Every write enforces strict increase via
-`bump_counter` and best-effort updates the mirror, so a thief who
-restores `vault.cloak` from a stale backup hits `Error::VaultRollbackDetected`
-*on open*, before any record is decrypted — read-side rollback is
-detected on every `Vault::open_or_create`. The check follows three
-rules: file == mirror is a no-op; any mismatch after a mirror exists is
-rejected; a missing mirror (fresh install or upgrade from a Cloak that
-didn't have the mirror) is seeded from the file on first open. With
-`CLOAK_PEPPER_FILE` set the mirror falls back to a 0600 file alongside
-the pepper; in that fallback an attacker who can roll back the vault can
-also roll back the counter file in lockstep — see `docs/THREAT_MODEL.md`.
+into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`)
+alongside a SHA-256 commitment to the logical vault state. Every write
+enforces strict increase via `bump_counter` and updates the out-of-band
+mirror before the SQLite transaction commits, so a thief who restores
+`vault.cloak` from a stale backup hits `Error::VaultRollbackDetected`
+*on open*, before any record is decrypted. The state commitment prevents
+the old snapshot from being accepted merely by editing its plaintext
+counter up to the current mirror value.
+
+The check follows three rules: file state == mirror state is a no-op;
+any mismatch after a mirror exists is rejected; a missing mirror (fresh
+install or upgrade from a Cloak that didn't have the mirror) is seeded
+from the file on first open. Pre-1.0.2 counter-only mirrors fail closed
+until an operator explicitly runs `cloak rollback adopt-state --yes` after
+reviewing the current vault file; the old counter-only mirror cannot prove
+pre-upgrade history. With `CLOAK_PEPPER_FILE` set the
+mirror falls back to a 0600 file alongside the pepper; in that fallback
+an attacker who can roll back the vault can also roll back the counter
+file in lockstep — see `docs/THREAT_MODEL.md`.
 
 ## Privileged tool dispatch
 

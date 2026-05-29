@@ -38,6 +38,7 @@ mod panic;
 mod recovery_display;
 mod restore;
 mod rm;
+mod rollback;
 mod run;
 mod set;
 mod setup;
@@ -237,6 +238,12 @@ pub enum Command {
         #[command(subcommand)]
         cmd: AuditCmd,
     },
+
+    /// Rollback-mirror maintenance utilities.
+    Rollback {
+        #[command(subcommand)]
+        cmd: RollbackCmd,
+    },
 }
 
 /// `cloak audit ...` subcommands.
@@ -248,6 +255,18 @@ pub enum AuditCmd {
     AdoptHead {
         /// Confirm you reviewed the existing audit log and want to trust its
         /// current head as the external tamper-evidence anchor.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// `cloak rollback ...` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum RollbackCmd {
+    /// Adopt the current vault state after reviewing a legacy rollback mirror.
+    AdoptState {
+        /// Confirm you reviewed the current vault file and want to trust its
+        /// state as the external rollback mirror.
         #[arg(long)]
         yes: bool,
     },
@@ -528,6 +547,11 @@ pub fn run() -> Result<ExitCode> {
             AuditCmd::Verify => audit_log::run_verify().map(|_| ExitCode::SUCCESS),
             AuditCmd::AdoptHead { yes } => {
                 audit_log::run_adopt_head(yes).map(|_| ExitCode::SUCCESS)
+            }
+        },
+        Command::Rollback { cmd } => match cmd {
+            RollbackCmd::AdoptState { yes } => {
+                rollback::run_adopt_state(&ctx, yes).map(|_| ExitCode::SUCCESS)
             }
         },
     };

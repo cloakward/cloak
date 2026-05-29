@@ -581,7 +581,7 @@ async fn mint_token_audits_missing_secret_after_policy_allow() {
     };
 
     let Some((mut stream, token)) =
-        connect_init_unlock_seed(&socket, &[("EXISTING_KEY", "AKIA:secret")]).await
+        connect_init_unlock_seed(&socket, &[("EXISTING_KEY", "akid:secret")]).await
     else {
         shutdown.notify_waiters();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
@@ -1248,7 +1248,7 @@ async fn mint_token_aws_sts_real_path_with_mock() {
             Box::pin(async move {
                 assert_eq!(ttl, 900);
                 Ok(Some(StsSession {
-                    access_key_id: "ASIAMOCKEDEXAMPLE".to_string(),
+                    access_key_id: "TEMP_MOCK_ACCESS_KEY_ID".to_string(),
                     secret_access_key: "mockedsecret/abcdEXAMPLE".to_string(),
                     session_token: "FwoGmocksessiontoken==".to_string(),
                     expiration_secs: expiration_unix,
@@ -1266,7 +1266,8 @@ async fn mint_token_aws_sts_real_path_with_mock() {
     };
 
     let Some((mut stream, token)) =
-        connect_init_unlock_seed(&socket, &[("AWS_ROOT", "AKIAEXAMPLE:secretexample")]).await
+        connect_init_unlock_seed(&socket, &[("AWS_ROOT", "ROOT_ACCESS_KEY_ID:secretexample")])
+            .await
     else {
         set_test_sts_factory(None);
         shutdown.notify_waiters();
@@ -1305,7 +1306,10 @@ async fn mint_token_aws_sts_real_path_with_mock() {
     assert!(env_obj.contains_key("secret_access_key"));
     assert!(env_obj.contains_key("session_token"));
     assert!(env_obj.contains_key("expiration"));
-    assert_eq!(env_obj["access_key_id"].as_str(), Some("ASIAMOCKEDEXAMPLE"));
+    assert_eq!(
+        env_obj["access_key_id"].as_str(),
+        Some("TEMP_MOCK_ACCESS_KEY_ID")
+    );
     assert_eq!(
         env_obj["session_token"].as_str(),
         Some("FwoGmocksessiontoken==")
@@ -1319,7 +1323,7 @@ async fn mint_token_aws_sts_real_path_with_mock() {
 
     // No leakage of the input parent secret in the response.
     let serialized = serde_json::to_string(&r).unwrap();
-    assert!(!serialized.contains("AKIAEXAMPLE"));
+    assert!(!serialized.contains("ROOT_ACCESS_KEY_ID"));
     assert!(!serialized.contains("secretexample"));
 
     let audit = AuditLog::open(&audit_path).unwrap();
@@ -1329,7 +1333,7 @@ async fn mint_token_aws_sts_real_path_with_mock() {
     // The audit chain note also must not contain the input AKID/secret.
     let raw_audit = std::fs::read_to_string(&audit_path).unwrap_or_default();
     assert!(
-        !raw_audit.contains("AKIAEXAMPLE"),
+        !raw_audit.contains("ROOT_ACCESS_KEY_ID"),
         "audit contains AKID: {raw_audit}"
     );
     assert!(
@@ -1429,14 +1433,14 @@ async fn no_leak_invariant_for_aws_handlers() {
     "#;
 
     // Distinctive sentinel material so a leak is unambiguous.
-    const AKID: &str = "AKIAQQQLEAKSENTINEL1";
+    const AKID: &str = "aws-test-access-key-id-leak-sentinel";
     const SECRET: &str = "verysensitiveSecretMarker9999//+abcd";
 
     let factory: cloak_core::handlers::StsTokenFactory = std::sync::Arc::new(
         |_akid: String, _secret: String, _region: String, _ttl: i32| {
             Box::pin(async move {
                 Ok(Some(StsSession {
-                    access_key_id: "ASIATEMPMOCK".to_string(),
+                    access_key_id: "TEMP_MOCK_ACCESS_KEY_ID".to_string(),
                     secret_access_key: "tempsecret".to_string(),
                     session_token: "tempsession==".to_string(),
                     expiration_secs: chrono::Utc::now().timestamp() + 900,

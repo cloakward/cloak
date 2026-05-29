@@ -26,7 +26,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use cloak_core::keychain::{mirror_counter, mirror_counter_pending};
+use cloak_core::keychain::{mirror_counter, mirror_counter_pending, RollbackState};
 use cloak_core::store::{MetaRow, SqliteStore};
 use cloak_core::vault::Vault;
 use cloak_core::Error;
@@ -91,10 +91,66 @@ fn read_counter_file(pepper_path: &Path) -> Option<u64> {
         return None;
     }
     let bytes = std::fs::read(&counter_path).expect("read counter file");
-    assert_eq!(bytes.len(), 8, "counter file must be 8 bytes");
+    assert!(
+        bytes.len() == 8 || bytes.len() == 40,
+        "counter file must be a legacy 8-byte counter or a 40-byte rollback state"
+    );
     let mut a = [0u8; 8];
-    a.copy_from_slice(&bytes);
+    a.copy_from_slice(&bytes[..8]);
     Some(u64::from_be_bytes(a))
+}
+
+fn read_counter_file_len(pepper_path: &Path) -> Option<usize> {
+    let counter_path = pepper_path.parent().unwrap().join("rollback-counter");
+    if !counter_path.exists() {
+        return None;
+    }
+    Some(
+        std::fs::read(&counter_path)
+            .expect("read counter file")
+            .len(),
+    )
+}
+
+fn write_legacy_counter_file(pepper_path: &Path, counter: u64) {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let counter_path = pepper_path.parent().unwrap().join("rollback-counter");
+    std::fs::create_dir_all(counter_path.parent().unwrap()).expect("counter dir");
+    std::fs::write(&counter_path, counter.to_be_bytes()).expect("write legacy counter");
+    #[cfg(unix)]
+    std::fs::set_permissions(&counter_path, std::fs::Permissions::from_mode(0o600))
+        .expect("chmod legacy counter");
+}
+
+fn rollback_state(path: &Path) -> RollbackState {
+    let store = SqliteStore::open(path).expect("open store for rollback state");
+    let counter = store
+        .get_meta()
+        .expect("meta query")
+        .expect("meta exists")
+        .monotonic_counter;
+    RollbackState {
+        counter,
+        digest: store.rollback_state_digest().expect("state digest"),
+    }
+}
+
+fn insert_fake_secret(path: &Path, name: &str) {
+    let store = SqliteStore::open(path).expect("open store for fake secret");
+    store
+        .insert_secret(
+            name,
+            "api_key",
+            "[]",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+            1,
+            &[0u8; 24],
+            &[0u8; 16],
+        )
+        .expect("insert fake secret");
 }
 
 fn pending_counter_file_exists(pepper_path: &Path) -> bool {
@@ -174,7 +230,11 @@ fn pending_marker_recovers_when_sqlite_commit_completed() {
     {
         let _v = Vault::open_or_create(&vault_path).expect("seed");
     }
-    mirror_counter_pending(3, 4).expect("write pending marker");
+    seed_vault(&vault_path, 4);
+    let pending = rollback_state(&vault_path);
+    seed_vault(&vault_path, 3);
+    let committed = rollback_state(&vault_path);
+    mirror_counter_pending(committed, pending).expect("write pending marker");
     seed_vault(&vault_path, 4);
 
     let _v = Vault::open_or_create(&vault_path).expect("pending completed write should recover");
@@ -203,7 +263,11 @@ fn pending_marker_rejects_old_side_fail_closed() {
     {
         let _v = Vault::open_or_create(&vault_path).expect("seed");
     }
-    mirror_counter_pending(3, 4).expect("write pending marker");
+    let committed = rollback_state(&vault_path);
+    seed_vault(&vault_path, 4);
+    let pending = rollback_state(&vault_path);
+    seed_vault(&vault_path, 3);
+    mirror_counter_pending(committed, pending).expect("write pending marker");
 
     match Vault::open_or_create(&vault_path) {
         Ok(_) => panic!("pending old side must be rejected fail-closed"),
@@ -229,8 +293,11 @@ fn stale_pending_marker_after_finalization_cannot_downgrade_mirror() {
     {
         let _v = Vault::open_or_create(&vault_path).expect("seed");
     }
-    mirror_counter_pending(3, 4).expect("write pending marker");
-    mirror_counter(4).expect("finalize mirror");
+    let committed = rollback_state(&vault_path);
+    seed_vault(&vault_path, 4);
+    let pending = rollback_state(&vault_path);
+    mirror_counter_pending(committed, pending).expect("write pending marker");
+    mirror_counter(pending).expect("finalize mirror");
 
     // The pending marker remains stale after finalization. A rollback to
     // the old side of that stale transition must still be rejected because
@@ -368,4 +435,72 @@ fn out_of_band_write_without_mirror_bump_is_rejected() {
         Some(1),
         "mirror must not be refreshed from an out-of-band file bump"
     );
+}
+
+#[test]
+fn stale_content_with_manually_bumped_counter_is_rejected() {
+    let _g = lock_env();
+    let dir = tempfile::tempdir().unwrap();
+    let pepper = dir.path().join("pepper");
+    let vault_path = dir.path().join("vault.cloak");
+    set_pepper_file(&pepper);
+
+    // Bring up a vault whose external mirror commits the logical state at
+    // counter=10.
+    seed_vault(&vault_path, 10);
+    {
+        let _v = Vault::open_or_create(&vault_path).expect("seed mirror to 10");
+    }
+    assert_eq!(read_counter_file(&pepper), Some(10));
+
+    // Simulate a stale but otherwise valid SQLite snapshot whose plaintext
+    // counter has been edited to the current value. Counter-only mirrors accept
+    // this; the state-hash mirror must reject it because the logical rows differ.
+    insert_fake_secret(&vault_path, "STALE_ONLY");
+    match Vault::open_or_create(&vault_path) {
+        Ok(_) => panic!("stale vault content with a matching plaintext counter must be rejected"),
+        Err(Error::VaultRollbackDetected) => {}
+        Err(e) => panic!("expected VaultRollbackDetected, got {e:?}"),
+    }
+    assert_eq!(
+        read_counter_file(&pepper),
+        Some(10),
+        "mirror must remain pinned to the original state"
+    );
+}
+
+#[test]
+fn legacy_counter_mirror_requires_explicit_adoption() {
+    let _g = lock_env();
+    let dir = tempfile::tempdir().unwrap();
+    let pepper = dir.path().join("pepper");
+    let vault_path = dir.path().join("vault.cloak");
+    set_pepper_file(&pepper);
+
+    seed_vault(&vault_path, 10);
+    write_legacy_counter_file(&pepper, 10);
+
+    match Vault::open_or_create(&vault_path) {
+        Ok(_) => panic!("legacy counter mirror must not be silently upgraded"),
+        Err(Error::Keychain(msg)) => assert!(
+            msg.contains("explicit adoption"),
+            "unexpected keychain error: {msg}"
+        ),
+        Err(e) => panic!("expected explicit-adoption Keychain error, got {e:?}"),
+    }
+    assert_eq!(
+        read_counter_file_len(&pepper),
+        Some(8),
+        "failed open must leave the legacy mirror untouched"
+    );
+
+    let adopted =
+        Vault::adopt_current_rollback_state(&vault_path).expect("explicit adoption succeeds");
+    assert_eq!(adopted.counter, 10);
+    assert_eq!(
+        read_counter_file_len(&pepper),
+        Some(40),
+        "adoption should upgrade the mirror to counter + state digest"
+    );
+    let _v = Vault::open_or_create(&vault_path).expect("state mirror opens after adoption");
 }

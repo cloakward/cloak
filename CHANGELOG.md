@@ -9,6 +9,7 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 ### Added
 - Added `cloak audit verify`, `cloak daemon restart`, and the `cloak unlock` alias for the existing daemon unlock flow.
 - Added explicit `cloak audit adopt-head --yes` recovery for operators upgrading a verified legacy audit log into the new external audit-head anchor model.
+- Added explicit `cloak rollback adopt-state --yes` recovery for operators upgrading a reviewed legacy counter-only rollback mirror into the new state-hash mirror model.
 
 ### Changed
 - Clarified install docs to separate full installs (`cloak`, `cloakd`, `cloak-mcp`) from Claude Desktop `.dxt` shim installs. npm distribution is paused until it can ship audited native `cloak-mcp` binaries per supported platform.
@@ -22,6 +23,7 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 - Redacted JSON-style credential fields in MCP-visible daemon/tool errors.
 - Returned unsupported `mint_short_lived_token` kinds before decrypting the parent secret.
 - Made stale rollback/audit pending markers unable to downgrade finalized keychain/file anchors.
+- Rejected old vault snapshots whose plaintext rollback counter was edited to match the current mirror by binding the mirror to a vault-state digest.
 - Made Linux pidfd watcher setup and wait errors fail closed by refusing the handshake or revoking sessions defensively.
 - Changed DXT first-run guidance to require terminal setup, daemon start, and `cloak unlock` before restarting Claude Desktop.
 - Preserved Homebrew compatibility in DXT/MCP executable trust checks while still rejecting world-writable and broadly group-writable paths.

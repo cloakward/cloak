@@ -21,14 +21,14 @@ use crate::error::{Error, Result};
 pub const SERVICE: &str = "dev.cloak";
 /// Account name (within `SERVICE`) for the pepper item.
 pub const ACCOUNT: &str = "vault.pepper";
-/// Account name (within `SERVICE`) for the rollback-counter mirror item.
+/// Account name (within `SERVICE`) for the rollback-state mirror item.
 ///
-/// The counter mirror is a separate keychain item from the pepper so it
+/// The rollback mirror is a separate keychain item from the pepper so it
 /// can be read/written at every vault open without touching the pepper
 /// item's ACL surface (and so a stale mirror on its own can never leak
-/// pepper material). Stored as 8 bytes, big-endian `u64`.
+/// pepper material). Stored as `counter_be(u64) || vault_state_sha256`.
 pub const ROLLBACK_COUNTER_ACCOUNT: &str = "vault.rollback-counter.v1";
-/// Account name for an in-progress rollback-counter mirror update.
+/// Account name for an in-progress rollback-state mirror update.
 pub const ROLLBACK_COUNTER_PENDING_ACCOUNT: &str = "vault.rollback-counter-pending.v1";
 /// Account name for the audit-log head anchor.
 pub const AUDIT_HEAD_ACCOUNT: &str = "audit.head.v1";
@@ -52,20 +52,44 @@ const AUDIT_HEAD_FILENAME: &str = "audit-head";
 const AUDIT_HEAD_PENDING_FILENAME: &str = "audit-head-pending";
 const PENDING_AUDIT_HEAD_MAGIC: &[u8; 8] = b"CLKAHP01";
 
-/// Rollback-counter mirror state.
+/// Rollback-state mirror value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RollbackState {
+    /// Monotonic counter stored in the vault file.
+    pub counter: u64,
+    /// SHA-256 digest of the logical vault contents for that counter.
+    pub digest: [u8; 32],
+}
+
+impl RollbackState {
+    /// Sentinel used for the pre-initialized vault state.
+    pub const fn zero() -> Self {
+        Self {
+            counter: 0,
+            digest: [0u8; 32],
+        }
+    }
+}
+
+/// Rollback mirror state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RollbackCounterMirror {
-    /// The mirror is cleanly committed to this counter value.
-    Committed(u64),
+    /// The mirror is cleanly committed to this vault state.
+    Committed(RollbackState),
     /// A write was in flight. `committed` is the last durable value before
-    /// the SQLite transaction; `pending` is the counter written by that
+    /// the SQLite transaction; `pending` is the state written by that
     /// transaction if it committed before the process exited.
     Pending {
-        /// Last known committed counter before the pending write.
-        committed: u64,
-        /// Counter expected after the pending SQLite transaction commits.
-        pending: u64,
+        /// Last known committed state before the pending write.
+        committed: RollbackState,
+        /// State expected after the pending SQLite transaction commits.
+        pending: RollbackState,
     },
+    /// Pre-v1.0.2 mirrors stored only the plaintext counter. Normal vault
+    /// open fails closed on these because they cannot prove pre-upgrade
+    /// history; operators must explicitly adopt the reviewed current vault
+    /// state.
+    LegacyCounter(u64),
 }
 
 /// Audit-log head anchored outside `audit.jsonl`.
@@ -277,9 +301,10 @@ pub fn delete_pepper() -> Result<()> {
 // Rollback-counter mirror
 // -------------------------------------------------------------------------
 //
-// The vault file's `meta.monotonic_counter` is mirrored to a second OS
-// keychain item (or, in the file-fallback case, a sibling file). Every
-// vault open compares the file counter to the mirror:
+// The vault file's `meta.monotonic_counter` plus a digest of the logical
+// vault state are mirrored to a second OS keychain item (or, in the
+// file-fallback case, a sibling file). Every vault open compares the file
+// state to the mirror:
 //
 // - file == mirror   → ok
 // - file != mirror   → rollback/mirror-integrity failure. Refuse to open
@@ -289,12 +314,12 @@ pub fn delete_pepper() -> Result<()> {
 // Order on writes: record a pending mirror transition (`old -> new`),
 // commit the SQLite transaction, then finalize the committed mirror. If
 // the process exits in the middle, the next open accepts exactly the old
-// or new counter named by the pending marker and repairs the mirror.
+// or new state named by the pending marker and repairs the mirror.
 
 /// Read the rollback-counter mirror, honoring `CLOAK_PEPPER_FILE` first.
 /// Returns `Ok(None)` if no mirror has been written yet (fresh install or
 /// upgrade from a Cloak that didn't have the mirror).
-pub fn read_keychain_counter() -> Result<Option<u64>> {
+pub fn read_keychain_counter() -> Result<Option<RollbackCounterMirror>> {
     #[cfg(any(test, feature = "test-util"))]
     if rollback_mirror_disabled() {
         return Ok(None);
@@ -319,29 +344,42 @@ pub fn read_rollback_counter_mirror() -> Result<Option<RollbackCounterMirror>> {
     };
     if let Some((committed_before, pending_after)) = pending {
         return match committed {
-            Some(mirror) if mirror == pending_after => {
+            Some(RollbackCounterMirror::Committed(mirror)) if mirror == pending_after => {
                 Ok(Some(RollbackCounterMirror::Committed(mirror)))
             }
-            Some(mirror) if mirror == committed_before => {
+            Some(RollbackCounterMirror::Committed(mirror)) if mirror == committed_before => {
                 Ok(Some(RollbackCounterMirror::Pending {
                     committed: committed_before,
                     pending: pending_after,
                 }))
             }
-            Some(mirror) => Ok(Some(RollbackCounterMirror::Committed(mirror))),
+            Some(RollbackCounterMirror::LegacyCounter(mirror))
+                if mirror == pending_after.counter =>
+            {
+                Ok(Some(RollbackCounterMirror::LegacyCounter(mirror)))
+            }
+            Some(RollbackCounterMirror::LegacyCounter(mirror))
+                if mirror == committed_before.counter =>
+            {
+                Ok(Some(RollbackCounterMirror::Pending {
+                    committed: committed_before,
+                    pending: pending_after,
+                }))
+            }
+            Some(mirror) => Ok(Some(mirror)),
             None => Ok(Some(RollbackCounterMirror::Pending {
                 committed: committed_before,
                 pending: pending_after,
             })),
         };
     }
-    Ok(committed.map(RollbackCounterMirror::Committed))
+    Ok(committed)
 }
 
-/// Write the rollback-counter mirror to the OS keychain (or the file
-/// fallback). Mutating vault operations call this before committing their
-/// SQLite transaction; any failure aborts the operation.
-pub fn mirror_counter(value: u64) -> Result<()> {
+/// Write the rollback-state mirror to the OS keychain (or the file fallback).
+/// Mutating vault operations call this before committing their SQLite
+/// transaction; any failure aborts the operation.
+pub fn mirror_counter(value: RollbackState) -> Result<()> {
     #[cfg(any(test, feature = "test-util"))]
     if rollback_mirror_disabled() {
         return Ok(());
@@ -353,7 +391,7 @@ pub fn mirror_counter(value: u64) -> Result<()> {
 }
 
 /// Record that a rollback-counter update is in flight.
-pub fn mirror_counter_pending(committed: u64, pending: u64) -> Result<()> {
+pub fn mirror_counter_pending(committed: RollbackState, pending: RollbackState) -> Result<()> {
     #[cfg(any(test, feature = "test-util"))]
     if rollback_mirror_disabled() {
         return Ok(());
@@ -484,7 +522,8 @@ pub(crate) fn audit_head_anchor_enforcement_disabled() -> bool {
     false
 }
 
-/// Encode/decode helpers — 8 bytes big-endian.
+/// Encode/decode helpers.
+#[cfg(test)]
 fn encode_counter(v: u64) -> [u8; 8] {
     v.to_be_bytes()
 }
@@ -500,26 +539,80 @@ fn decode_counter(bytes: &[u8]) -> Result<u64> {
     Ok(u64::from_be_bytes(a))
 }
 
-fn encode_pending_counter(committed: u64, pending: u64) -> [u8; 24] {
-    let mut out = [0u8; 24];
-    out[..8].copy_from_slice(PENDING_COUNTER_MAGIC);
-    out[8..16].copy_from_slice(&committed.to_be_bytes());
-    out[16..24].copy_from_slice(&pending.to_be_bytes());
+fn encode_rollback_state(state: RollbackState) -> [u8; 40] {
+    let mut out = [0u8; 40];
+    out[..8].copy_from_slice(&state.counter.to_be_bytes());
+    out[8..40].copy_from_slice(&state.digest);
     out
 }
 
-fn decode_pending_counter(bytes: &[u8]) -> Result<(u64, u64)> {
-    if bytes.len() != 24 || &bytes[..8] != PENDING_COUNTER_MAGIC {
+fn decode_rollback_state(bytes: &[u8]) -> Result<RollbackCounterMirror> {
+    if bytes.len() == 8 {
+        return Ok(RollbackCounterMirror::LegacyCounter(decode_counter(bytes)?));
+    }
+    if bytes.len() != 40 {
+        return Err(Error::Keychain(format!(
+            "rollback state mirror has wrong length: {} (expected 40)",
+            bytes.len()
+        )));
+    }
+    let mut counter = [0u8; 8];
+    counter.copy_from_slice(&bytes[..8]);
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&bytes[8..40]);
+    Ok(RollbackCounterMirror::Committed(RollbackState {
+        counter: u64::from_be_bytes(counter),
+        digest,
+    }))
+}
+
+fn decode_committed_rollback_state(bytes: &[u8]) -> Result<RollbackState> {
+    match decode_rollback_state(bytes)? {
+        RollbackCounterMirror::Committed(state) => Ok(state),
+        RollbackCounterMirror::LegacyCounter(counter) => Ok(RollbackState {
+            counter,
+            digest: [0u8; 32],
+        }),
+        RollbackCounterMirror::Pending { .. } => {
+            unreachable!("single state decoder cannot emit pending")
+        }
+    }
+}
+
+fn encode_pending_counter(committed: RollbackState, pending: RollbackState) -> [u8; 88] {
+    let mut out = [0u8; 88];
+    out[..8].copy_from_slice(PENDING_COUNTER_MAGIC);
+    out[8..48].copy_from_slice(&encode_rollback_state(committed));
+    out[48..88].copy_from_slice(&encode_rollback_state(pending));
+    out
+}
+
+fn decode_pending_counter(bytes: &[u8]) -> Result<(RollbackState, RollbackState)> {
+    if bytes.len() == 24 && &bytes[..8] == PENDING_COUNTER_MAGIC {
+        let mut committed = [0u8; 8];
+        committed.copy_from_slice(&bytes[8..16]);
+        let mut pending = [0u8; 8];
+        pending.copy_from_slice(&bytes[16..24]);
+        return Ok((
+            RollbackState {
+                counter: u64::from_be_bytes(committed),
+                digest: [0u8; 32],
+            },
+            RollbackState {
+                counter: u64::from_be_bytes(pending),
+                digest: [0u8; 32],
+            },
+        ));
+    }
+    if bytes.len() != 88 || &bytes[..8] != PENDING_COUNTER_MAGIC {
         return Err(Error::Keychain(format!(
             "rollback pending counter has wrong format: {} bytes",
             bytes.len()
         )));
     }
-    let mut committed = [0u8; 8];
-    committed.copy_from_slice(&bytes[8..16]);
-    let mut pending = [0u8; 8];
-    pending.copy_from_slice(&bytes[16..24]);
-    Ok((u64::from_be_bytes(committed), u64::from_be_bytes(pending)))
+    let committed = decode_committed_rollback_state(&bytes[8..48])?;
+    let pending = decode_committed_rollback_state(&bytes[48..88])?;
+    Ok((committed, pending))
 }
 
 fn encode_audit_head(head: AuditHead) -> [u8; 40] {
@@ -599,7 +692,7 @@ fn pending_audit_head_file_path(pepper_path: &std::path::Path) -> std::path::Pat
         .join(AUDIT_HEAD_PENDING_FILENAME)
 }
 
-fn file_counter_read(pepper_path: &std::path::Path) -> Result<Option<u64>> {
+fn file_counter_read(pepper_path: &std::path::Path) -> Result<Option<RollbackCounterMirror>> {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
@@ -622,14 +715,19 @@ fn file_counter_read(pepper_path: &std::path::Path) -> Result<Option<u64>> {
     }
     let bytes =
         std::fs::read(&path).map_err(|e| Error::Keychain(format!("read counter file: {e}")))?;
-    Ok(Some(decode_counter(&bytes)?))
+    decode_rollback_state(&bytes).map(Some)
 }
 
-fn file_counter_write(pepper_path: &std::path::Path, value: u64) -> Result<()> {
-    file_write_private(&counter_file_path(pepper_path), &encode_counter(value))
+fn file_counter_write(pepper_path: &std::path::Path, value: RollbackState) -> Result<()> {
+    file_write_private(
+        &counter_file_path(pepper_path),
+        &encode_rollback_state(value),
+    )
 }
 
-fn file_pending_counter_read(pepper_path: &std::path::Path) -> Result<Option<(u64, u64)>> {
+fn file_pending_counter_read(
+    pepper_path: &std::path::Path,
+) -> Result<Option<(RollbackState, RollbackState)>> {
     let path = pending_counter_file_path(pepper_path);
     if !path.exists() {
         return Ok(None);
@@ -655,8 +753,8 @@ fn file_pending_counter_read(pepper_path: &std::path::Path) -> Result<Option<(u6
 
 fn file_pending_counter_write(
     pepper_path: &std::path::Path,
-    committed: u64,
-    pending: u64,
+    committed: RollbackState,
+    pending: RollbackState,
 ) -> Result<()> {
     file_write_private(
         &pending_counter_file_path(pepper_path),
@@ -781,10 +879,10 @@ fn file_write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_counter_read() -> Result<Option<u64>> {
+fn keychain_counter_read() -> Result<Option<RollbackCounterMirror>> {
     use security_framework::passwords::get_generic_password;
     match get_generic_password(SERVICE, ROLLBACK_COUNTER_ACCOUNT) {
-        Ok(bytes) => Ok(Some(decode_counter(&bytes)?)),
+        Ok(bytes) => decode_rollback_state(&bytes).map(Some),
         Err(e) => {
             // `errSecItemNotFound` (-25300) is the "no mirror yet" signal
             // — first run after upgrade. Anything else is an error.
@@ -800,14 +898,18 @@ fn keychain_counter_read() -> Result<Option<u64>> {
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_counter_write(value: u64) -> Result<()> {
+fn keychain_counter_write(value: RollbackState) -> Result<()> {
     use security_framework::passwords::set_generic_password;
-    set_generic_password(SERVICE, ROLLBACK_COUNTER_ACCOUNT, &encode_counter(value))
-        .map_err(|e| Error::Keychain(format!("set_generic_password (rollback counter): {e}")))
+    set_generic_password(
+        SERVICE,
+        ROLLBACK_COUNTER_ACCOUNT,
+        &encode_rollback_state(value),
+    )
+    .map_err(|e| Error::Keychain(format!("set_generic_password (rollback counter): {e}")))
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_pending_counter_read() -> Result<Option<(u64, u64)>> {
+fn keychain_pending_counter_read() -> Result<Option<(RollbackState, RollbackState)>> {
     use security_framework::passwords::get_generic_password;
     match get_generic_password(SERVICE, ROLLBACK_COUNTER_PENDING_ACCOUNT) {
         Ok(bytes) => decode_pending_counter(&bytes).map(Some),
@@ -824,7 +926,7 @@ fn keychain_pending_counter_read() -> Result<Option<(u64, u64)>> {
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_pending_counter_write(committed: u64, pending: u64) -> Result<()> {
+fn keychain_pending_counter_write(committed: RollbackState, pending: RollbackState) -> Result<()> {
     use security_framework::passwords::set_generic_password;
     set_generic_password(
         SERVICE,
@@ -925,22 +1027,22 @@ fn keychain_pending_audit_head_delete() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn keychain_counter_read() -> Result<Option<u64>> {
+fn keychain_counter_read() -> Result<Option<RollbackCounterMirror>> {
     linux_secret_service::counter_read()
 }
 
 #[cfg(target_os = "linux")]
-fn keychain_counter_write(value: u64) -> Result<()> {
+fn keychain_counter_write(value: RollbackState) -> Result<()> {
     linux_secret_service::counter_write(value)
 }
 
 #[cfg(target_os = "linux")]
-fn keychain_pending_counter_read() -> Result<Option<(u64, u64)>> {
+fn keychain_pending_counter_read() -> Result<Option<(RollbackState, RollbackState)>> {
     linux_secret_service::pending_counter_read()
 }
 
 #[cfg(target_os = "linux")]
-fn keychain_pending_counter_write(committed: u64, pending: u64) -> Result<()> {
+fn keychain_pending_counter_write(committed: RollbackState, pending: RollbackState) -> Result<()> {
     linux_secret_service::pending_counter_write(committed, pending)
 }
 
@@ -975,28 +1077,31 @@ fn keychain_pending_audit_head_delete() -> Result<()> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn keychain_counter_read() -> Result<Option<u64>> {
+fn keychain_counter_read() -> Result<Option<RollbackCounterMirror>> {
     Err(Error::Keychain(
         "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed rollback counter".to_string(),
     ))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn keychain_counter_write(_value: u64) -> Result<()> {
+fn keychain_counter_write(_value: RollbackState) -> Result<()> {
     Err(Error::Keychain(
         "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed rollback counter".to_string(),
     ))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn keychain_pending_counter_read() -> Result<Option<(u64, u64)>> {
+fn keychain_pending_counter_read() -> Result<Option<(RollbackState, RollbackState)>> {
     Err(Error::Keychain(
         "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed rollback counter".to_string(),
     ))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn keychain_pending_counter_write(_committed: u64, _pending: u64) -> Result<()> {
+fn keychain_pending_counter_write(
+    _committed: RollbackState,
+    _pending: RollbackState,
+) -> Result<()> {
     Err(Error::Keychain(
         "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed rollback counter".to_string(),
     ))
@@ -1089,9 +1194,10 @@ pub fn delete_rollback_counter() -> Result<()> {
 #[cfg(target_os = "linux")]
 mod linux_secret_service {
     use super::{
-        decode_audit_head, decode_counter, decode_pending_audit_head, decode_pending_counter,
-        encode_audit_head, encode_counter, encode_pending_audit_head, encode_pending_counter,
-        AuditHead,
+        decode_audit_head, decode_pending_audit_head, decode_pending_counter,
+        decode_rollback_state, encode_audit_head, encode_pending_audit_head,
+        encode_pending_counter, encode_rollback_state, AuditHead, RollbackCounterMirror,
+        RollbackState,
     };
     use super::{
         ACCOUNT, AUDIT_HEAD_ACCOUNT, AUDIT_HEAD_PENDING_ACCOUNT, PEPPER_LEN,
@@ -1256,7 +1362,7 @@ mod linux_secret_service {
         m
     }
 
-    pub(super) fn counter_read() -> Result<Option<u64>> {
+    pub(super) fn counter_read() -> Result<Option<RollbackCounterMirror>> {
         let ss = connect()?;
         let search = ss.search_items(counter_attrs()).map_err(dbus_unavailable)?;
         let mut hit = search.unlocked.into_iter().next();
@@ -1269,20 +1375,20 @@ mod linux_secret_service {
         match hit {
             Some(item) => {
                 let bytes = item.get_secret().map_err(dbus_unavailable)?;
-                Ok(Some(decode_counter(&bytes)?))
+                decode_rollback_state(&bytes).map(Some)
             }
             None => Ok(None),
         }
     }
 
-    pub(super) fn counter_write(value: u64) -> Result<()> {
+    pub(super) fn counter_write(value: RollbackState) -> Result<()> {
         let ss = connect()?;
         let collection = unlocked_collection(&ss)?;
         collection
             .create_item(
                 COUNTER_LABEL,
                 counter_attrs(),
-                &encode_counter(value),
+                &encode_rollback_state(value),
                 /* replace = */ true,
                 CONTENT_TYPE,
             )
@@ -1300,7 +1406,7 @@ mod linux_secret_service {
         Ok(())
     }
 
-    pub(super) fn pending_counter_read() -> Result<Option<(u64, u64)>> {
+    pub(super) fn pending_counter_read() -> Result<Option<(RollbackState, RollbackState)>> {
         let ss = connect()?;
         let search = ss
             .search_items(pending_counter_attrs())
@@ -1321,7 +1427,10 @@ mod linux_secret_service {
         }
     }
 
-    pub(super) fn pending_counter_write(committed: u64, pending: u64) -> Result<()> {
+    pub(super) fn pending_counter_write(
+        committed: RollbackState,
+        pending: RollbackState,
+    ) -> Result<()> {
         let ss = connect()?;
         let collection = unlocked_collection(&ss)?;
         collection
@@ -1579,24 +1688,83 @@ mod rollback_counter_tests {
     }
 
     #[test]
+    fn rollback_state_encode_decode_roundtrip() {
+        let state = RollbackState {
+            counter: 42,
+            digest: [7u8; 32],
+        };
+        let bytes = encode_rollback_state(state);
+        assert_eq!(bytes.len(), 40);
+        assert_eq!(
+            decode_rollback_state(&bytes).unwrap(),
+            RollbackCounterMirror::Committed(state)
+        );
+    }
+
+    #[test]
+    fn rollback_state_decode_accepts_legacy_counter() {
+        let bytes = encode_counter(42);
+        assert_eq!(
+            decode_rollback_state(&bytes).unwrap(),
+            RollbackCounterMirror::LegacyCounter(42)
+        );
+    }
+
+    #[test]
+    fn pending_rollback_state_encode_decode_roundtrip() {
+        let committed = RollbackState {
+            counter: 2,
+            digest: [2u8; 32],
+        };
+        let pending = RollbackState {
+            counter: 3,
+            digest: [3u8; 32],
+        };
+        let bytes = encode_pending_counter(committed, pending);
+        assert_eq!(bytes.len(), 88);
+        assert_eq!(
+            decode_pending_counter(&bytes).unwrap(),
+            (committed, pending)
+        );
+    }
+
+    #[test]
     fn decode_rejects_wrong_length() {
         assert!(matches!(decode_counter(&[]), Err(Error::Keychain(_))));
         assert!(matches!(decode_counter(&[0u8; 7]), Err(Error::Keychain(_))));
         assert!(matches!(decode_counter(&[0u8; 9]), Err(Error::Keychain(_))));
+        assert!(matches!(
+            decode_rollback_state(&[0u8; 39]),
+            Err(Error::Keychain(_))
+        ));
     }
 
     #[test]
     fn file_counter_write_then_read_roundtrip() {
         let dir = TempDir::new().unwrap();
         let pepper = dir.path().join("pepper");
+        let first = RollbackState {
+            counter: 12345,
+            digest: [1u8; 32],
+        };
+        let second = RollbackState {
+            counter: 99,
+            digest: [2u8; 32],
+        };
         // No counter file yet → read returns Ok(None).
         assert!(matches!(file_counter_read(&pepper), Ok(None)));
         // Write, read back.
-        file_counter_write(&pepper, 12345).unwrap();
-        assert_eq!(file_counter_read(&pepper).unwrap(), Some(12345));
+        file_counter_write(&pepper, first).unwrap();
+        assert_eq!(
+            file_counter_read(&pepper).unwrap(),
+            Some(RollbackCounterMirror::Committed(first))
+        );
         // Overwrite with a new value.
-        file_counter_write(&pepper, 99).unwrap();
-        assert_eq!(file_counter_read(&pepper).unwrap(), Some(99));
+        file_counter_write(&pepper, second).unwrap();
+        assert_eq!(
+            file_counter_read(&pepper).unwrap(),
+            Some(RollbackCounterMirror::Committed(second))
+        );
     }
 
     #[cfg(unix)]
@@ -1605,7 +1773,14 @@ mod rollback_counter_tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let pepper = dir.path().join("pepper");
-        file_counter_write(&pepper, 7).unwrap();
+        file_counter_write(
+            &pepper,
+            RollbackState {
+                counter: 7,
+                digest: [7u8; 32],
+            },
+        )
+        .unwrap();
         // Loosen the permissions to simulate a misconfigured deployment.
         let counter_path = counter_file_path(&pepper);
         std::fs::set_permissions(&counter_path, std::fs::Permissions::from_mode(0o644)).unwrap();

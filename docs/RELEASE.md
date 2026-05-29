@@ -68,15 +68,18 @@
    `sha256sums.txt` hash, and release asset ID/size manifest.
 6. **Promote.** Publish through the marker-gated workflow, not the GitHub UI:
    ```sh
+   gh workflow view publish-release.yml >/dev/null
    gh workflow run publish-release.yml --ref "$TAG" -f ref="$TAG"
    ```
-   The workflow refuses to publish unless `release-install.yml` has produced
-   a matching marker for the same tag commit and the current draft release
-   asset IDs/sizes plus `sha256sums.txt` hash. A GitHub UI publish bypasses
-   that prevention path; `publish-release.yml` has a post-publish guard that
-   fails visibly and attempts to restore draft status if someone publishes
-   without the marker, but it cannot prevent the brief exposure window before
-   the guard runs.
+   `gh workflow view` must succeed from the repository default branch before
+   cutting or promoting a tag; GitHub only dispatches workflows that exist on
+   the default branch. The workflow refuses to publish unless
+   `release-install.yml` has produced a matching marker for the same tag commit
+   and the current draft release asset IDs/sizes plus `sha256sums.txt` hash.
+   A GitHub UI publish bypasses that prevention path; `publish-release.yml` has
+   a post-publish guard that fails visibly and attempts to restore draft status
+   if someone publishes without the marker, but it cannot prevent the brief
+   exposure window before the guard runs.
 7. **Downstream taps and registries.** Run downstream publish workflows
    from the same tag ref, for example:
    ```sh
@@ -197,14 +200,17 @@ Some inputs are intentionally still moving or externally resolved:
   When bumping an action, resolve the tag to a new commit SHA in the same
   change and review the upstream release notes.
 - The Rust toolchain follows `rust-toolchain.toml` (currently `1.94.1`).
-- Docker image builds use pinned base-image digests and a pinned Debian
-  snapshot timestamp (`DEBIAN_SNAPSHOT` in `Dockerfile`) for builder packages
-  (`pkg-config`, `ca-certificates`, `curl`, `build-essential`, `clang`). Bump
-  that timestamp only in a reviewed change and rebuild from a new tag.
-- `libsodium-sys-stable/fetch-latest` is disabled; release, CI, smoke, and
-  Docker builds run `scripts/prepare-libsodium-dist.sh` and build from the
-  versioned `libsodium-1.0.21-stable.tar.gz` archive pinned by SHA-256 via
-  `SODIUM_DIST_DIR`.
+- Docker image builds use a pinned Dockerfile frontend digest, pinned
+  base-image digests, and a pinned Debian snapshot timestamp
+  (`DEBIAN_SNAPSHOT` in `Dockerfile`) for builder packages (`pkg-config`,
+  `ca-certificates`, `curl`, `build-essential`, `clang`). Bump those pins only
+  in a reviewed change and rebuild from a new tag.
+- `libsodium-sys-stable/fetch-latest` is disabled for shipped Unix builds;
+  release, macOS/Linux CI, smoke, and Docker builds run
+  `scripts/prepare-libsodium-dist.sh` and build from the versioned
+  `libsodium-1.0.21-stable.tar.gz` archive pinned by SHA-256 via
+  `SODIUM_DIST_DIR`. The Windows CI row is a non-shipping `cloak-core`
+  compile/test check and does not use the Unix source staging directory.
 
 Bun was an obvious `latest` input and is pinned to `1.2.9` in CI/release
 workflows. Before cutting a production tag, review the remaining moving

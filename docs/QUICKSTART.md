@@ -275,7 +275,18 @@ The model will call `proxy_authenticated_http_request`. The daemon attaches the 
 
 If you use `mint_short_lived_token`, the returned token is intentionally sent to the MCP client. It is not the long-lived parent secret, but it is still a credential until it expires.
 
-## 7. Inspect the audit log
+## 7. Upgrade legacy rollback mirrors
+
+If you are upgrading from a build that stored only the rollback counter in the
+OS keychain, Cloak fails closed instead of silently trusting that legacy mirror.
+After you have reviewed and trust the current vault file, adopt its state-hash
+mirror explicitly:
+
+```sh
+cloak rollback adopt-state --yes
+```
+
+## 8. Inspect the audit log
 
 The hash-chained JSONL audit log lives at `~/Library/Application Support/cloak/audit.jsonl` (XDG equivalent on Linux). Tail it directly, or query it through the daemon via the MCP `tool.query_audit` surface:
 

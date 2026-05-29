@@ -32,6 +32,7 @@ Commands:
   restore        Re-derive vault access from your 24-word BIP-39 recovery seed
   backup         Backup utilities: confirm the recovery seed you wrote down
   audit          Audit-log utilities
+  rollback       Rollback-mirror maintenance utilities
   help           Print this message or the help of the given subcommand(s)
 
 Options:

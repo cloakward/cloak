@@ -71,6 +71,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Prepare pinned libsodium source
+        if: matrix.platform != 'windows'
         shell: bash
         run: ./scripts/prepare-libsodium-dist.sh
 
@@ -129,8 +130,6 @@ jobs:
 
       - name: cargo clippy (windows, cloak-core only)
         if: matrix.platform == 'windows'
-        env:
-          SODIUM_DIST_DIR: ${{ github.workspace }}/.cargo/libsodium-dist
         run: cargo clippy --locked -p cloak-core --all-targets --target ${{ matrix.target }} -- -D warnings
 
       - name: cross clippy (musl)
@@ -155,8 +154,6 @@ jobs:
 
       - name: cargo build (windows, cloak-core only)
         if: matrix.platform == 'windows'
-        env:
-          SODIUM_DIST_DIR: ${{ github.workspace }}/.cargo/libsodium-dist
         run: cargo build --locked --release -p cloak-core --target ${{ matrix.target }}
 
       - name: cross build (musl)
@@ -181,7 +178,6 @@ jobs:
         if: matrix.platform == 'windows'
         env:
           CLOAK_PEPPER_FILE: ${{ runner.temp }}\cloak-ci-pepper
-          SODIUM_DIST_DIR: ${{ github.workspace }}/.cargo/libsodium-dist
         run: cargo test --locked -p cloak-core --target ${{ matrix.target }}
 
       # `cross` runs the test binary inside a Docker container; the
@@ -207,6 +203,7 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun run lint:no-http
+          bun run typecheck
           bun test
           bun build src/server.ts --compile --outfile dist/cloak-mcp
 
