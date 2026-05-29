@@ -26,18 +26,7 @@ SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cloak-smoke.XXXXXX")"
 SOCK_DIR="$SMOKE_DIR/run"
 mkdir -p "$SOCK_DIR" "$SMOKE_DIR/Library/Application Support" "$SMOKE_DIR/.config"
 
-# Redirect HOME so the daemon and the CLI both resolve `Vault::default_path`
-# to the same hermetic location. We also use the documented
-# `CLOAK_PEPPER_FILE` escape hatch instead of the OS Keychain, so the
-# smoke test does not require interactive Keychain authorization (which
-# is unavailable in CI / non-Aqua sessions).
-export HOME="$SMOKE_DIR"
-export XDG_RUNTIME_DIR="$SOCK_DIR"
-export CLOAK_PEPPER_FILE="$SMOKE_DIR/.cloak-pepper"
-export RUST_LOG="cloak_core=debug,cloakd=debug"
-
 cleanup() {
-  rc=$?
   if [[ -n "${CLOAKD_PID:-}" ]]; then
     kill -TERM "$CLOAKD_PID" 2>/dev/null || true
     wait "$CLOAKD_PID" 2>/dev/null || true
@@ -60,7 +49,9 @@ if [[ -n "${CLOAK_SMOKE_BIN_DIR:-}" ]]; then
   MCP="$CLOAK_SMOKE_BIN_DIR/cloak-mcp"
 else
   echo "==> Building release binaries"
-  cargo build --release --workspace >/dev/null
+  ./scripts/prepare-libsodium-dist.sh >/dev/null
+  SODIUM_DIST_DIR="$REPO_ROOT/.cargo/libsodium-dist" \
+    cargo build --release --workspace >/dev/null
 
   CLOAK="$REPO_ROOT/target/release/cloak"
   CLOAKD="$REPO_ROOT/target/release/cloakd"
@@ -70,6 +61,7 @@ else
     cd packages/cloak-mcp
     bun install >/dev/null 2>&1
     bun build src/server.ts --compile --outfile dist/cloak-mcp >/dev/null
+    chmod 755 dist/cloak-mcp
   )
   MCP="$REPO_ROOT/packages/cloak-mcp/dist/cloak-mcp"
 fi
@@ -80,6 +72,14 @@ if [[ "${CLOAK_SMOKE_SKIP_MCP:-0}" != "1" ]]; then
   test -x "$MCP"
 fi
 
+# Redirect HOME after the build so Cargo/Rustup/Bun can use their normal
+# caches while the daemon and CLI still resolve all runtime state inside
+# the hermetic smoke directory.
+export HOME="$SMOKE_DIR"
+export XDG_RUNTIME_DIR="$SOCK_DIR"
+export CLOAK_PEPPER_FILE="$SMOKE_DIR/.cloak-pepper"
+export RUST_LOG="cloak_core=debug,cloakd=debug"
+
 echo "==> Setting up permissive policy at $HOME/.config/cloak/policy.toml"
 mkdir -p "$HOME/.config/cloak"
 cp "$REPO_ROOT/scripts/policy.example.toml" "$HOME/.config/cloak/policy.toml"
@@ -87,6 +87,7 @@ cp "$REPO_ROOT/scripts/policy.example.toml" "$HOME/.config/cloak/policy.toml"
 # Test-only escape hatches shared by all `cloak` invocations below.
 export CLOAK_UNSAFE_TEST_MODE=1
 export CLOAK_PASSPHRASE="REDACTED-smoke-passphrase"
+export CLOAK_MCP_BIN="$MCP"
 
 # `cloak init` displays the BIP-39 recovery seed and refuses to print
 # to a non-TTY stdout (with a `/dev/tty` fallback when available). The
@@ -144,14 +145,14 @@ echo "==> cloak daemon-unlock (push passphrase to daemon over IPC)"
 echo "==> cloak-mcp --self-test"
 if [[ "${CLOAK_SMOKE_SKIP_MCP:-0}" == "1" ]]; then
   echo "    skipped"
-elif CLOAK_SOCK="$SOCK_DIR/cloakd.sock" "$MCP" --self-test; then
+elif "$MCP" --self-test --unsafe-allow-socket-override --socket "$SOCK_DIR/cloakd.sock"; then
   echo "    (compiled binary path)"
 elif [[ "${CLOAK_SMOKE_STRICT_MCP:-0}" == "1" ]]; then
   echo "FAIL: cloak-mcp --self-test failed for compiled binary"
   exit 1
 elif [[ "$(uname -s)" == "Linux" ]]; then
   echo "    compiled binary failed on Linux; trying bun run directly"
-  CLOAK_SOCK="$SOCK_DIR/cloakd.sock" bun run "$REPO_ROOT/packages/cloak-mcp/src/server.ts" --self-test
+  bun run "$REPO_ROOT/packages/cloak-mcp/src/server.ts" --self-test --unsafe-allow-socket-override --socket "$SOCK_DIR/cloakd.sock"
   echo "    (bun run path)"
 else
   echo "FAIL: cloak-mcp --self-test on macOS"

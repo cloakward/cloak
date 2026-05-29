@@ -7,8 +7,10 @@
 //! Steps:
 //! 1. Vault passphrase (with strength meter via `zxcvbn`).
 //!    Pepper installed in OS keychain (handled inside `Vault::initialize`).
-//! 2. Default policy file written to `~/.config/cloak/policy.toml`
-//!    (idempotent; never overwrites a user's edits).
+//! 2. Default policy file written to the platform config directory
+//!    (`~/Library/Application Support/cloak/policy.toml` on macOS,
+//!    `~/.config/cloak/policy.toml` on Linux; idempotent and never
+//!    overwrites a user's edits).
 //! 3. Daemon installed (launchd / systemd-user) and started.
 //! 4. Detected MCP clients registered (per-client opt-out).
 //! 5. `.env` files in cwd offered for import; post-import disposition.
@@ -19,11 +21,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+use cloak_core::audit::AuditResult;
 use cloak_core::crypto::Secret;
 use cloak_core::policy::default_policy_path;
 use dialoguer::{theme::ColorfulTheme, Confirm, Password, Select};
 use zxcvbn::Score;
 
+use super::audit_log;
 use super::clients::{self, Client};
 use super::daemon as daemonctl;
 use super::dotenv::{discover_envs, parse_dotenv};
@@ -111,12 +115,15 @@ pub fn run(ctx: &Context, opts: SetupOptions) -> Result<u8> {
     println!();
     println!("What's next:");
     println!("  cloak add OPENAI_API_KEY    add a secret (input is hidden as you type)");
+    println!("  cloak daemon start          start cloakd for MCP clients");
+    println!("  cloak unlock                unlock cloakd after each daemon start");
     println!("  cloak list                  see what's in the vault");
     println!("  cloak doctor                verify everything is wired up");
     println!();
-    println!("Open Claude Desktop / Cursor / any MCP client you registered,");
-    println!("and try asking it to call an API. The agent will route through");
-    println!("Cloak; the model never sees the plaintext.");
+    println!("After the daemon is running and unlocked, open Claude Desktop / Cursor");
+    println!("or any MCP client you registered and try asking it to call an API.");
+    println!("The agent will route through Cloak; the model never sees the raw");
+    println!("stored secret value.");
     if let Some(o) = policy_outcome {
         match o {
             PolicyWriteOutcome::Wrote(p) => {
@@ -173,7 +180,24 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
         prompt_strong_passphrase(theme)?
     };
 
-    let result = vault.initialize(&pass)?;
+    audit_log::append_required(
+        "cli.init",
+        None,
+        AuditResult::Started,
+        Some("vault initialization started from setup".into()),
+    )?;
+    let result = match vault.initialize(&pass) {
+        Ok(r) => r,
+        Err(e) => {
+            audit_log::append_required(
+                "cli.init",
+                None,
+                AuditResult::Error,
+                Some("vault initialization failed from setup".into()),
+            )?;
+            return Err(e.into());
+        }
+    };
     let p = result.kdf_params;
     println!(
         "      kdf: argon2id (m={} KiB, t={}, p={})",
@@ -181,9 +205,28 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
     );
     println!("      pepper stored in OS keychain (service=dev.cloak account=vault.pepper)");
     println!();
-    Ok(super::recovery_display::print_mnemonic_warning(
-        &result.mnemonic,
-    ))
+    // The vault is committed now and the mnemonic is show-once. Print it before
+    // any post-commit audit append can fail; the pre-init audit entry above is
+    // the fail-closed gate before mutation.
+    let printed = match super::recovery_display::print_mnemonic_warning(&result.mnemonic) {
+        Ok(printed) => printed,
+        Err(e) => {
+            let _ = audit_log::append_required(
+                "cli.init",
+                None,
+                AuditResult::Error,
+                Some("vault initialized from setup but recovery mnemonic display failed".into()),
+            );
+            return Err(e);
+        }
+    };
+    audit_log::append_required(
+        "cli.init",
+        None,
+        AuditResult::Ok,
+        Some("vault initialized from setup; recovery mnemonic generated".into()),
+    )?;
+    Ok(printed)
 }
 
 /// Prompt for a passphrase, scoring it with `zxcvbn`. Refuses scores
@@ -211,14 +254,8 @@ fn prompt_strong_passphrase(theme: &ColorfulTheme) -> Result<Secret<String>> {
             println!("      hint: {warning}");
         }
         if (estimate.score() as u8) < 2 {
-            let again = Confirm::with_theme(theme)
-                .with_prompt("that passphrase is weak; choose a stronger one?")
-                .default(true)
-                .interact()
-                .unwrap_or(true);
-            if again {
-                continue;
-            }
+            println!("      choose a stronger passphrase");
+            continue;
         }
         return Ok(Secret::new(pass));
     }
@@ -263,10 +300,9 @@ fn prompt_passphrase_via_native_dialog() -> Result<Secret<String>> {
                 .unwrap_or_else(|| "passphrase is weak".to_string());
             native_info_dialog(
                 "Cloak: weak passphrase",
-                &format!(
-                    "{warning}\n\nYou can continue, but consider a stronger passphrase next time."
-                ),
+                &format!("{warning}\n\nChoose a stronger passphrase to continue."),
             );
+            continue;
         }
         return Ok(first);
     }
@@ -422,10 +458,9 @@ pub(crate) enum PolicyWriteOutcome {
     AlreadyExists(#[allow(dead_code)] PathBuf),
 }
 
-/// Ensure `path` (typically `~/.config/cloak/policy.toml`) contains a
-/// policy file. If absent, write the default-deny starter template at
-/// mode 0o600 with a `.bak` of any prior file. Idempotent: never
-/// overwrites existing content.
+/// Ensure `path` contains a policy file. If absent, write the
+/// default-deny starter template at mode 0o600 with a `.bak` of any
+/// prior file. Idempotent: never overwrites existing content.
 pub(crate) fn write_default_policy(path: &Path) -> Result<PolicyWriteOutcome> {
     if path.exists() {
         tracing::debug!(
@@ -472,9 +507,9 @@ fn install_and_start_daemon(theme: &ColorfulTheme, opts: &SetupOptions) -> Resul
         }
         Confirm::with_theme(theme)
             .with_prompt("install cloakd as a background service now?")
-            .default(false)
+            .default(true)
             .interact()
-            .unwrap_or(false)
+            .unwrap_or(true)
     };
     if !install {
         println!("      skipped. Start cloakd manually with `cloakd &` when you need it,");

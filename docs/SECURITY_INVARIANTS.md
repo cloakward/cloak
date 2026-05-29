@@ -1,25 +1,29 @@
 # Cloak security invariants
 
 These are the load-bearing properties Cloak enforces in code, in tests, and in
-CI. Each invariant lists the file:line where it is enforced, the file:line of
-the test that asserts it, and the CI check that gates regressions.
+CI. Each invariant lists the implementation area where it is enforced, the
+test that asserts it, and the CI check that gates regressions.
 
-The numbering matches `README.md` §"Security invariants (load-bearing)" so a
-change to either should land in lockstep.
+`README.md` links here and carries only a short summary; this file is the
+source of truth.
 
-## I1 — No MCP tool returns plaintext secret material
+## I1 — No MCP tool returns raw stored secret values
 
 The MCP-callable surface contains no `get_secret` / `reveal_secret` /
 `read_secret` method. Every tool returns either metadata (names, kinds, tags),
 the result of a privileged daemon-side action (computed headers, HTTP response,
-minted derivative), or an audit query — never a raw stored secret value.
+minted derivative), or an audit query — never a raw stored secret value. The
+minted derivative is still a credential returned to the MCP client by design,
+and proxied HTTP responses are returned without arbitrary body redaction.
 
 - **Enforced:** `packages/cloak-mcp/src/tools/index.ts:9-16` (the six-tool
   registry; nothing else is exposed) and the per-tool handlers in the same
   directory, which only forward to `vault.list`, `vault.get_metadata`,
   `tool.sign_request`, `tool.proxy_http`, `tool.mint_token`, `tool.query_audit`.
-  The daemon's CLI-only gate at `crates/cloak-core/src/daemon.rs:300-308,420-427`
-  keeps `vault.show` reachable only by the `cloak` CLI peer.
+  The daemon's CLI-only dispatch gate in `crates/cloak-core/src/daemon.rs`
+  keeps `vault.show` reachable only by the `cloak` CLI peer, and the
+  daemon-side `vault.show` handler performs user-presence verification before
+  plaintext leaves the vault.
 - **Tested:** `packages/cloak-mcp/tests/tools.test.ts:140-161`
   ("no tool returns plaintext-looking secret material") and the description
   contract test at `packages/cloak-mcp/tests/tools.test.ts:163-200`.
@@ -30,9 +34,13 @@ minted derivative), or an audit query — never a raw stored secret value.
 
 ## I2 — The daemon owns all outbound HTTP
 
-`cloak-mcp` imports zero HTTP clients. Every byte of network egress originates
-from `crates/cloak-core/src/egress.rs` (reqwest + rustls + system root store,
-3-redirect cap, 30s timeout).
+`cloak-mcp` imports zero HTTP clients. Network egress is daemon-owned and
+limited to explicit tool calls: `proxy_authenticated_http_request` goes through
+`crates/cloak-core/src/egress.rs` (reqwest + rustls + system root store,
+redirects disabled, 30s timeout), while `mint_short_lived_token` uses the AWS
+Smithy STS client in `crates/cloak-core/src/handlers.rs` with a daemon-side
+30-second timeout. Host allowlists apply to proxy requests; STS minting is
+gated by tool/secret policy instead.
 
 - **Enforced:** `packages/cloak-mcp/scripts/check-no-http.mjs:14-24` rejects
   any import of `http`, `https`, `node:http`, `node:https`, `axios`, `undici`,
@@ -44,8 +52,9 @@ from `crates/cloak-core/src/egress.rs` (reqwest + rustls + system root store,
 ## I3 — Peer auth runs before any session token issuance
 
 A connection from an unknown binary (basename not on the allowlist), an
-unknown UID, or with no resolvable on-disk path is closed before the daemon
-writes anything to it. No session token is minted.
+unknown UID, with no resolvable on-disk path, with a mismatched installed
+binary hash, or on macOS with a mismatched running-process CodeDirectory hash
+is closed before the daemon writes anything to it. No session token is minted.
 
 - **Enforced:** `crates/cloak-core/src/daemon.rs:235-252` (peer-auth happens
   immediately after `accept`, before any `read_request_json`) calling
@@ -117,7 +126,10 @@ is `expose_secret()`, so reads are grep-able.
 the canonical-JSON serialization of the previous entry. `verify()` at
 `crates/cloak-core/src/audit.rs:188-220` rejects mutated/deleted/reordered
 lines. Tested at `crates/cloak-core/src/audit.rs::tests::append_100_and_verify`
-and `concurrent_appends_are_atomic_and_complete`.
+and `concurrent_appends_are_atomic_and_complete`. The current tail is also
+anchored outside the log; non-empty logs with no anchor fail closed unless an
+operator explicitly adopts the verified current head with
+`cloak audit adopt-head --yes`.
 
 ### S2 — Session tokens use constant-time compare
 `crates/cloak-core/src/session.rs:124` uses `subtle::ConstantTimeEq::ct_eq`

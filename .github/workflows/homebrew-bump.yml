@@ -1,18 +1,16 @@
 name: homebrew-bump
 
-# Bumps the Homebrew formula in cloakward/homebrew-cloak whenever a GitHub
-# release is published. The cred-blocker (HOMEBREW_TAP_TOKEN secret + tap
+# Bumps the Homebrew formula in cloakward/homebrew-cloak after release
+# install verification. The cred-blocker (HOMEBREW_TAP_TOKEN secret + tap
 # repo creation) is tracked at:
 #   https://github.com/cloakward/cloak/issues/5
-# If the secret is absent we skip cleanly so the release still publishes.
+# If the secret is absent, prereleases skip with a warning but stable
+# releases fail so a production publish cannot silently omit Homebrew.
 
 on:
-  release:
-    types: [published]
-  # Manual dispatch for re-running against an existing release tag —
-  # same pattern as npm-publish.yml and docker-push.yml. Useful when
-  # the tap repo + token weren't configured at the time the release
-  # was first published, so the auto-fire skipped with a warning.
+  # Manual dispatch only. Must be run from the release tag ref
+  # (`gh workflow run homebrew-bump.yml --ref "$TAG" -f ref="$TAG"`) and
+  # requires a successful release-install marker for the same stable tag.
   workflow_dispatch:
     inputs:
       ref:
@@ -22,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   bump:
@@ -32,13 +31,25 @@ jobs:
         id: cred
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.ref }}
         run: |
-          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
-            echo "::warning title=homebrew-bump skipped::HOMEBREW_TAP_TOKEN not set; tap repo not yet configured (see cloakward/cloak#5). Release will publish without Homebrew."
+          set -euo pipefail
+          case "${TAG#v}" in
+            *-*) is_prerelease=true ;;
+            *) is_prerelease=false ;;
+          esac
+          if [ "$is_prerelease" = "true" ]; then
+            echo "::notice title=homebrew-bump skipped::Stable Homebrew formula bumps are skipped for prerelease tag ${TAG}."
             echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "::error title=homebrew-bump blocked::HOMEBREW_TAP_TOKEN not set; stable releases must publish a Homebrew bump PR or fail visibly."
+            exit 1
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Parse release tag
         if: steps.cred.outputs.skip == 'false'
@@ -52,14 +63,38 @@ jobs:
             echo "::error::no tag resolved (release.tag_name and inputs.ref both empty)"
             exit 1
           fi
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Homebrew stable formula bumps require a stable SemVer tag like v1.2.3"
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/tags/${TAG}" ]; then
+            echo "::error::homebrew-bump must run from the same tag ref. Use: gh workflow run homebrew-bump.yml --ref ${TAG} -f ref=${TAG}"
+            exit 1
+          fi
           # Strip leading "v" if present.
           VERSION="${TAG#v}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Checkout source tag
+        if: steps.cred.outputs.skip == 'false'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Require release-install marker
+        if: steps.cred.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ./scripts/require-release-install-marker.sh "$TAG"
+
       - name: Install cosign
         if: steps.cred.outputs.skip == 'false'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
         with:
           cosign-release: "v2.4.1"
 
@@ -74,7 +109,7 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
           # Workflow ref must match release.yml on the tagged commit.
           EXPECTED_ISSUER: "https://token.actions.githubusercontent.com"
-          EXPECTED_IDENTITY_REGEX: "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.event.release.tag_name || inputs.ref }}$"
+          EXPECTED_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ steps.tag.outputs.tag }}"
         run: |
           set -euo pipefail
 
@@ -83,8 +118,6 @@ jobs:
           MAC_ARM64="cloak-${VERSION}-aarch64-apple-darwin.tar.gz"
           MAC_X86_64="cloak-${VERSION}-x86_64-apple-darwin.tar.gz"
           LINUX_X86_64="cloak-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-          # LINUX_ARM64="cloak-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
-          # ^ uncomment when the release workflow produces a linux/arm64 tarball.
 
           # Fetch release JSON.
           RELEASE_JSON="$(gh api "repos/${REPO}/releases/tags/${TAG}")"
@@ -129,7 +162,7 @@ jobs:
                 --certificate "${out}.cert" \
                 --signature "${out}.sig" \
                 --certificate-oidc-issuer "$EXPECTED_ISSUER" \
-                --certificate-identity-regexp "$EXPECTED_IDENTITY_REGEX" \
+                --certificate-identity "$EXPECTED_IDENTITY" \
                 "${out}" >&2; then
               echo "::error::cosign verify-blob FAILED for $(basename "$url"); refusing to bump Homebrew formula."
               exit 1
@@ -189,11 +222,6 @@ jobs:
             end
 
             on_linux do
-              # on_arm do
-              #   url "<linux-arm64-tarball-url>"
-              #   sha256 "<sha>"
-              # end
-              # ^ uncomment when the release workflow produces a linux/arm64 tarball.
               on_intel do
                 url "${LINUX_X86_64_URL}"
                 sha256 "${LINUX_X86_64_SHA}"
@@ -205,10 +233,17 @@ jobs:
             def install
               bin.install "bin/cloak"
               bin.install "bin/cloakd"
-              # cloak-mcp is bundled in the macOS arm64, macOS x64, and Linux
-              # gnu amd64 tarballs (the platforms \`bun --compile\` can target
-              # from the release runners). Install if present.
-              bin.install "bin/cloak-mcp" if File.exist?("bin/cloak-mcp")
+              bin.install "bin/cloak-mcp"
+              pkgshare.install "share/polkit-1/actions/dev.cloak.policy" if File.exist?("share/polkit-1/actions/dev.cloak.policy")
+            end
+
+            def caveats
+              if OS.linux?
+                <<~EOS
+                  Install Cloak's polkit action before using biometric/user-presence gated reveal:
+                    sudo install -Dm644 "#{pkgshare}/dev.cloak.policy" /usr/share/polkit-1/actions/dev.cloak.policy
+                EOS
+              end
             end
 
             test do
@@ -219,7 +254,7 @@ jobs:
 
       - name: Checkout cloakward/homebrew-cloak
         if: steps.cred.outputs.skip == 'false'
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           repository: cloakward/homebrew-cloak
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -243,7 +278,7 @@ jobs:
           # Always branch from the freshest origin/main. If a previous
           # release's bump PR was merged into main between the moment
           # this workflow started and the moment it pushes, branching
-          # from the local checkout's HEAD (which actions/checkout@v6
+          # from the local checkout's HEAD (which actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
           # fetched at job start, depth=1) leaves the new branch on a
           # stale main and the resulting PR conflicts as add/add when
           # the older formula is already on main. Re-fetch + branch

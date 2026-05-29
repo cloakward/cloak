@@ -4,6 +4,7 @@ use anyhow::Result;
 use cloak_core::crypto::Secret;
 use cloak_core::Error;
 
+use super::audit_log;
 use super::{open_vault, unlock::unlock_interactive, Context};
 
 /// Update the value of an existing secret.
@@ -26,14 +27,40 @@ pub fn run(ctx: &Context, name: &str) -> Result<()> {
     };
     let value: Secret<String> = Secret::new(raw_value);
 
+    audit_log::append_required(
+        "cli.set",
+        Some(name),
+        cloak_core::audit::AuditResult::Started,
+        Some("set".into()),
+    )?;
     match vault.set(name, &value) {
         Ok(()) => {
+            audit_log::append_required(
+                "cli.set",
+                Some(name),
+                cloak_core::audit::AuditResult::Ok,
+                Some("set".into()),
+            )?;
             println!("updated: {name}");
             Ok(())
         }
         Err(Error::SecretNotFound(_)) => {
+            audit_log::append_required(
+                "cli.set",
+                Some(name),
+                cloak_core::audit::AuditResult::Error,
+                Some("secret not found".into()),
+            )?;
             anyhow::bail!("secret not found: {name}");
         }
-        Err(other) => Err(other.into()),
+        Err(other) => {
+            audit_log::append_required(
+                "cli.set",
+                Some(name),
+                cloak_core::audit::AuditResult::Error,
+                Some("set failed".into()),
+            )?;
+            Err(other.into())
+        }
     }
 }

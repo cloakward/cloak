@@ -22,16 +22,14 @@ refill_per_minute = 30
 [tools.proxy_authenticated_http_request]
 # Empty allowlist = deny all. Populate `allowed_hosts` per-secret.
 allowed_hosts = []
-require_confirmation = false
 
 [tools.sign_request]
-require_confirmation = false
+allow = false
 
 [tools.mint_short_lived_token]
-# Minting credentials emits a token to the client; require an explicit
-# user confirmation prompt for every call.
-require_confirmation = true
-confirmation_timeout_seconds = 30
+# Minting credentials emits a derived token to the MCP client. Leave this
+# denied globally; opt in per secret only after reviewing that exposure.
+allow = false
 
 [tools.query_audit]
 # Reading the audit log is read-only and safe for any authenticated peer.
@@ -60,4 +58,3 @@ allow = true
 # allowed_hosts = ["*.amazonaws.com"]
 # [secrets.tools.mint_short_lived_token]
 # allow = true
-# require_confirmation = true

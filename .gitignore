@@ -1,6 +1,7 @@
 target/
 **/*.rs.bk
 Cargo.lock.bak
+.cargo/libsodium-dist/
 
 node_modules/
 dist/

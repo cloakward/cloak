@@ -29,8 +29,16 @@ sed \
   -e "s|__LOG_DIR__|$LOG_DIR|g" \
   "$TEMPLATE" > "$PLIST_PATH"
 
-launchctl unload "$PLIST_PATH" 2>/dev/null || true
-launchctl load -w "$PLIST_PATH"
+DOMAIN="gui/$(id -u)"
+TARGET="$DOMAIN/dev.cloak.cloakd"
+
+launchctl bootout "$TARGET" 2>/dev/null || true
+if ! launchctl bootstrap "$DOMAIN" "$PLIST_PATH" 2>/dev/null; then
+  launchctl unload "$PLIST_PATH" 2>/dev/null || true
+  launchctl load -w "$PLIST_PATH"
+fi
+launchctl enable "$TARGET" 2>/dev/null || true
+launchctl kickstart -k "$TARGET" 2>/dev/null || true
 
 echo "Installed and loaded: $PLIST_PATH"
 echo "Logs: $LOG_DIR/"

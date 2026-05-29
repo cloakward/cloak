@@ -38,43 +38,27 @@ pub fn run_mnemonic(ctx: &Context) -> Result<()> {
             ctx.vault_path.display()
         )));
     }
+
+    audit_log::append_required(
+        "cli.backup.mnemonic",
+        None,
+        AuditResult::Started,
+        Some("recovery metadata check started".into()),
+    )?;
+    require_backup_user_presence(
+        ctx,
+        &mut vault,
+        "cli.backup.mnemonic",
+        "Confirm access to Cloak recovery metadata",
+    )?;
     if !vault.has_recovery_wrap()? {
-        audit_log::append(
+        audit_log::append_required(
             "cli.backup.mnemonic",
             None,
             AuditResult::Error,
             Some("vault has no recovery wrap (pre-v1.0)".into()),
-        );
+        )?;
         return Err(Error::NoRecoveryWrap.into());
-    }
-
-    // Privileged path: require unlock + Touch ID before we even confirm
-    // the wrap exists. This keeps a same-UID attacker from polling the
-    // command to learn whether a vault is recoverable.
-    unlock_interactive(&mut vault)?;
-    if !ctx.no_biometric {
-        let reason = "Confirm access to the Cloak recovery seed metadata";
-        match biometric::authenticate(reason) {
-            Ok(true) => {}
-            Ok(false) => {
-                audit_log::append(
-                    "cli.backup.mnemonic",
-                    None,
-                    AuditResult::Error,
-                    Some("biometric refused".into()),
-                );
-                anyhow::bail!("biometric authentication failed");
-            }
-            Err(e) => {
-                audit_log::append(
-                    "cli.backup.mnemonic",
-                    None,
-                    AuditResult::Error,
-                    Some(format!("biometric error: {e}")),
-                );
-                anyhow::bail!("biometric authentication failed");
-            }
-        }
     }
 
     println!("This vault carries a 24-word BIP-39 recovery seed.");
@@ -87,34 +71,47 @@ pub fn run_mnemonic(ctx: &Context) -> Result<()> {
     println!("way to re-display them — create a new vault with a fresh seed and");
     println!("re-import your secrets.");
 
-    audit_log::append(
+    audit_log::append_required(
         "cli.backup.mnemonic",
         None,
         AuditResult::Ok,
         Some("recovery wrap presence confirmed".into()),
-    );
+    )?;
     Ok(())
 }
 
 /// `cloak backup verify`. Reads the user's words from stdin and
-/// confirms they round-trip the stored recovery wrap. Touch ID gated:
+/// confirms they round-trip the stored recovery wrap. User-presence gated:
 /// like `cloak show`, this is privileged because it confirms whether a
 /// supplied seed unlocks the vault.
 pub fn run_verify(ctx: &Context) -> Result<()> {
-    let vault = open_vault(ctx)?;
+    let mut vault = open_vault(ctx)?;
     if !vault.is_initialized()? {
         return Err(SystemError::boxed(format!(
             "vault not initialized at {}",
             ctx.vault_path.display()
         )));
     }
+
+    audit_log::append_required(
+        "cli.backup.verify",
+        None,
+        AuditResult::Started,
+        Some("recovery mnemonic verification started".into()),
+    )?;
+    require_backup_user_presence(
+        ctx,
+        &mut vault,
+        "cli.backup.verify",
+        "Confirm access before verifying a Cloak recovery seed",
+    )?;
     if !vault.has_recovery_wrap()? {
-        audit_log::append(
+        audit_log::append_required(
             "cli.backup.verify",
             None,
             AuditResult::Error,
             Some("vault has no recovery wrap".into()),
-        );
+        )?;
         return Err(Error::NoRecoveryWrap.into());
     }
 
@@ -125,34 +122,70 @@ pub fn run_verify(ctx: &Context) -> Result<()> {
     let mnemonic = match RecoveryMnemonic::parse(&raw) {
         Ok(m) => m,
         Err(_) => {
-            audit_log::append(
+            audit_log::append_required(
                 "cli.backup.verify",
                 None,
                 AuditResult::Error,
                 Some("invalid mnemonic supplied".into()),
-            );
+            )?;
             return Err(Error::InvalidMnemonic.into());
         }
     };
     match vault.verify_mnemonic(&mnemonic) {
         Ok(()) => {
             println!("OK: the seed you entered matches this vault.");
-            audit_log::append(
+            audit_log::append_required(
                 "cli.backup.verify",
                 None,
                 AuditResult::Ok,
                 Some("mnemonic round-trip OK".into()),
-            );
+            )?;
             Ok(())
         }
         Err(e) => {
-            audit_log::append(
+            audit_log::append_required(
                 "cli.backup.verify",
                 None,
                 AuditResult::Error,
                 Some("mnemonic did not match stored recovery wrap".into()),
-            );
+            )?;
             Err(e.into())
+        }
+    }
+}
+
+fn require_backup_user_presence(
+    ctx: &Context,
+    vault: &mut cloak_core::vault::Vault,
+    tool: &str,
+    reason: &str,
+) -> Result<()> {
+    if let Err(e) = unlock_interactive(vault) {
+        audit_log::append_required(tool, None, AuditResult::Error, Some("unlock failed".into()))?;
+        return Err(e);
+    }
+    if ctx.no_biometric {
+        return Ok(());
+    }
+    match biometric::authenticate(reason) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            audit_log::append_required(
+                tool,
+                None,
+                AuditResult::Error,
+                Some("biometric refused".into()),
+            )?;
+            anyhow::bail!("biometric authentication failed");
+        }
+        Err(e) => {
+            audit_log::append_required(
+                tool,
+                None,
+                AuditResult::Error,
+                Some(format!("biometric error: {e}")),
+            )?;
+            anyhow::bail!("biometric authentication failed");
         }
     }
 }

@@ -179,7 +179,14 @@ pub fn detected() -> Vec<Client> {
 /// Resolve the `cloak-mcp` shim binary path.
 pub fn resolve_cloak_mcp_bin() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("CLOAK_MCP_BIN") {
-        return Ok(PathBuf::from(p));
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Ok(path);
+        }
+        anyhow::bail!(
+            "CLOAK_MCP_BIN points to {}, but that file does not exist",
+            path.display()
+        );
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -207,9 +214,9 @@ pub fn resolve_cloak_mcp_bin() -> Result<PathBuf> {
             return Ok(pb);
         }
     }
-    // Fall back to the literal name; downstream tools may resolve it
-    // via PATH at run time.
-    Ok(PathBuf::from("cloak-mcp"))
+    anyhow::bail!(
+        "could not find native cloak-mcp binary; install a full Cloak release for this platform or set CLOAK_MCP_BIN to an absolute cloak-mcp path before registering MCP clients"
+    )
 }
 
 /// Stable server name we register under in every client.

@@ -1,7 +1,7 @@
 //! `cloak export [PATH]` — render the vault as a `.env` file on disk.
 //!
 //! ## Security boundary
-//! - Goes through the same biometric-gated `vault.show` path as
+//! - Goes through the same user-presence-gated `vault.show` path as
 //!   `cloak show` (see `commands::show`): unlock the vault locally,
 //!   prompt Touch ID / polkit, then decrypt **per-record** using the
 //!   existing `Vault::show` API.
@@ -59,12 +59,12 @@ pub fn run(ctx: &Context, path: Option<PathBuf>, force: bool) -> Result<()> {
     for n in &names {
         let s = vault.show(n)?;
         out.push((n.clone(), s.expose_secret().clone()));
-        audit_log::append(
+        audit_log::append_required(
             "cli.export",
             Some(n),
             cloak_core::audit::AuditResult::Ok,
             Some(format!("dest={}", dest.display())),
-        );
+        )?;
         drop(s);
     }
     let body = render_dotenv(&out);

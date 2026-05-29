@@ -158,13 +158,13 @@ impl Vault {
     ///
     /// On open, if the vault is initialized, the file's monotonic
     /// counter is compared against the OS-keychain mirror (or the
-    /// `CLOAK_PEPPER_FILE`-sibling counter file). A file counter that is
-    /// *less* than the mirror is read-side rollback and is rejected with
-    /// [`Error::VaultRollbackDetected`]. Once a mirror exists, any
-    /// mismatch is rejected: accepting a file counter that is greater
-    /// than the mirror would let an attacker swap in an older vault
-    /// snapshot and manually bump its counter. A missing mirror is
-    /// seeded from the file (first run after upgrade).
+    /// `CLOAK_PEPPER_FILE`-sibling counter file). Once a committed mirror
+    /// exists, any mismatch is rejected. If the last write left a pending
+    /// `old -> new` marker, only the new value is accepted and repaired on
+    /// open. The old side is rejected fail-closed because after a durable
+    /// SQLite/audit write we cannot distinguish a crash-before-commit from
+    /// an attacker restoring an old but valid vault prefix. A missing mirror
+    /// is seeded from the file (first run after upgrade).
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let store = SqliteStore::open(path)?;
         let v = Self {
@@ -187,8 +187,8 @@ impl Vault {
             None => return Ok(()),
         };
         let file_counter = meta.monotonic_counter;
-        match crate::keychain::read_keychain_counter() {
-            Ok(Some(mirror)) => {
+        match crate::keychain::read_rollback_counter_mirror() {
+            Ok(Some(crate::keychain::RollbackCounterMirror::Committed(mirror))) => {
                 if file_counter != mirror {
                     tracing::error!(
                         file_counter,
@@ -198,20 +198,40 @@ impl Vault {
                     return Err(Error::VaultRollbackDetected);
                 }
             }
+            Ok(Some(crate::keychain::RollbackCounterMirror::Pending { committed, pending })) => {
+                if file_counter == pending {
+                    self.repair_pending_rollback_counter(
+                        pending,
+                        "pending SQLite commit completed",
+                    );
+                } else {
+                    tracing::error!(
+                        file_counter,
+                        committed_counter = committed,
+                        pending_counter = pending,
+                        "vault rollback detected on open: file counter is not the pending mirror target"
+                    );
+                    return Err(Error::VaultRollbackDetected);
+                }
+            }
             Ok(None) => {
                 // First run after upgrade (or after a `cloak destroy`).
-                // Seed the mirror from the file.
+                // Seed the mirror from the file. If the seed fails, fail
+                // closed: otherwise an initialized vault can run with
+                // read-side rollback detection inactive.
                 match crate::keychain::mirror_counter(file_counter) {
                     Ok(()) => tracing::info!(
                         file_counter,
                         "seeded keychain rollback counter from vault file (first-time mirror)"
                     ),
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        file_counter,
-                        "failed to seed keychain rollback-counter mirror; \
-                         read-side rollback detection inactive until next successful write"
-                    ),
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            file_counter,
+                            "failed to seed keychain rollback-counter mirror; refusing to open vault"
+                        );
+                        return Err(e);
+                    }
                 }
             }
             Err(e) => {
@@ -304,18 +324,10 @@ impl Vault {
             recovery_wrap_nonce: Some(rec_nonce),
             recovery_wrap_aead: Some(rec_aead),
         };
+        let conn = self.store.conn();
+        let tx = conn.unchecked_transaction()?;
         self.store.set_meta(&meta)?;
-        // Seed the keychain rollback-counter mirror so the first
-        // post-init `open_or_create` finds equality. Best-effort: if
-        // the keychain is unavailable, the next vault open will seed
-        // it from the file counter via the "missing mirror" branch.
-        if let Err(e) = crate::keychain::mirror_counter(meta.monotonic_counter) {
-            tracing::warn!(
-                error = %e,
-                counter = meta.monotonic_counter,
-                "failed to seed keychain rollback-counter mirror at init"
-            );
-        }
+        self.commit_after_mirror(tx, 0, meta.monotonic_counter)?;
         // Cache so the caller doesn't have to re-unlock immediately.
         self.master = Some(Secret::new(master));
         Ok(InitResult {
@@ -385,11 +397,13 @@ impl Vault {
         let now_iso = now.to_rfc3339();
         let tags_json = serde_json::to_string(&tags)?;
         let nonce = aead::random_nonce()?;
+        let next_counter = self.next_counter()?;
 
         // We need the rowid before sealing because the subkey context
         // includes it. Insert a placeholder ciphertext + nonce, then
-        // overwrite once we know the id. Wrap in a transaction so the
-        // intermediate state is never observable.
+        // overwrite once we know the id. The secret row and rollback counter
+        // advance in the same SQLite transaction so crash recovery cannot
+        // leave a committed secret mutation with the old counter.
         let conn = self.store.conn();
         let tx = conn.unchecked_transaction()?;
         // Insert with a temporary placeholder payload.
@@ -421,8 +435,8 @@ impl Vault {
         if n != 1 {
             return Err(Error::Other("failed to update inserted secret"));
         }
-        tx.commit()?;
-        let _ = self.bump_and_mirror()?;
+        self.store.bump_counter(next_counter)?;
+        self.commit_after_mirror(tx, next_counter.saturating_sub(1), next_counter)?;
         Ok(())
     }
 
@@ -434,6 +448,7 @@ impl Vault {
         let now = Utc::now();
         let now_iso = now.to_rfc3339();
         let nonce = aead::random_nonce()?;
+        let next_counter = self.next_counter()?;
 
         // AAD binds (name, *original* created_at, new version).
         let created_unix = parse_rfc3339(&row.created_at)?.timestamp();
@@ -445,9 +460,12 @@ impl Vault {
             &aad,
             value.expose_secret().as_bytes(),
         )?;
+        let conn = self.store.conn();
+        let tx = conn.unchecked_transaction()?;
         self.store
             .update_secret_value(name, &now_iso, new_version, &nonce, &ct)?;
-        let _ = self.bump_and_mirror()?;
+        self.store.bump_counter(next_counter)?;
+        self.commit_after_mirror(tx, next_counter.saturating_sub(1), next_counter)?;
         Ok(())
     }
 
@@ -466,8 +484,12 @@ impl Vault {
 
     /// Remove a secret.
     pub fn rm(&self, name: &str) -> Result<()> {
+        let next_counter = self.next_counter()?;
+        let conn = self.store.conn();
+        let tx = conn.unchecked_transaction()?;
         self.store.delete_secret(name)?;
-        let _ = self.bump_and_mirror()?;
+        self.store.bump_counter(next_counter)?;
+        self.commit_after_mirror(tx, next_counter.saturating_sub(1), next_counter)?;
         Ok(())
     }
 
@@ -591,13 +613,17 @@ impl Vault {
         // 4. Persist the new passphrase wrap. The recovery wrap is
         //    untouched so subsequent `cloak backup verify` calls keep
         //    working.
+        let next_counter = self.next_counter()?;
+        let conn = self.store.conn();
+        let tx = conn.unchecked_transaction()?;
         self.store.update_passphrase_wrap(
             &salt,
             &kdf::params_to_phc(&params, &salt),
             &wrap_nonce,
             &wrap_aead,
         )?;
-        self.bump_and_mirror()?;
+        self.store.bump_counter(next_counter)?;
+        self.commit_after_mirror(tx, next_counter.saturating_sub(1), next_counter)?;
 
         // 5. Cache the master so the caller doesn't need to re-unlock.
         self.master = Some(master);
@@ -618,23 +644,71 @@ impl Vault {
         Ok(meta.monotonic_counter.saturating_add(1))
     }
 
-    /// Bump the file counter and best-effort mirror it to the OS
-    /// keychain. The file is the source of truth; if the mirror write
-    /// fails we log a warning but do not fail the surrounding write.
-    /// Returns the new counter value on success.
-    fn bump_and_mirror(&self) -> Result<u64> {
-        let next = self.next_counter()?;
-        self.store.bump_counter(next)?;
-        if let Err(e) = crate::keychain::mirror_counter(next) {
+    fn mirror_counter_value(&self, next: u64) -> Result<()> {
+        crate::keychain::mirror_counter(next)
+    }
+
+    fn repair_pending_rollback_counter(&self, value: u64, reason: &'static str) {
+        match crate::keychain::mirror_counter(value) {
+            Ok(()) => tracing::info!(
+                mirror_counter = value,
+                reason,
+                "repaired rollback-counter mirror from pending marker"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                mirror_counter = value,
+                reason,
+                "failed to repair rollback-counter mirror; pending marker retained"
+            ),
+        }
+        match crate::keychain::clear_counter_pending() {
+            Ok(()) => {}
+            Err(e) => tracing::warn!(
+                error = %e,
+                mirror_counter = value,
+                reason,
+                "failed to clear pending rollback-counter marker"
+            ),
+        }
+    }
+
+    fn commit_after_mirror(
+        &self,
+        tx: rusqlite::Transaction<'_>,
+        old_counter: u64,
+        next_counter: u64,
+    ) -> Result<()> {
+        crate::keychain::mirror_counter_pending(old_counter, next_counter)?;
+        if let Err(e) = tx.commit() {
+            if let Err(mirror_error) = self.mirror_counter_value(old_counter) {
+                tracing::warn!(
+                    error = %mirror_error,
+                    old_counter,
+                    next_counter,
+                    "failed to restore rollback-counter mirror after SQLite commit error; pending marker retained"
+                );
+            }
+            return Err(e.into());
+        }
+        if let Err(e) = self.mirror_counter_value(next_counter) {
             tracing::warn!(
                 error = %e,
-                counter = next,
-                "failed to mirror rollback counter to OS keychain; \
-                 vault file counter is authoritative — read-side rollback \
-                 detection may lag until the next successful mirror"
+                old_counter,
+                next_counter,
+                "SQLite commit succeeded but rollback-counter mirror finalization failed; pending marker retained"
+            );
+            return Ok(());
+        }
+        if let Err(e) = crate::keychain::clear_counter_pending() {
+            tracing::warn!(
+                error = %e,
+                old_counter,
+                next_counter,
+                "failed to clear pending rollback-counter marker after finalizing mirror"
             );
         }
-        Ok(next)
+        Ok(())
     }
 }
 

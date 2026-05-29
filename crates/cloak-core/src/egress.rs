@@ -53,6 +53,15 @@ impl EgressClient {
     /// - HTTP 4xx/5xx are *not* errors here — the caller decides what to
     ///   do with the status code.
     pub async fn execute(&self, req: PreparedRequest) -> Result<RawResponse> {
+        self.execute_with_body_limit(req, usize::MAX).await
+    }
+
+    /// Execute a request while refusing to buffer more than `max_body_bytes`.
+    pub async fn execute_with_body_limit(
+        &self,
+        req: PreparedRequest,
+        max_body_bytes: usize,
+    ) -> Result<RawResponse> {
         let mut builder = self
             .inner
             .request(req.method.clone(), req.url.clone())
@@ -74,11 +83,18 @@ impl EgressClient {
                 headers.insert(k.as_str().to_ascii_lowercase(), s.to_string());
             }
         }
-        let body = resp
-            .bytes()
+        let mut body = Vec::new();
+        let mut resp = resp;
+        while let Some(chunk) = resp
+            .chunk()
             .await
             .map_err(|_| Error::Other("egress: body read failed"))?
-            .to_vec();
+        {
+            if body.len().saturating_add(chunk.len()) > max_body_bytes {
+                return Err(Error::Other("egress: response body too large"));
+            }
+            body.extend_from_slice(&chunk);
+        }
         Ok(RawResponse {
             status,
             headers,

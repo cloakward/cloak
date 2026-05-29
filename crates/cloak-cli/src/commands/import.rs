@@ -91,31 +91,85 @@ pub fn run(ctx: &Context, path: Option<PathBuf>, mode: Mode, yes: bool) -> Resul
             if mode == Mode::SafeAdd {
                 continue;
             }
-            vault.set(&e.key, &val)?;
+            audit_log::append_required(
+                "cli.import",
+                Some(&e.key),
+                cloak_core::audit::AuditResult::Started,
+                Some("update".into()),
+            )?;
+            if let Err(err) = vault.set(&e.key, &val) {
+                audit_log::append_required(
+                    "cli.import",
+                    Some(&e.key),
+                    cloak_core::audit::AuditResult::Error,
+                    Some("update failed".into()),
+                )?;
+                return Err(err.into());
+            }
             updated += 1;
-            audit_log::append(
+            audit_log::append_required(
                 "cli.import",
                 Some(&e.key),
                 cloak_core::audit::AuditResult::Ok,
                 Some("update".into()),
-            );
+            )?;
         } else {
+            audit_log::append_required(
+                "cli.import",
+                Some(&e.key),
+                cloak_core::audit::AuditResult::Started,
+                Some("add".into()),
+            )?;
             match vault.add(&e.key, SecretKind::ApiKey, vec!["imported".into()], &val) {
                 Ok(()) => {
                     added += 1;
-                    audit_log::append(
+                    audit_log::append_required(
                         "cli.import",
                         Some(&e.key),
                         cloak_core::audit::AuditResult::Ok,
                         Some("add".into()),
-                    );
+                    )?;
                 }
                 Err(Error::SecretExists(_)) => {
+                    audit_log::append_required(
+                        "cli.import",
+                        Some(&e.key),
+                        cloak_core::audit::AuditResult::Error,
+                        Some("add raced with existing secret".into()),
+                    )?;
+                    audit_log::append_required(
+                        "cli.import",
+                        Some(&e.key),
+                        cloak_core::audit::AuditResult::Started,
+                        Some("update-after-add-race".into()),
+                    )?;
                     // Race or duplicate keys in the file: treat as update.
-                    vault.set(&e.key, &val)?;
+                    if let Err(err) = vault.set(&e.key, &val) {
+                        audit_log::append_required(
+                            "cli.import",
+                            Some(&e.key),
+                            cloak_core::audit::AuditResult::Error,
+                            Some("update-after-add-race failed".into()),
+                        )?;
+                        return Err(err.into());
+                    }
                     updated += 1;
+                    audit_log::append_required(
+                        "cli.import",
+                        Some(&e.key),
+                        cloak_core::audit::AuditResult::Ok,
+                        Some("update-after-add-race".into()),
+                    )?;
                 }
-                Err(other) => return Err(other.into()),
+                Err(other) => {
+                    audit_log::append_required(
+                        "cli.import",
+                        Some(&e.key),
+                        cloak_core::audit::AuditResult::Error,
+                        Some("add failed".into()),
+                    )?;
+                    return Err(other.into());
+                }
             }
         }
     }
@@ -123,14 +177,28 @@ pub fn run(ctx: &Context, path: Option<PathBuf>, mode: Mode, yes: bool) -> Resul
     let mut removed = 0u32;
     if mode == Mode::Replace {
         for n in &to_remove {
-            vault.rm(n)?;
+            audit_log::append_required(
+                "cli.import",
+                Some(n),
+                cloak_core::audit::AuditResult::Started,
+                Some("replace-delete".into()),
+            )?;
+            if let Err(e) = vault.rm(n) {
+                audit_log::append_required(
+                    "cli.import",
+                    Some(n),
+                    cloak_core::audit::AuditResult::Error,
+                    Some("replace-delete failed".into()),
+                )?;
+                return Err(e.into());
+            }
             removed += 1;
-            audit_log::append(
+            audit_log::append_required(
                 "cli.import",
                 Some(n),
                 cloak_core::audit::AuditResult::Ok,
                 Some("replace-delete".into()),
-            );
+            )?;
         }
     }
 
@@ -166,24 +234,52 @@ pub fn import_silently(
         let val = Secret::new(e.value.clone());
         if existing_set.contains(e.key.as_str()) {
             if mode == Mode::Update || mode == Mode::Replace {
-                vault.set(&e.key, &val)?;
+                audit_log::append_required(
+                    "cli.import",
+                    Some(&e.key),
+                    cloak_core::audit::AuditResult::Started,
+                    Some("update".into()),
+                )?;
+                if let Err(err) = vault.set(&e.key, &val) {
+                    audit_log::append_required(
+                        "cli.import",
+                        Some(&e.key),
+                        cloak_core::audit::AuditResult::Error,
+                        Some("update failed".into()),
+                    )?;
+                    return Err(err.into());
+                }
                 updated += 1;
-                audit_log::append(
+                audit_log::append_required(
                     "cli.import",
                     Some(&e.key),
                     cloak_core::audit::AuditResult::Ok,
                     Some("update".into()),
-                );
+                )?;
             }
         } else {
-            vault.add(&e.key, SecretKind::ApiKey, vec!["imported".into()], &val)?;
+            audit_log::append_required(
+                "cli.import",
+                Some(&e.key),
+                cloak_core::audit::AuditResult::Started,
+                Some("add".into()),
+            )?;
+            if let Err(err) = vault.add(&e.key, SecretKind::ApiKey, vec!["imported".into()], &val) {
+                audit_log::append_required(
+                    "cli.import",
+                    Some(&e.key),
+                    cloak_core::audit::AuditResult::Error,
+                    Some("add failed".into()),
+                )?;
+                return Err(err.into());
+            }
             added += 1;
-            audit_log::append(
+            audit_log::append_required(
                 "cli.import",
                 Some(&e.key),
                 cloak_core::audit::AuditResult::Ok,
                 Some("add".into()),
-            );
+            )?;
         }
     }
     Ok((added, updated, entries))

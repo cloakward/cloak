@@ -13,15 +13,13 @@
 # package level in GitHub; tracked in
 # https://github.com/cloakward/cloak/issues/7.
 #
-# Trigger: fires on `release: published` AND `workflow_dispatch`.
-# Manual dispatch is useful when re-publishing to GHCR after a
-# transient failure, without un-publishing the GitHub release.
+# Trigger: manual dispatch only. Must be run from the release tag ref
+# (`gh workflow run docker-push.yml --ref "$TAG" -f ref="$TAG"`), and it
+# requires a successful release-install marker for the same tag.
 
 name: docker-push
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       ref:
@@ -40,9 +38,9 @@ env:
 jobs:
   # -------------------------------------------------------------------
   # Per-arch build. amd64 runs on ubuntu-24.04; arm64 runs on
-  # ubuntu-24.04-arm (free-tier on public repos). Each pushes a
-  # per-arch tag like `:VERSION-amd64` and outputs the resulting
-  # digest so the manifest job can stitch them together.
+  # ubuntu-24.04-arm (free-tier on public repos). Each pushes by
+  # digest only and uploads that digest so the manifest job can stitch
+  # both architectures into the only public release tags.
   # -------------------------------------------------------------------
   build:
     name: build (${{ matrix.platform }})
@@ -62,60 +60,79 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      actions: read
 
     outputs:
       version: ${{ steps.ver.outputs.version }}
       major_minor: ${{ steps.ver.outputs.major_minor }}
       is_prerelease: ${{ steps.ver.outputs.is_prerelease }}
-      digest_amd64: ${{ steps.export.outputs.digest_amd64 }}
-      digest_arm64: ${{ steps.export.outputs.digest_arm64 }}
 
     steps:
+      - name: Validate release tag input
+        env:
+          REF_NAME: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::ref must be a SemVer release tag like v1.2.3 or v1.2.3-rc1"
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/tags/${REF_NAME}" ]; then
+            echo "::error::docker-push must run from the same tag ref. Use: gh workflow run docker-push.yml --ref ${REF_NAME} -f ref=${REF_NAME}"
+            exit 1
+          fi
+
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: ${{ github.event.release.tag_name || inputs.ref }}
+          ref: refs/tags/${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Require release-install marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          ./scripts/require-release-install-marker.sh "$TAG"
 
       - name: Compute version tags
         id: ver
         env:
-          REF_NAME: ${{ github.event.release.tag_name || inputs.ref }}
+          REF_NAME: ${{ inputs.ref }}
         run: |
           set -euo pipefail
           TAG="${REF_NAME#v}"
           MAJOR_MINOR="$(echo "$TAG" | awk -F. '{print $1"."$2}')"
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
           echo "major_minor=$MAJOR_MINOR" >> "$GITHUB_OUTPUT"
-          # Derive `is_prerelease` from the tag-name pattern (works on
+          # Derive `is_prerelease` from any SemVer pre-release segment (works on
           # both release.published and workflow_dispatch). The release
           # event's prerelease flag is empty on dispatch.
-          case "$REF_NAME" in
-            *-rc*|*-beta*|*-alpha*|*-pre*|*-dev*) is_pre=true ;;
+          case "$TAG" in
+            *-*) is_pre=true ;;
             *) is_pre=false ;;
           esac
           echo "is_prerelease=$is_pre" >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push per-arch image
+      - name: Build and push per-arch image by digest
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
         with:
           context: .
           file: Dockerfile
           platforms: ${{ matrix.platform }}
-          push: true
-          # Per-arch tags. The manifest job stitches them into the
-          # public-facing :VERSION / :MAJOR_MINOR / :latest tags.
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-${{ matrix.arch_tag }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
           sbom: true
 
@@ -123,20 +140,24 @@ jobs:
       # the digest under an arch-suffixed key. The manifest job picks
       # whichever the matrix arch produced.
       - name: Export per-arch digest
-        id: export
         run: |
           set -euo pipefail
-          if [ "${{ matrix.arch_tag }}" = "amd64" ]; then
-            echo "digest_amd64=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "digest_arm64=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
-          fi
+          test -n "${{ steps.build.outputs.digest }}"
+          mkdir -p digests
+          printf '%s\n' "${{ steps.build.outputs.digest }}" > "digests/${{ matrix.arch_tag }}"
+
+      - name: Upload per-arch digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: docker-digest-${{ matrix.arch_tag }}
+          path: digests/${{ matrix.arch_tag }}
+          if-no-files-found: error
 
   # -------------------------------------------------------------------
   # Stitch the two per-arch images into a multi-arch manifest. Pushes
-  # `:VERSION` and `:MAJOR_MINOR` always; `:latest` only on production
+  # `:VERSION` always; `:MAJOR_MINOR` and `:latest` only on production
   # tags (gated on tag-name pattern, not release-event prerelease bit,
-  # so it works on both release.published and workflow_dispatch).
+  # so it works on workflow_dispatch).
   # -------------------------------------------------------------------
   manifest:
     name: stitch multi-arch manifest
@@ -145,16 +166,24 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+
+      - name: Download per-arch digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: digests
+          pattern: docker-digest-*
+          merge-multiple: true
 
       - name: Resolve manifest tags
         id: tags
@@ -165,22 +194,28 @@ jobs:
         run: |
           set -euo pipefail
           base="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          digest_amd64="$(cat digests/amd64)"
+          digest_arm64="$(cat digests/arm64)"
+          if [ -z "$digest_amd64" ] || [ -z "$digest_arm64" ]; then
+            echo "::error::missing per-arch image digest"
+            exit 1
+          fi
           tags=(
             "${base}:${VERSION}"
-            "${base}:${MAJOR_MINOR}"
           )
           if [ "$IS_PRERELEASE" != "true" ]; then
+            tags+=("${base}:${MAJOR_MINOR}")
             tags+=("${base}:latest")
-            echo "Including :latest tag (tag is non-prerelease)."
+            echo "Including :${MAJOR_MINOR} and :latest tags (tag is non-prerelease)."
           else
-            echo "Skipping :latest tag (tag is a pre-release)."
+            echo "Skipping stable channel tags :${MAJOR_MINOR} and :latest (tag is a pre-release)."
           fi
           {
             # Emit space-joined list for the buildx imagetools call below.
             echo "list=${tags[*]}"
-            # Per-arch source images that the manifest will reference.
-            echo "src_amd64=${base}:${VERSION}-amd64"
-            echo "src_arm64=${base}:${VERSION}-arm64"
+            # Per-arch immutable source images that the manifest will reference.
+            echo "src_amd64=${base}@${digest_amd64}"
+            echo "src_arm64=${base}@${digest_arm64}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create multi-arch manifest
@@ -202,3 +237,42 @@ jobs:
           set -euo pipefail
           base="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           docker buildx imagetools inspect "${base}:${VERSION}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: Sign and verify multi-arch manifest
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          COSIGN_EXPERIMENTAL: "1"
+          EXPECTED_ISSUER: "https://token.actions.githubusercontent.com"
+          EXPECTED_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/docker-push.yml@refs/tags/${{ inputs.ref }}"
+        run: |
+          set -euo pipefail
+          base="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          digest="$(docker buildx imagetools inspect "${base}:${VERSION}" --format '{{.Digest}}')"
+          if [ -z "$digest" ] || [ "$digest" = "<no value>" ]; then
+            echo "::error::could not resolve manifest digest for ${base}:${VERSION}"
+            exit 1
+          fi
+
+          manifest_ref="${base}@${digest}"
+          cosign sign --yes "$manifest_ref"
+          cosign verify \
+            --certificate-oidc-issuer "$EXPECTED_ISSUER" \
+            --certificate-identity "$EXPECTED_IDENTITY" \
+            "$manifest_ref"
+
+          for tag in ${{ steps.tags.outputs.list }}; do
+            tag_digest="$(docker buildx imagetools inspect "$tag" --format '{{.Digest}}')"
+            if [ "$tag_digest" != "$digest" ]; then
+              echo "::error::${tag} resolves to ${tag_digest}, expected signed digest ${digest}"
+              exit 1
+            fi
+            cosign verify \
+              --certificate-oidc-issuer "$EXPECTED_ISSUER" \
+              --certificate-identity "$EXPECTED_IDENTITY" \
+              "$tag"
+          done

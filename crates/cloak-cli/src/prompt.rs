@@ -79,6 +79,36 @@ pub fn prompt_passphrase_twice() -> Result<Secret<String>> {
     unreachable!("loop returns or bails")
 }
 
+/// Prompt twice for a passphrase and require zxcvbn score >= 2.
+///
+/// The guarded `CLOAK_PASSPHRASE` test override bypasses prompting exactly
+/// as [`prompt_passphrase_twice`] does; production interactive input must
+/// meet the same minimum strength as setup.
+pub fn prompt_strong_passphrase_twice() -> Result<Secret<String>> {
+    if let Some(p) = crate::test_mode::env_var(TEST_PASSPHRASE_ENV)? {
+        if io::stdout().is_terminal() {
+            eprintln!(
+                "warning: CLOAK_PASSPHRASE is set; using it instead of prompting (test-only)"
+            );
+        }
+        return Ok(Secret::new(p));
+    }
+
+    loop {
+        let pass = prompt_passphrase_twice()?;
+        let estimate = zxcvbn::zxcvbn(pass.expose_secret(), &[]);
+        if (estimate.score() as u8) >= 2 {
+            return Ok(pass);
+        }
+        eprintln!("passphrase is too weak; choose a stronger one");
+        if let Some(feedback) = estimate.feedback() {
+            if let Some(warning) = feedback.warning() {
+                eprintln!("hint: {warning}");
+            }
+        }
+    }
+}
+
 /// Prompt for a yes/no answer on stdin. `default_yes` controls which
 /// answer is returned on empty input. Anything starting with `y/Y` is yes,
 /// anything starting with `n/N` is no, anything else re-prompts (up to 3

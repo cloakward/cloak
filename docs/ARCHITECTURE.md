@@ -13,7 +13,7 @@ flowchart LR
     CD[Claude Desktop / Claude Code]
   end
 
-  subgraph Shim["IPC shim (no plaintext, no HTTP)"]
+  subgraph Shim["IPC shim (no raw stored secrets, no HTTP)"]
     MCP[cloak-mcp<br/>Bun, TypeScript]
   end
 
@@ -30,11 +30,12 @@ flowchart LR
   MCP -- "length-prefixed JSON over UDS" --> DAEMON
   CLI -- "length-prefixed JSON over UDS" --> DAEMON
   CLI -. "library-direct (v0.1)" .-> VAULT
-  DAEMON -- "reqwest + rustls" --> Internet[(remote APIs<br/>on the user's allowlist)]
+  DAEMON -- "proxy: reqwest + rustls<br/>STS: AWS Smithy client" --> Internet[(remote APIs<br/>policy-controlled)]
   DAEMON --> VAULT
 ```
 
-The trust boundary is the UDS at `${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cloakd-$UID.sock`.
+The trust boundary is the UDS at `$XDG_RUNTIME_DIR/cloakd.sock` when
+`XDG_RUNTIME_DIR` is set, else `${TMPDIR:-/tmp}/cloakd-$UID.sock`.
 Everything to the left of it is treated as untrusted: the MCP shim has zero
 authority of its own; it is a typed wire-format adapter. Everything to the
 right of it owns the master key, the policy file, the audit log, and all
@@ -46,7 +47,7 @@ two protocols.
 | Party | Implementation | Trust class | Speaks |
 |---|---|---|---|
 | Claude Desktop / Claude Code | external | **untrusted** (model output) | MCP |
-| `cloak-mcp` shim | Bun, TS, single binary | **policy-bridge** (no secrets, no HTTP) | MCP ↔ Cloak IPC |
+| `cloak-mcp` shim | Bun, TS, single binary | **policy-bridge** (no raw stored secrets, no HTTP) | MCP ↔ Cloak IPC |
 | `cloakd` daemon | Rust, Tokio, libsodium | **trusted** (owns the vault) | Cloak IPC, outbound HTTPS |
 | `cloak` CLI | Rust, clap | **trusted** (user-driven) | Cloak IPC, library-direct vault for `init`/`add`/`set`/`rm`/`show` in v0.1 |
 
@@ -75,14 +76,25 @@ is at `crates/cloak-core/src/ipc.rs:104-150`.
 Before the daemon issues any session token, it resolves the peer's
 credentials from the kernel and gates them through `peer_auth::check()`.
 
-- **macOS** (`crates/cloak-core/src/peer_auth.rs:127-140`): `getsockopt(SOL_LOCAL,
-  LOCAL_PEERPID)` for the PID, `getpeereid(2)` for UID/GID, `proc_pidpath(3)`
-  for the binary path. The on-disk binary is SHA-256-hashed as a v0.1 surrogate
-  for a real mach-o code-directory hash; the basename is the v0.1 gate.
+- **macOS** (`crates/cloak-core/src/peer_auth.rs`): `getsockopt(SOL_LOCAL,
+  LOCAL_PEERTOKEN)` for PID plus non-recycling audit-token identity,
+  `getpeereid(2)` for UID/GID, `proc_pidpath(3)` for the binary path, and
+  `csops(CS_OPS_CDHASH)` for the running process CodeDirectory hash. The
+  daemon checks both the on-disk SHA-256 and CodeDirectory hash against the
+  installed trusted binaries.
 - **Linux** (`crates/cloak-core/src/peer_auth.rs:142-154`): `SO_PEERCRED` for
-  PID/UID/GID, `/proc/<pid>/exe` for the binary path. Same SHA-256 surrogate.
+  PID/UID/GID, `SO_PEERPIDFD` for non-recycling pidfd identity, and
+  `/proc/<pid>/exe` for the binary path. The daemon checks the on-disk SHA-256
+  against the installed trusted binaries.
 - **The default allowlist** (`crates/cloak-core/src/peer_auth.rs:50-63`) is
-  `cloak`, `cloak-mcp`, `cloakd`. Same UID is required.
+  the installed `cloak` and `cloak-mcp` sibling binaries. `cloakd` is never
+  accepted as a client peer. Same UID is required.
+
+The binary hash check is a startup pin over installed files, not a global
+code-signature authority. It rejects renamed binaries and post-start swaps;
+on macOS the running-process CDHash also rejects path restoration after a
+malicious launch. Production installs still need a trusted install path or
+verified Homebrew/tarball installation before `cloakd` starts.
 
 The accept-loop wires this to dispatch at
 `crates/cloak-core/src/daemon.rs:235-292`: peer-auth runs, the connection
@@ -128,10 +140,13 @@ all tables `STRICT`. Migrations are forward-only and recorded in
 The vault master key is generated once at `init`, stays in `cloakd` memory
 while the vault is unlocked, and is **never** persisted in plaintext.
 
-1. **Pepper** comes from the OS keychain — macOS Keychain (system-keychain
-   item ACL-restricted to `cloakd`) or freedesktop Secret Service / GNOME
-   Keyring on Linux. `CLOAK_PEPPER_FILE` is a 0600-only escape hatch for CI
-   and headless servers (`crates/cloak-core/src/keychain.rs`).
+1. **Pepper** comes from the OS keychain — macOS Keychain generic-password
+   storage or freedesktop Secret Service / GNOME Keyring on Linux.
+   `CLOAK_PEPPER_FILE` is a 0600-only escape hatch for CI and headless
+   servers (`crates/cloak-core/src/keychain.rs`). v1.0 does not install a
+   custom per-process/code-signature ACL for the pepper; the pepper is a
+   defense against vault-file-only theft, not against a same-user process that
+   can satisfy the OS keychain access policy.
 2. **`wrap_key = Argon2id(HMAC-SHA256(pepper, passphrase), salt, params)`**
    — keyed-mode KDF, autotuned to ≤500 ms at `init`. The pepper raises the
    bar for an offline attacker who has only the vault file.
@@ -189,7 +204,8 @@ follows the same five-step recipe (`crates/cloak-core/src/handlers.rs:1-20`):
    target_host, peer_basename)`.
 3. Run the policy gate. On `Action::Deny` or `RequireConfirmation`,
    audit a `Denied` entry and return `Error::PolicyDenied` — **never**
-   touching the vault.
+   touching the vault. `RequireConfirmation` is parsed today but fails
+   closed; there is no confirmation side-channel yet.
 4. Run the rate-limit gate (token bucket per `(tool, peer, secret)`).
    On exhaustion, audit `Denied` and return `Error::PolicyDenied("rate limited")`.
 5. Only now read the secret from the unlocked vault, perform the operation,
@@ -200,22 +216,30 @@ The order is load-bearing: a denied call cannot decrypt
 
 ## Outbound HTTP
 
-`crates/cloak-core/src/egress.rs` is the **only** outbound HTTP module in
-the workspace. It uses `reqwest` with the rustls TLS provider, the system
-root store, a 3-redirect cap, and a 30-second total timeout. The MCP shim
+Network egress is daemon-owned and limited to explicit tool calls. The MCP shim
 imports zero HTTP clients — `packages/cloak-mcp/scripts/check-no-http.mjs`
 (invoked by `bun run lint:no-http`) fails CI on regression.
 
+`tool.proxy_http` uses `crates/cloak-core/src/egress.rs` with reqwest, rustls,
+the system root store, redirects disabled, and a 30-second total timeout.
+`tool.mint_token` uses the AWS Smithy STS client in
+`crates/cloak-core/src/handlers.rs`, also bounded by a daemon-side 30-second
+timeout. Host allowlists apply to proxy requests; STS minting is gated by
+tool/secret policy instead of an arbitrary destination allowlist.
+
 `tool.proxy_http` enforces `policy.toml::allowed_hosts` before issuing the
-request. The auth header is attached by the daemon and is **stripped** from
-the echoed response metadata (`crates/cloak-core/src/handlers.rs`).
+request. The auth header is attached by the daemon and is not returned as
+request metadata. The upstream response status, headers, and body are returned
+to the MCP client; Cloak does not redact arbitrary response content
+(`crates/cloak-core/src/handlers.rs`).
 
 ## Audit log
 
-Append-only JSONL at `<data_dir>/cloak/audit.jsonl`. Every privileged tool
-call writes exactly one entry — `Ok`, `Denied`, or `Error`. The chain hash
-is `SHA-256` over the RFC 8785 canonical-JSON serialization of the previous
-entry; `prev_hash[0]` is `"0".repeat(64)`
+Append-only JSONL at `<data_dir>/cloak/audit.jsonl`. Denied calls write a
+`Denied` entry; privileged side-effecting calls write `Started` before the
+risky operation and then `Ok` or `Error`. The chain hash is `SHA-256` over
+the RFC 8785 canonical-JSON serialization of the previous entry;
+`prev_hash[0]` is `"0".repeat(64)`
 (`crates/cloak-core/src/audit.rs:1-186`).
 
 `cloak audit verify` recomputes the chain from disk and rejects any mutated,
@@ -223,6 +247,9 @@ deleted, or reordered line (`crates/cloak-core/src/audit.rs:188-220`).
 Concurrent appends are gated by an `fs2` exclusive `flock` and an `fsync`
 on every write
 (`crates/cloak-core/src/audit.rs::tests::concurrent_appends_are_atomic_and_complete`).
+The tail head is also anchored outside the log; a non-empty legacy log with
+no anchor fails closed until an operator explicitly runs
+`cloak audit adopt-head --yes` after reviewing the existing chain.
 
 ## Repository map
 
@@ -234,20 +261,21 @@ crates/cloak-core/
 │   ├── store.rs        SQLite WAL + STRICT tables + migrations
 │   ├── keychain.rs     macOS Keychain / Linux Secret Service / pepper file
 │   ├── ipc.rs          length-prefixed JSON framing; Error → RpcError
-│   ├── peer_auth.rs    SOL_LOCAL/LOCAL_PEERPID, SO_PEERCRED, basename allowlist
+│   ├── peer_auth.rs    SOL_LOCAL/LOCAL_PEERTOKEN, SO_PEERCRED/SO_PEERPIDFD, peer hash allowlist
 │   ├── session.rs      tokens; ConstantTimeEq compare; revoke_by_conn
 │   ├── daemon.rs       accept loop; dispatcher; CLI-only gate
 │   ├── handlers.rs     privileged tool handlers (sign, proxy, mint, audit)
 │   ├── policy.rs       TOML DSL; rate-limit buckets; EvalContext
 │   ├── audit.rs        hash-chained JSONL; verify()
-│   ├── egress.rs       reqwest + rustls; allowlist enforcement
+│   ├── egress.rs       reqwest + rustls HTTP client
 │   └── error.rs        typed errors (mapped to RpcError on the wire)
 ├── migrations/0001_init.sql
 └── tests/              ipc_e2e.rs, handlers_e2e.rs
 
 crates/cloak-cli/
 └── src/commands/       init, add, set, get, list, rm, show, status,
-                        completions, daemon-unlock, unlock
+                        completions, unlock/daemon-unlock, daemon,
+                        audit, backup, restore
 
 packages/cloak-mcp/
 └── src/

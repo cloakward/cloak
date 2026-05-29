@@ -87,22 +87,44 @@ pub fn run(ctx: &Context, sel: Selector, yes: bool) -> Result<()> {
 
     let mut removed = 0u32;
     for name in &targets {
+        let note = match &sel {
+            Selector::Name(_) => "single".to_string(),
+            Selector::Tag(t) => format!("tag={t}"),
+            Selector::All => "all".to_string(),
+        };
+        super::audit_log::append_required(
+            "cli.rm",
+            Some(name),
+            cloak_core::audit::AuditResult::Started,
+            Some(note.clone()),
+        )?;
         match vault.rm(name) {
             Ok(()) => {
                 removed += 1;
-                super::audit_log::append(
+                super::audit_log::append_required(
                     "cli.rm",
                     Some(name),
                     cloak_core::audit::AuditResult::Ok,
-                    Some(match &sel {
-                        Selector::Name(_) => "single".into(),
-                        Selector::Tag(t) => format!("tag={t}"),
-                        Selector::All => "all".into(),
-                    }),
-                );
+                    Some(note),
+                )?;
             }
-            Err(Error::SecretNotFound(_)) => {}
-            Err(e) => return Err(e.into()),
+            Err(Error::SecretNotFound(_)) => {
+                super::audit_log::append_required(
+                    "cli.rm",
+                    Some(name),
+                    cloak_core::audit::AuditResult::Error,
+                    Some("secret not found after delete started".into()),
+                )?;
+            }
+            Err(e) => {
+                super::audit_log::append_required(
+                    "cli.rm",
+                    Some(name),
+                    cloak_core::audit::AuditResult::Error,
+                    Some("delete failed".into()),
+                )?;
+                return Err(e.into());
+            }
         }
     }
     match &sel {

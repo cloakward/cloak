@@ -46,12 +46,13 @@ pub fn preflight_mnemonic_warning() -> Result<()> {
 
 /// Print the 24-word recovery mnemonic with a "WRITE THIS DOWN" banner.
 ///
-/// Returns `true` if the words were displayed (whether to stdout or
-/// `/dev/tty`), `false` if we refused because no terminal was
-/// reachable. The caller is expected to translate `false` into a
+/// Returns `Ok(true)` if the words were displayed (whether to stdout or
+/// `/dev/tty`), `Ok(false)` if we refused because no terminal was
+/// reachable, or an error if a selected output stream failed mid-write.
+/// The caller is expected to translate any non-`Ok(true)` result into a
 /// non-zero exit; the audit-log entry stays the caller's responsibility.
 #[must_use = "if the mnemonic could not be displayed the caller must surface a non-zero exit"]
-pub fn print_mnemonic_warning(mnemonic: &RecoveryMnemonic) -> bool {
+pub fn print_mnemonic_warning(mnemonic: &RecoveryMnemonic) -> Result<bool> {
     let words = mnemonic.words();
 
     // 1. Test/CI escape hatch, or stdout already attached to a TTY.
@@ -59,29 +60,28 @@ pub fn print_mnemonic_warning(mnemonic: &RecoveryMnemonic) -> bool {
         Ok(v) => v,
         Err(e) => {
             let _ = writeln!(io::stderr(), "{e}");
-            return false;
+            return Ok(false);
         }
     };
     if allow_stdout || io::stdout().is_terminal() {
         let mut out = io::stdout().lock();
-        let _ = write_mnemonic(&mut out, &words);
-        return true;
+        write_mnemonic(&mut out, &words)?;
+        return Ok(true);
     }
 
     // 2. stdout is redirected -> try the controlling terminal directly.
     //    On Linux containers without a controlling tty this opens with
     //    ENXIO; on macOS it succeeds for any interactive shell session.
     if let Ok(mut tty) = OpenOptions::new().write(true).open("/dev/tty") {
-        if write_mnemonic(&mut tty, &words).is_ok() {
-            // Tell the user via stderr that the words went to the tty
-            // and not to wherever stdout was redirected. Otherwise a
-            // user piping `cloak init | tee` is left wondering.
-            let _ = writeln!(
-                io::stderr(),
-                "(recovery seed written to /dev/tty, not to stdout)"
-            );
-            return true;
-        }
+        write_mnemonic(&mut tty, &words)?;
+        // Tell the user via stderr that the words went to the tty
+        // and not to wherever stdout was redirected. Otherwise a
+        // user piping `cloak init | tee` is left wondering.
+        let _ = writeln!(
+            io::stderr(),
+            "(recovery seed written to /dev/tty, not to stdout)"
+        );
+        return Ok(true);
     }
 
     // 3. No terminal reachable. Refuse loudly on stderr.
@@ -90,7 +90,7 @@ pub fn print_mnemonic_warning(mnemonic: &RecoveryMnemonic) -> bool {
         "refusing to print recovery seed: stdout is not a terminal and \
          /dev/tty is unavailable. Run this command from a terminal."
     );
-    false
+    Ok(false)
 }
 
 fn controlling_tty_available() -> bool {
@@ -150,7 +150,7 @@ fn write_word_grid<W: Write>(w: &mut W, words: &[String]) -> io::Result<()> {
     let rows = words.len().div_ceil(COLS);
     for row in 0..rows {
         for col in 0..COLS {
-            let idx = col * rows + row;
+            let idx = row * COLS + col;
             if idx >= words.len() {
                 continue;
             }
@@ -160,4 +160,49 @@ fn write_word_grid<W: Write>(w: &mut W, words: &[String]) -> io::Result<()> {
         writeln!(w)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test writer failed",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test writer failed",
+            ))
+        }
+    }
+
+    #[test]
+    fn write_mnemonic_propagates_output_errors() {
+        let words = vec!["abandon".to_string(); 24];
+        let err = write_mnemonic(&mut FailingWriter, &words).expect_err("write should fail");
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn write_word_grid_is_row_major() {
+        let words = (1..=24).map(|i| format!("word{i}")).collect::<Vec<_>>();
+        let mut out = Vec::new();
+        write_word_grid(&mut out, &words).expect("grid writes");
+        let rendered = String::from_utf8(out).expect("valid utf8");
+        let first_row = rendered.lines().next().expect("first row");
+
+        assert!(first_row.contains(" 1. word1"));
+        assert!(first_row.contains(" 2. word2"));
+        assert!(first_row.contains(" 3. word3"));
+        assert!(first_row.contains(" 4. word4"));
+        assert!(!first_row.contains(" 7. word7"));
+    }
 }

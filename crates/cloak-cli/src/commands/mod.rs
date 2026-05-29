@@ -57,15 +57,15 @@ mod unlock;
     about = "Cloak — MCP-native secrets vault.",
     long_about = "Cloak is a local secrets vault. Secrets are AEAD-encrypted at rest under \
                   a key derived from your passphrase via Argon2id. Reveal is gated behind \
-                  Touch ID on macOS."
+                  local user-presence checks."
 )]
 pub struct Cli {
     /// Path to the vault file (default: `$DATA_DIR/cloak/vault.cloak`).
     #[arg(long, global = true, value_name = "PATH")]
     pub vault: Option<PathBuf>,
 
-    /// Disable Touch ID; always fall back to passphrase re-entry on
-    /// `cloak show`.
+    /// Disable local user-presence prompts after passphrase unlock for
+    /// secret materialization commands.
     #[arg(long, global = true)]
     pub no_biometric: bool,
 
@@ -145,7 +145,7 @@ pub enum Command {
         all: bool,
     },
 
-    /// Reveal a secret's plaintext (Touch ID gated, TTY-only).
+    /// Reveal a secret's plaintext (user-presence gated, TTY-only).
     Show {
         /// Name of the secret to reveal.
         name: String,
@@ -157,7 +157,7 @@ pub enum Command {
         newline: bool,
     },
 
-    /// Print vault status (path, record count, KDF params, lock state).
+    /// Print vault file status and daemon unlock state when available.
     Status,
 
     /// Print shell completions.
@@ -168,6 +168,7 @@ pub enum Command {
 
     /// Push the vault passphrase to the running `cloakd` so MCP peers
     /// can serve requests.
+    #[command(visible_alias = "unlock")]
     DaemonUnlock,
 
     /// Import a `.env` file into the vault.
@@ -185,7 +186,7 @@ pub enum Command {
         yes: bool,
     },
 
-    /// Export the vault to a `.env` file (Touch ID gated).
+    /// Export the vault to a `.env` file (user-presence gated).
     Export {
         /// Destination path (default: ./.env).
         path: Option<PathBuf>,
@@ -196,7 +197,10 @@ pub enum Command {
 
     /// Run a command with vault secrets injected as environment variables.
     Run {
-        /// Comma-separated list of secret names to inject (default: all).
+        /// Inject every secret in the vault.
+        #[arg(long, conflicts_with = "only")]
+        all: bool,
+        /// Comma-separated list of secret names to inject.
         #[arg(long, value_name = "K1,K2", value_delimiter = ',')]
         only: Vec<String>,
         /// The command and its arguments.
@@ -207,7 +211,7 @@ pub enum Command {
     /// Emergency: lock the vault, kill the daemon, print rotation worksheet.
     Panic,
 
-    /// Manage the cloakd background daemon (install/start/stop/status).
+    /// Manage the cloakd background daemon (install/start/stop/restart/status).
     Daemon {
         #[command(subcommand)]
         cmd: DaemonCmd,
@@ -226,6 +230,26 @@ pub enum Command {
     Backup {
         #[command(subcommand)]
         cmd: BackupCmd,
+    },
+
+    /// Audit-log utilities.
+    Audit {
+        #[command(subcommand)]
+        cmd: AuditCmd,
+    },
+}
+
+/// `cloak audit ...` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum AuditCmd {
+    /// Verify the audit log hash chain.
+    Verify,
+    /// Adopt the current verified audit log head after upgrading a legacy log.
+    AdoptHead {
+        /// Confirm you reviewed the existing audit log and want to trust its
+        /// current head as the external tamper-evidence anchor.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -257,6 +281,8 @@ pub enum DaemonCmd {
     Start,
     /// Stop the daemon (unload + disable).
     Stop,
+    /// Restart the daemon (stop, then start).
+    Restart,
     /// Print whether the daemon is running.
     Status,
 }
@@ -464,7 +490,7 @@ pub fn run() -> Result<ExitCode> {
         Command::Export { path, force } => {
             export::run(&ctx, path, force).map(|_| ExitCode::SUCCESS)
         }
-        Command::Run { only, command } => run::run(&ctx, only, command),
+        Command::Run { all, only, command } => run::run(&ctx, all, only, command),
         Command::Panic => panic::run(&ctx).map(|_| ExitCode::SUCCESS),
         Command::Daemon { cmd } => match cmd {
             DaemonCmd::Install {
@@ -482,6 +508,7 @@ pub fn run() -> Result<ExitCode> {
             }
             DaemonCmd::Start => daemon::run_start(&ctx).map(|_| ExitCode::SUCCESS),
             DaemonCmd::Stop => daemon::run_stop(&ctx).map(|_| ExitCode::SUCCESS),
+            DaemonCmd::Restart => daemon::run_restart(&ctx).map(|_| ExitCode::SUCCESS),
             DaemonCmd::Status => daemon::run_status(&ctx).map(|_| ExitCode::SUCCESS),
         },
         Command::Claude { cmd } => match cmd {
@@ -496,6 +523,12 @@ pub fn run() -> Result<ExitCode> {
         Command::Backup { cmd } => match cmd {
             BackupCmd::Mnemonic => backup::run_mnemonic(&ctx).map(|_| ExitCode::SUCCESS),
             BackupCmd::Verify => backup::run_verify(&ctx).map(|_| ExitCode::SUCCESS),
+        },
+        Command::Audit { cmd } => match cmd {
+            AuditCmd::Verify => audit_log::run_verify().map(|_| ExitCode::SUCCESS),
+            AuditCmd::AdoptHead { yes } => {
+                audit_log::run_adopt_head(yes).map(|_| ExitCode::SUCCESS)
+            }
         },
     };
 

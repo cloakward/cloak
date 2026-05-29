@@ -13,13 +13,15 @@ target/
 .DS_Store
 
 # Unrelated workspaces — the Dockerfile only builds `cloak-core`'s
-# `cloakd` binary, so packaging the bun-compiled MCP shim, docs, and
-# install scripts would be wasted I/O. (The `crates/cloak-core/tests/`
-# directory stays in context because Cargo enumerates the workspace
-# during `cargo build`; we just don't compile them via `--bin cloakd`.)
+# `cloakd` and `cloak` binaries, so packaging the bun-compiled MCP shim,
+# docs, and unrelated install scripts would be wasted I/O. The pinned
+# libsodium prep script is intentionally kept because the Dockerfile runs it.
+# (The `crates/cloak-core/tests/` directory stays in context because Cargo
+# enumerates the workspace during `cargo build`; we just don't compile tests.)
 packages/
 docs/
-scripts/
+scripts/*
+!scripts/prepare-libsodium-dist.sh
 Dockerfile
 .dockerignore
 

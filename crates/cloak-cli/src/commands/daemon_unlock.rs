@@ -27,9 +27,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use cloak_core::peer_auth;
 use serde_json::{json, Value};
 
-use crate::commands::{Context, SystemError};
+use crate::commands::{daemon, Context, SystemError};
 use crate::prompt;
 
 const FRAME_MAX: usize = 4 * 1024 * 1024;
@@ -86,6 +87,7 @@ pub fn run(_ctx: &Context) -> Result<()> {
             sock.display()
         ))
     })?;
+    verify_connected_daemon(&stream)?;
     stream
         .set_read_timeout(Some(READ_TIMEOUT))
         .context("set socket read timeout")?;
@@ -126,6 +128,51 @@ pub fn run(_ctx: &Context) -> Result<()> {
         anyhow::bail!("daemon refused unlock: {}", err);
     }
     println!("daemon vault unlocked");
+    Ok(())
+}
+
+fn verify_connected_daemon(stream: &UnixStream) -> Result<()> {
+    let peer = peer_auth::peer_info_from_std_unix(stream).map_err(|e| {
+        SystemError::boxed(format!(
+            "could not verify connected cloakd process before sending passphrase: {e}"
+        ))
+    })?;
+
+    let our_uid = unsafe { libc::geteuid() };
+    if peer.uid != our_uid {
+        return Err(SystemError::boxed(format!(
+            "connected daemon uid {} does not match our uid {}; refusing to send passphrase",
+            peer.uid, our_uid
+        )));
+    }
+
+    let basename = peer.basename().unwrap_or_default();
+    if basename != "cloakd" {
+        return Err(SystemError::boxed(format!(
+            "connected process is {:?}, not cloakd; refusing to send passphrase",
+            basename
+        )));
+    }
+
+    let peer_path = peer
+        .binary_path
+        .as_ref()
+        .ok_or_else(|| SystemError::boxed("could not resolve connected cloakd path"))?;
+    let peer_path = peer_path
+        .canonicalize()
+        .with_context(|| format!("canonicalize connected cloakd path {}", peer_path.display()))?;
+    let expected_daemon = daemon::resolve_cloakd_bin().and_then(|p| {
+        p.canonicalize()
+            .with_context(|| format!("canonicalize expected cloakd path {}", p.display()))
+    })?;
+    if peer_path != expected_daemon {
+        return Err(SystemError::boxed(format!(
+            "connected cloakd path {} does not match expected sibling {}; refusing to send passphrase",
+            peer_path.display(),
+            expected_daemon.display()
+        )));
+    }
+
     Ok(())
 }
 

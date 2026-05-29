@@ -10,6 +10,7 @@ on:
     branches: [main, beta]
   pull_request:
     branches: [main, beta]
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -61,37 +62,31 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@aad518f59d88bae90133242f9ddac7f8bbc5dddf
         with:
           targets: ${{ matrix.target }}
           components: clippy, rustfmt
 
-      - name: Install libsodium (macOS)
-        if: matrix.platform == 'macos'
-        run: brew install libsodium
-
-      - name: Install libsodium (Linux)
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsodium-dev pkg-config
+      - name: Prepare pinned libsodium source
+        shell: bash
+        run: ./scripts/prepare-libsodium-dist.sh
 
       - name: Install bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.2.9"
 
       - name: Install cross (musl row)
         if: matrix.cross
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285
         with:
           tool: cross
 
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
         with:
           key: ${{ matrix.target }}
 
@@ -114,13 +109,17 @@ jobs:
       # `unnecessary_cast` warnings fails the step. W4 retires this filter.
       - name: cargo clippy (host targets, macOS)
         if: matrix.platform == 'macos'
-        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
+        env:
+          SODIUM_DIST_DIR: ${{ github.workspace }}/.cargo/libsodium-dist
+        run: cargo clippy --locked --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
 
       - name: cargo clippy (host targets, Linux)
         if: ${{ matrix.platform == 'linux' && !matrix.cross }}
+        env:
+          SODIUM_DIST_DIR: ${{ github.workspace }}/.cargo/libsodium-dist
         run: |
           set -o pipefail
-          cargo clippy --workspace --all-targets --target ${{ matrix.target }} 2>&1 | tee clippy.log
+          cargo clippy --locked --workspace --all-targets --target ${{ matrix.target }} 2>&1 | tee clippy.log
           unexpected=$(grep -E '^(error|warning):' clippy.log | grep -vE 'casting to the same type is unnecessary' || true)
           if [ -n "$unexpected" ]; then
             echo "::error::Unexpected clippy diagnostics on Linux (W4 retires this filter):"
@@ -130,13 +129,17 @@ jobs:
 
       - name: cargo clippy (windows, cloak-core only)
         if: matrix.platform == 'windows'
-        run: cargo clippy -p cloak-core --all-targets --target ${{ matrix.target }} -- -D warnings
+        env:
+          SODIUM_DIST_DIR: ${{ github.workspace }}/.cargo/libsodium-dist
+        run: cargo clippy --locked -p cloak-core --all-targets --target ${{ matrix.target }} -- -D warnings
 
       - name: cross clippy (musl)
         if: matrix.cross
+        env:
+          SODIUM_DIST_DIR: /project/.cargo/libsodium-dist
         run: |
           set -o pipefail
-          cross clippy --workspace --all-targets --target ${{ matrix.target }} 2>&1 | tee clippy.log
+          cross clippy --locked --workspace --all-targets --target ${{ matrix.target }} 2>&1 | tee clippy.log
           unexpected=$(grep -E '^(error|warning):' clippy.log | grep -vE 'casting to the same type is unnecessary' || true)
           if [ -n "$unexpected" ]; then
             echo "::error::Unexpected clippy diagnostics on Linux musl (W4 retires this filter):"
@@ -146,15 +149,21 @@ jobs:
 
       - name: cargo build (host targets)
         if: ${{ !matrix.cross && matrix.platform != 'windows' }}
-        run: cargo build --release --workspace --target ${{ matrix.target }}
+        env:
+          SODIUM_DIST_DIR: ${{ github.workspace }}/.cargo/libsodium-dist
+        run: cargo build --locked --release --workspace --target ${{ matrix.target }}
 
       - name: cargo build (windows, cloak-core only)
         if: matrix.platform == 'windows'
-        run: cargo build --release -p cloak-core --target ${{ matrix.target }}
+        env:
+          SODIUM_DIST_DIR: ${{ github.workspace }}/.cargo/libsodium-dist
+        run: cargo build --locked --release -p cloak-core --target ${{ matrix.target }}
 
       - name: cross build (musl)
         if: matrix.cross
-        run: cross build --release --workspace --target ${{ matrix.target }}
+        env:
+          SODIUM_DIST_DIR: /project/.cargo/libsodium-dist
+        run: cross build --locked --release --workspace --target ${{ matrix.target }}
 
       # CLI tests inherit `CLOAK_PEPPER_FILE` so they bypass the OS
       # keychain - on the macOS runner the user keychain refuses
@@ -165,13 +174,15 @@ jobs:
         if: ${{ !matrix.cross && matrix.platform != 'windows' }}
         env:
           CLOAK_PEPPER_FILE: ${{ runner.temp }}/cloak-ci-pepper
-        run: cargo test --workspace --target ${{ matrix.target }}
+          SODIUM_DIST_DIR: ${{ github.workspace }}/.cargo/libsodium-dist
+        run: cargo test --locked --workspace --target ${{ matrix.target }}
 
       - name: cargo test (windows, cloak-core only)
         if: matrix.platform == 'windows'
         env:
           CLOAK_PEPPER_FILE: ${{ runner.temp }}\cloak-ci-pepper
-        run: cargo test -p cloak-core --target ${{ matrix.target }}
+          SODIUM_DIST_DIR: ${{ github.workspace }}/.cargo/libsodium-dist
+        run: cargo test --locked -p cloak-core --target ${{ matrix.target }}
 
       # `cross` runs the test binary inside a Docker container; the
       # pepper file path must live inside the mounted project tree
@@ -181,11 +192,12 @@ jobs:
         if: matrix.cross
         env:
           CLOAK_PEPPER_FILE: target/cloak-ci-pepper
+          SODIUM_DIST_DIR: /project/.cargo/libsodium-dist
         run: |
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             export CLOAK_SKIP_CHILD_PROCESS_TESTS=1
           fi
-          cross test --workspace --target ${{ matrix.target }}
+          cross test --locked --workspace --target ${{ matrix.target }}
 
       # ----- cloak-mcp (TypeScript) ---------------------------------------
       # Skipped on Windows for v0.1; W6 brings the MCP shim build online.

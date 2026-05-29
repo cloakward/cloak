@@ -90,19 +90,19 @@ daemon-held unlock state:
 
 ### Privileged tool handlers (MCP-callable; subject to policy)
 - **`tool.sign_request`** — params `{ secret_name, scheme, method, url, headers?, body_b64? }` → `{ headers: {...} }`. `scheme ∈ {"aws-sigv4","hmac-sha256"}`.
-- **`tool.proxy_http`** — params `{ secret_name, method, url, headers?, body_b64?, auth_scheme, header_name?, query_name? }` → `{ status, headers, body_b64 }`. The daemon enforces the `allowed_hosts` policy and strips the auth header from any echoed metadata.
-- **`tool.mint_token`** — params `{ secret_name, kind, scope?, ttl_seconds? }` → `{ token, expires_at }`. `kind ∈ {"aws-sts","github-app","gitlab-pat"}`. v1.0 ships `aws-sts` as a real impl (calls AWS STS `GetSessionToken`); `github-app` and `gitlab-pat` schemas are stable but the handlers return a typed not-supported error (still policy-checked, rate-limited, and audited).
+- **`tool.proxy_http`** — params `{ secret_name, method, url, headers?, body_b64?, auth_scheme, header_name? }` → `{ status, headers, body_b64, redacted }`. The daemon enforces the `allowed_hosts` policy, supports `auth_scheme ∈ {"bearer","basic","header"}`, and rejects query-string auth because URLs are commonly logged. Before returning the upstream response, Cloak redacts exact representations of the attached secret and marks `redacted=true` if anything changed; the response still goes to the MCP client and must come from a host the user trusts.
+- **`tool.mint_token`** — params `{ secret_name, kind, scope?, ttl_seconds? }` → `{ token, expires_at }`. `kind ∈ {"aws-sts","github-app","gitlab-pat"}`. v1.0 ships `aws-sts` as a real impl (calls AWS STS `GetSessionToken`); `github-app` and `gitlab-pat` schemas are stable but the handlers return a typed not-supported error (still policy-checked, rate-limited, and audited). The returned token is a derived credential visible to the MCP client.
 - **`tool.query_audit`** — params `{ since?, until?, tool?, secret?, result?, limit? }` → `{ entries: [...] }`. Entries never contain secret values.
 
 ## Auth & sessions
 
 1. The daemon accepts the connection and reads kernel peer credentials (UID, PID, audit token on macOS).
-2. The daemon resolves the peer binary path, hashes its on-disk image (or its mach-o code-directory hash on macOS), and checks against an allowlist (`cloak`, `cloak-mcp`). Unknown peer → connection closed with `peer-not-trusted` *before* any session token is issued.
-3. The peer calls `*.handshake`. The daemon issues a session token bound to `(peer_pid, code_sig_hash, conn_id, expires_at=now+30min)`.
+2. The daemon resolves the peer binary path, hashes its on-disk image, and checks the hash against trusted `cloak` / `cloak-mcp` binaries installed next to `cloakd`. On macOS it also compares the running process CodeDirectory hash reported by the kernel. Unknown or hash-mismatched peer → connection closed with `peer-not-trusted` *before* any session token is issued.
+3. The peer calls `*.handshake`. `cli.handshake` is accepted only from `cloak`; `mcp.handshake` is accepted only from `cloak-mcp`. The daemon issues a session token bound to `(peer_pid, peer_identity, code_sig_hash, conn_id, expires_at=now+30min)`.
 4. Subsequent requests carry `session_token`. The daemon validates token + connection identity. If the peer process exits, the token is invalidated (kqueue `EVFILT_PROC` on macOS, PIDFD close on Linux).
 
 ## What is NOT in this contract
 
-- Plaintext secret retrieval over MCP. There is **no** method named `get_secret`, `reveal_secret`, or anything equivalent on the MCP-callable surface. `vault.show` is gated to the CLI peer. This is enforced by both peer-identity checks and policy.
+- Plaintext stored-secret retrieval over MCP. There is **no** method named `get_secret`, `reveal_secret`, or anything equivalent on the MCP-callable surface. `vault.show` is gated to the CLI peer. This is enforced by both peer-identity checks and policy.
 - Streaming. v1.0 is request/response only.
-- Bi-directional pushes. The daemon issues confirmation prompts via a separate side-channel (CLI invocation + desktop notification), not over the IPC reply channel.
+- Bi-directional pushes or confirmation callbacks. v1.0 is request/response only; policy `RequireConfirmation` decisions fail closed as `policy-denied` until a real confirmation UX exists.

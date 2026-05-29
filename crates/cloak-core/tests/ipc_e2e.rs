@@ -38,6 +38,7 @@ fn open_policy() -> (PeerPolicy, String) {
         PeerPolicy {
             allowed_basenames: vec![basename.clone()],
             require_same_uid: true,
+            allowed_binaries: Vec::new(),
         },
         basename,
     )

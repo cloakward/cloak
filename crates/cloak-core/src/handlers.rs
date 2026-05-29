@@ -14,9 +14,11 @@
 //! 4. Lock the vault mutex and `vault.show()` the secret (only after the
 //!    policy gate has passed — a denied call must never even read the
 //!    plaintext).
-//! 5. Do the real work (sign / proxy / mint / query).
-//! 6. Audit `Ok` (or `Error` if the real work failed after policy passed).
-//! 7. Return only the *new* outputs — never echo the secret, never echo
+//! 5. For external side effects (proxy / mint), audit `Started` before
+//!    sending anything over the network.
+//! 6. Do the real work (sign / proxy / mint / query).
+//! 7. Audit `Ok` (or `Error` if the real work failed after policy passed).
+//! 8. Return only the *new* outputs — never echo the secret, never echo
 //!    the auth header that was attached to a proxied request.
 //!
 //! AWS SigV4 signing (`tool.sign_request` with `scheme="aws-sigv4"`) and
@@ -30,6 +32,7 @@
 //!   dependency graph (verified by `cargo tree -p cloak-core`).
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
@@ -45,6 +48,10 @@ use crate::egress::{header_map_from_btree, EgressClient, PreparedRequest};
 use crate::error::{Error, Result};
 use crate::policy::{Action, Decision, EvalContext, PolicyEngine};
 use crate::vault::Vault;
+
+const MAX_PROXY_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
+const MAX_AUDIT_QUERY_LIMIT: usize = 1000;
+const AWS_STS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 // -------------------------------------------------------------------------
 // HandlerCtx — the bag of references each handler call needs.
@@ -101,6 +108,173 @@ async fn audit_one(audit: &Mutex<AuditLog>, draft: AuditDraft) -> Result<()> {
 /// on any deserialization failure. Mirrors the daemon's `parse_params`.
 fn parse_params<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T> {
     serde_json::from_value(v.clone()).map_err(|_| Error::IpcFraming("invalid params"))
+}
+
+fn is_credential_field_name(name: &str) -> bool {
+    let mut normalized = String::with_capacity(name.len() + 4);
+    let mut prev_was_lower_or_digit = false;
+    let mut last_was_sep = true;
+
+    for ch in name.chars() {
+        if ch.is_ascii_uppercase() {
+            if prev_was_lower_or_digit && !last_was_sep {
+                normalized.push('_');
+            }
+            normalized.push(ch.to_ascii_lowercase());
+            prev_was_lower_or_digit = false;
+            last_was_sep = false;
+        } else if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            normalized.push(ch);
+            prev_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            last_was_sep = false;
+        } else {
+            if !last_was_sep {
+                normalized.push('_');
+            }
+            prev_was_lower_or_digit = false;
+            last_was_sep = true;
+        }
+    }
+
+    let normalized = normalized.trim_matches('_');
+    if normalized.is_empty() {
+        return false;
+    }
+    let compact = normalized.replace('_', "");
+    if [
+        "apikey",
+        "accesstoken",
+        "clientsecret",
+        "privatekey",
+        "refreshtoken",
+        "sessiontoken",
+    ]
+    .iter()
+    .any(|needle| compact.contains(needle))
+    {
+        return true;
+    }
+
+    let parts: Vec<&str> = normalized.split('_').filter(|s| !s.is_empty()).collect();
+    if parts.iter().any(|part| {
+        matches!(
+            *part,
+            "auth"
+                | "authorization"
+                | "bearer"
+                | "cookie"
+                | "credential"
+                | "password"
+                | "passwd"
+                | "secret"
+                | "token"
+        )
+    }) {
+        return true;
+    }
+
+    parts.windows(2).any(|pair| {
+        matches!(
+            (pair[0], pair[1]),
+            ("api", "key")
+                | ("access", "token")
+                | ("client", "secret")
+                | ("private", "key")
+                | ("refresh", "token")
+                | ("session", "token")
+        )
+    })
+}
+
+fn reject_credential_bearing_url(tool: &'static str, url: &url::Url) -> Result<()> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::IpcFraming(match tool {
+            "proxy_http" => "proxy_http: URLs must not include username/password credentials",
+            "sign_request" => "sign_request: URLs must not include username/password credentials",
+            _ => "URLs must not include username/password credentials",
+        }));
+    }
+    for (name, _) in url.query_pairs() {
+        if is_credential_field_name(name.as_ref()) {
+            return Err(Error::IpcFraming(match tool {
+                "proxy_http" => {
+                    "proxy_http: URLs must not include credential-shaped query parameters"
+                }
+                "sign_request" => {
+                    "sign_request: URLs must not include credential-shaped query parameters"
+                }
+                _ => "URLs must not include credential-shaped query parameters",
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn reject_credential_input_headers(
+    tool: &'static str,
+    headers: &BTreeMap<String, String>,
+) -> Result<()> {
+    if headers.keys().any(|name| is_credential_field_name(name)) {
+        return Err(Error::IpcFraming(match tool {
+            "sign_request" => "sign_request: credential-bearing headers are not accepted as input",
+            "proxy_http" => "proxy_http: credential-bearing headers are not accepted as input",
+            _ => "credential-bearing headers are not accepted as input",
+        }));
+    }
+    Ok(())
+}
+
+fn is_request_control_header_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "proxy-connection"
+            | "upgrade"
+            | "keep-alive"
+            | "te"
+            | "trailer"
+            | "expect"
+    )
+}
+
+fn reject_request_control_input_headers(
+    tool: &'static str,
+    headers: &BTreeMap<String, String>,
+) -> Result<()> {
+    if headers
+        .keys()
+        .any(|name| is_request_control_header_name(name))
+    {
+        return Err(Error::IpcFraming(match tool {
+            "sign_request" => "sign_request: request-control headers are not accepted as input",
+            "proxy_http" => "proxy_http: request-control headers are not accepted as input",
+            _ => "request-control headers are not accepted as input",
+        }));
+    }
+    Ok(())
+}
+
+fn parse_supported_http_method(method: &str) -> Result<reqwest::Method> {
+    let upper = method.to_ascii_uppercase();
+    match upper.as_str() {
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" => {
+            reqwest::Method::from_bytes(upper.as_bytes())
+                .map_err(|_| Error::IpcFraming("invalid http method"))
+        }
+        _ => Err(Error::IpcFraming("invalid http method")),
+    }
+}
+
+fn decode_body_b64(value: Option<&str>) -> Result<Vec<u8>> {
+    match value {
+        Some(s) => base64::engine::general_purpose::STANDARD
+            .decode(s)
+            .map_err(|_| Error::IpcFraming("invalid body_b64")),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Run the policy gate + rate-limit check for a tool call. On any deny,
@@ -222,7 +396,7 @@ struct SignRequestParams {
 /// The signature is `HMAC-SHA256(key, canonical_string)` and is returned
 /// as `X-Cloak-Signature: <lowercase hex>`.
 ///
-/// AWS SigV4 (v0.1 stub): see `sign_aws_sigv4_stub`. The secret value
+/// AWS SigV4 signs in-process with the `aws-sigv4` crate. The secret value
 /// must be in the form `<access_key_id>:<secret_access_key>`.
 pub async fn sign_request(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
     let p: SignRequestParams = parse_params(params)?;
@@ -231,7 +405,13 @@ pub async fn sign_request(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value>
     // a client error and is reported before the policy check (still no
     // secret access yet, so no audit bypass).
     let url = url::Url::parse(&p.url).map_err(|_| Error::IpcFraming("invalid url"))?;
+    reject_credential_bearing_url("sign_request", &url)?;
+    reject_credential_input_headers("sign_request", &p.headers)?;
+    reject_request_control_input_headers("sign_request", &p.headers)?;
+    let method = parse_supported_http_method(&p.method)?;
+    let body_bytes = decode_body_b64(p.body_b64.as_deref())?;
     let host = url.host_str().map(str::to_string);
+    let unsupported_scheme = !matches!(p.scheme.as_str(), "hmac-sha256" | "aws-sigv4");
 
     enforce_policy(
         ctx,
@@ -242,35 +422,67 @@ pub async fn sign_request(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value>
     )
     .await?;
 
+    if unsupported_scheme {
+        audit_one(
+            ctx.audit,
+            AuditDraft {
+                peer: ctx.peer.clone(),
+                tool: "tool.sign_request".to_string(),
+                secret: Some(p.secret_name.clone()),
+                target: host,
+                result: AuditResult::Error,
+                note: Some(format!("unknown scheme: {}", p.scheme)),
+            },
+        )
+        .await?;
+        return Err(Error::IpcFraming("unknown sign_request scheme"));
+    }
+
     // Vault must be unlocked to read the secret.
-    let secret_value: Secret<String> = {
+    let secret_result: Result<Secret<String>> = {
         let v = ctx.vault.lock().await;
         if !v.is_unlocked() {
-            return Err(Error::Other("vault locked"));
+            Err(Error::Other("vault locked"))
+        } else {
+            v.show(&p.secret_name)
         }
-        v.show(&p.secret_name)?
     };
-
-    // Decode the body once so both schemes can hash it.
-    let body_bytes: Vec<u8> = match &p.body_b64 {
-        Some(s) => base64::engine::general_purpose::STANDARD
-            .decode(s)
-            .map_err(|_| Error::IpcFraming("invalid body_b64"))?,
-        None => Vec::new(),
+    let secret_value = match secret_result {
+        Ok(s) => s,
+        Err(e) => {
+            audit_one(
+                ctx.audit,
+                AuditDraft {
+                    peer: ctx.peer.clone(),
+                    tool: "tool.sign_request".to_string(),
+                    secret: Some(p.secret_name.clone()),
+                    target: host.clone(),
+                    result: AuditResult::Error,
+                    note: Some("vault-read-failed".to_string()),
+                },
+            )
+            .await?;
+            return Err(e);
+        }
     };
 
     let scheme_label;
-    let new_headers: BTreeMap<String, String> = match p.scheme.as_str() {
+    let sign_result: Result<BTreeMap<String, String>> = match p.scheme.as_str() {
         "hmac-sha256" => {
             scheme_label = "scheme=hmac-sha256";
-            sign_hmac_sha256(&p.method, &p.url, &body_bytes, secret_value.expose_secret())?
+            sign_hmac_sha256(
+                method.as_str(),
+                &p.url,
+                &body_bytes,
+                secret_value.expose_secret(),
+            )
         }
         "aws-sigv4" => {
             scheme_label = "scheme=aws-sigv4";
             let region = p.aws_region.as_deref().unwrap_or("us-east-1");
             let service = p.aws_service.as_deref().unwrap_or("execute-api");
             sign_aws_sigv4(
-                &p.method,
+                method.as_str(),
                 &url,
                 &p.headers,
                 &body_bytes,
@@ -283,22 +495,26 @@ pub async fn sign_request(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value>
                 // Constant message — never surface key material or AWS internals.
                 tracing::debug!(error = %e, "aws-sigv4 sign failed");
                 Error::Other("aws-sigv4: sign failed")
-            })?
+            })
         }
-        other => {
+        _ => unreachable!("unsupported scheme checked before vault read"),
+    };
+    let new_headers = match sign_result {
+        Ok(headers) => headers,
+        Err(e) => {
             audit_one(
                 ctx.audit,
                 AuditDraft {
                     peer: ctx.peer.clone(),
                     tool: "tool.sign_request".to_string(),
                     secret: Some(p.secret_name.clone()),
-                    target: host,
+                    target: host.clone(),
                     result: AuditResult::Error,
-                    note: Some(format!("unknown scheme: {other}")),
+                    note: Some(format!("{scheme_label} sign-failed")),
                 },
             )
             .await?;
-            return Err(Error::IpcFraming("unknown sign_request scheme"));
+            return Err(e);
         }
     };
 
@@ -467,28 +683,75 @@ struct ProxyHttpParams {
     headers: BTreeMap<String, String>,
     #[serde(default)]
     body_b64: Option<String>,
-    /// `"bearer"` | `"basic"` | `"header"` | `"query"`.
+    /// `"bearer"` | `"basic"` | `"header"`.
     auth_scheme: String,
     #[serde(default)]
     header_name: Option<String>,
-    #[serde(default)]
-    query_name: Option<String>,
 }
 
 /// Handler for `tool.proxy_http`.
 ///
 /// Never echoes the auth header it attaches; never returns the secret.
-/// Strips `Authorization`, `Cookie`, and `X-Api-Key` from caller-supplied
-/// headers so a model cannot smuggle its own auth through this tool.
+/// Strips caller-supplied credential-shaped headers so a model cannot
+/// smuggle its own auth through this tool.
 pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
     let p: ProxyHttpParams = parse_params(params)?;
 
-    let mut url = url::Url::parse(&p.url).map_err(|_| Error::IpcFraming("invalid url"))?;
+    let url = url::Url::parse(&p.url).map_err(|_| Error::IpcFraming("invalid url"))?;
     if url.scheme() != "https" && !test_allows_plaintext_proxy(&url) {
         return Err(Error::IpcFraming("proxy_http requires https"));
     }
-    let host = url.host_str().map(str::to_string);
+    reject_credential_bearing_url("proxy_http", &url)?;
+    reject_request_control_input_headers("proxy_http", &p.headers)?;
+    let method = parse_supported_http_method(&p.method)?;
+    let body_bytes = decode_body_b64(p.body_b64.as_deref())?;
 
+    if p.auth_scheme == "query" {
+        return Err(Error::IpcFraming(
+            "proxy_http: query auth is disabled because URLs are commonly logged",
+        ));
+    }
+    let header_auth_name = match p.auth_scheme.as_str() {
+        "bearer" | "basic" => {
+            if p.header_name.is_some() {
+                return Err(Error::IpcFraming(
+                    "proxy_http: header_name is only valid for header auth",
+                ));
+            }
+            None
+        }
+        "header" => {
+            let name = p
+                .header_name
+                .as_deref()
+                .ok_or(Error::IpcFraming("proxy_http: header_name required"))?;
+            if is_request_control_header_name(name) {
+                return Err(Error::IpcFraming(
+                    "proxy_http: request-control headers cannot be used for auth",
+                ));
+            }
+            Some(
+                reqwest::header::HeaderName::try_from(name.to_ascii_lowercase().as_bytes())
+                    .map_err(|_| Error::Other("proxy_http: invalid header name"))?,
+            )
+        }
+        _ => {
+            return Err(Error::IpcFraming("proxy_http: unknown auth_scheme"));
+        }
+    };
+
+    // Strip caller-supplied auth-bearing headers — case-insensitive.
+    let stripped: BTreeMap<String, String> = p
+        .headers
+        .iter()
+        .filter(|(k, _)| !is_credential_field_name(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    // Build the base header map, then attach auth based on scheme.
+    let mut headers = header_map_from_btree(&stripped)?;
+
+    let host = url.host_str().map(str::to_string);
     enforce_policy(
         ctx,
         "proxy_http",
@@ -498,93 +761,152 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
     )
     .await?;
 
-    let secret_value: Secret<String> = {
+    let secret_result: Result<Secret<String>> = {
         let v = ctx.vault.lock().await;
         if !v.is_unlocked() {
-            return Err(Error::Other("vault locked"));
+            Err(Error::Other("vault locked"))
+        } else {
+            v.show(&p.secret_name)
         }
-        v.show(&p.secret_name)?
+    };
+    let secret_value = match secret_result {
+        Ok(s) => s,
+        Err(e) => {
+            audit_one(
+                ctx.audit,
+                AuditDraft {
+                    peer: ctx.peer.clone(),
+                    tool: "tool.proxy_http".to_string(),
+                    secret: Some(p.secret_name.clone()),
+                    target: host.clone(),
+                    result: AuditResult::Error,
+                    note: Some("vault-read-failed".to_string()),
+                },
+            )
+            .await?;
+            return Err(e);
+        }
     };
 
-    // Strip caller-supplied auth-bearing headers — case-insensitive.
-    let stripped: BTreeMap<String, String> = p
-        .headers
-        .iter()
-        .filter(|(k, _)| {
-            let lk = k.to_ascii_lowercase();
-            lk != "authorization" && lk != "cookie" && lk != "x-api-key"
-        })
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-
-    // Build the base header map, then attach auth based on scheme.
-    let mut headers = header_map_from_btree(&stripped)?;
     let secret_str = secret_value.expose_secret();
+    let sensitive_patterns = sensitive_response_patterns(secret_str);
 
     match p.auth_scheme.as_str() {
         "bearer" => {
             let val = format!("Bearer {secret_str}");
-            let v = reqwest::header::HeaderValue::from_str(&val)
-                .map_err(|_| Error::Other("proxy_http: invalid bearer token"))?;
+            let v = match reqwest::header::HeaderValue::from_str(&val) {
+                Ok(v) => v,
+                Err(_) => {
+                    audit_one(
+                        ctx.audit,
+                        AuditDraft {
+                            peer: ctx.peer.clone(),
+                            tool: "tool.proxy_http".to_string(),
+                            secret: Some(p.secret_name.clone()),
+                            target: host.clone(),
+                            result: AuditResult::Error,
+                            note: Some("invalid bearer token".to_string()),
+                        },
+                    )
+                    .await?;
+                    return Err(Error::Other("proxy_http: invalid bearer token"));
+                }
+            };
             headers.insert(reqwest::header::AUTHORIZATION, v);
         }
         "basic" => {
             // v0.1: secret must already be `user:pass`.
             if !secret_str.contains(':') {
+                audit_one(
+                    ctx.audit,
+                    AuditDraft {
+                        peer: ctx.peer.clone(),
+                        tool: "tool.proxy_http".to_string(),
+                        secret: Some(p.secret_name.clone()),
+                        target: host.clone(),
+                        result: AuditResult::Error,
+                        note: Some("basic auth secret shape invalid".to_string()),
+                    },
+                )
+                .await?;
                 return Err(Error::Other(
                     "proxy_http: basic auth secret must be \"user:pass\"",
                 ));
             }
             let encoded = base64::engine::general_purpose::STANDARD.encode(secret_str.as_bytes());
             let val = format!("Basic {encoded}");
-            let v = reqwest::header::HeaderValue::from_str(&val)
-                .map_err(|_| Error::Other("proxy_http: invalid basic token"))?;
+            let v = match reqwest::header::HeaderValue::from_str(&val) {
+                Ok(v) => v,
+                Err(_) => {
+                    audit_one(
+                        ctx.audit,
+                        AuditDraft {
+                            peer: ctx.peer.clone(),
+                            tool: "tool.proxy_http".to_string(),
+                            secret: Some(p.secret_name.clone()),
+                            target: host.clone(),
+                            result: AuditResult::Error,
+                            note: Some("invalid basic token".to_string()),
+                        },
+                    )
+                    .await?;
+                    return Err(Error::Other("proxy_http: invalid basic token"));
+                }
+            };
             headers.insert(reqwest::header::AUTHORIZATION, v);
         }
         "header" => {
-            let name = p
-                .header_name
-                .as_deref()
-                .ok_or(Error::IpcFraming("proxy_http: header_name required"))?;
-            let hn = reqwest::header::HeaderName::try_from(name.to_ascii_lowercase().as_bytes())
-                .map_err(|_| Error::Other("proxy_http: invalid header name"))?;
-            let hv = reqwest::header::HeaderValue::from_str(secret_str)
-                .map_err(|_| Error::Other("proxy_http: invalid header value"))?;
-            headers.insert(hn, hv);
+            let hv = match reqwest::header::HeaderValue::from_str(secret_str) {
+                Ok(v) => v,
+                Err(_) => {
+                    audit_one(
+                        ctx.audit,
+                        AuditDraft {
+                            peer: ctx.peer.clone(),
+                            tool: "tool.proxy_http".to_string(),
+                            secret: Some(p.secret_name.clone()),
+                            target: host.clone(),
+                            result: AuditResult::Error,
+                            note: Some("invalid header auth value".to_string()),
+                        },
+                    )
+                    .await?;
+                    return Err(Error::Other("proxy_http: invalid header value"));
+                }
+            };
+            headers.insert(header_auth_name.expect("validated header auth name"), hv);
         }
-        "query" => {
-            let name = p
-                .query_name
-                .as_deref()
-                .ok_or(Error::IpcFraming("proxy_http: query_name required"))?;
-            url.query_pairs_mut().append_pair(name, secret_str);
-        }
+        "query" => unreachable!("query auth disabled before secret attachment"),
         _ => {
             return Err(Error::IpcFraming("proxy_http: unknown auth_scheme"));
         }
     }
 
-    // Build the request body.
-    let body_bytes: Option<Vec<u8>> = match &p.body_b64 {
-        Some(s) => Some(
-            base64::engine::general_purpose::STANDARD
-                .decode(s)
-                .map_err(|_| Error::IpcFraming("invalid body_b64"))?,
-        ),
-        None => None,
-    };
-
-    let method = reqwest::Method::from_bytes(p.method.to_ascii_uppercase().as_bytes())
-        .map_err(|_| Error::IpcFraming("invalid http method"))?;
-
     let prepared = PreparedRequest {
         method,
         url,
         headers,
-        body: body_bytes,
+        body: p.body_b64.as_ref().map(|_| body_bytes),
     };
 
-    let resp = match ctx.egress.execute(prepared).await {
+    audit_one(
+        ctx.audit,
+        AuditDraft {
+            peer: ctx.peer.clone(),
+            tool: "tool.proxy_http".to_string(),
+            secret: Some(p.secret_name.clone()),
+            target: host.clone(),
+            result: AuditResult::Started,
+            note: Some(format!("auth_scheme={} egress-started", p.auth_scheme)),
+        },
+    )
+    .await?;
+
+    let resp = match ctx
+        .egress
+        .execute_with_body_limit(prepared, MAX_PROXY_RESPONSE_BODY_BYTES)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             audit_one(
@@ -603,6 +925,26 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
         }
     };
 
+    if resp.body.len() > MAX_PROXY_RESPONSE_BODY_BYTES {
+        audit_one(
+            ctx.audit,
+            AuditDraft {
+                peer: ctx.peer.clone(),
+                tool: "tool.proxy_http".to_string(),
+                secret: Some(p.secret_name.clone()),
+                target: host.clone(),
+                result: AuditResult::Error,
+                note: Some(format!("response too large: {} bytes", resp.body.len())),
+            },
+        )
+        .await?;
+        return Err(Error::Other("proxy_http: response too large"));
+    }
+
+    let (headers, headers_redacted) = redact_header_map(resp.headers, &sensitive_patterns);
+    let (body, body_redacted) = redact_body(resp.body, &sensitive_patterns);
+    let redacted = headers_redacted || body_redacted;
+
     audit_one(
         ctx.audit,
         AuditDraft {
@@ -611,18 +953,119 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
             secret: Some(p.secret_name.clone()),
             target: host,
             result: AuditResult::Ok,
-            note: Some(format!("status={}", resp.status)),
+            note: Some(if redacted {
+                format!("status={} redacted=response", resp.status)
+            } else {
+                format!("status={}", resp.status)
+            }),
         },
     )
     .await?;
 
-    let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp.body);
+    let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body);
     // Header keys are already lowercased by `egress::execute`.
     Ok(json!({
         "status": resp.status,
-        "headers": resp.headers,
+        "headers": headers,
         "body_b64": body_b64,
+        "redacted": redacted,
     }))
+}
+
+fn sensitive_response_patterns(secret: &str) -> Vec<Vec<u8>> {
+    fn push_unique(out: &mut Vec<Vec<u8>>, s: impl Into<Vec<u8>>) {
+        let s = s.into();
+        if !s.is_empty() && !out.iter().any(|v| v == &s) {
+            out.push(s);
+        }
+    }
+
+    let mut out = Vec::new();
+    push_unique(&mut out, secret.as_bytes().to_vec());
+    push_unique(&mut out, format!("Bearer {secret}").into_bytes());
+    push_unique(
+        &mut out,
+        base64::engine::general_purpose::STANDARD
+            .encode(secret.as_bytes())
+            .into_bytes(),
+    );
+    push_unique(
+        &mut out,
+        url::form_urlencoded::byte_serialize(secret.as_bytes())
+            .collect::<String>()
+            .into_bytes(),
+    );
+    if secret.contains(':') {
+        push_unique(
+            &mut out,
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(secret.as_bytes())
+            )
+            .into_bytes(),
+        );
+    }
+    out.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    out
+}
+
+fn redact_header_map(
+    headers: BTreeMap<String, String>,
+    patterns: &[Vec<u8>],
+) -> (BTreeMap<String, String>, bool) {
+    let mut redacted_any = false;
+    let headers = headers
+        .into_iter()
+        .map(|(k, v)| {
+            let (redacted, did_redact) = redact_text(&v, patterns);
+            redacted_any |= did_redact;
+            (k, redacted)
+        })
+        .collect();
+    (headers, redacted_any)
+}
+
+fn redact_text(value: &str, patterns: &[Vec<u8>]) -> (String, bool) {
+    let mut out = value.to_string();
+    let mut redacted = false;
+    for pat in patterns {
+        let Ok(pat) = std::str::from_utf8(pat) else {
+            continue;
+        };
+        if !pat.is_empty() && out.contains(pat) {
+            out = out.replace(pat, "[REDACTED]");
+            redacted = true;
+        }
+    }
+    (out, redacted)
+}
+
+fn redact_body(body: Vec<u8>, patterns: &[Vec<u8>]) -> (Vec<u8>, bool) {
+    let mut out = body;
+    let mut redacted = false;
+    for pat in patterns {
+        if pat.is_empty() {
+            continue;
+        }
+        let mut next = Vec::with_capacity(out.len());
+        let mut i = 0;
+        let mut changed = false;
+        while i < out.len() {
+            if i + pat.len() <= out.len() && &out[i..i + pat.len()] == pat.as_slice() {
+                next.extend_from_slice(b"[REDACTED]");
+                i += pat.len();
+                changed = true;
+            } else {
+                next.push(out[i]);
+                i += 1;
+            }
+        }
+        if changed {
+            out = next;
+            redacted = true;
+        }
+    }
+    (out, redacted)
 }
 
 fn test_allows_plaintext_proxy(_url: &url::Url) -> bool {
@@ -775,18 +1218,54 @@ async fn request_real_sts_session(
 /// `aws-sts` is implemented as a real `GetSessionToken` call against the
 /// AWS STS API. `github-app` and `gitlab-pat` return
 /// `Error::Other("mint_token: kind not supported in v0.1")` after passing
-/// policy + rate limit (still audited as `Error`).
+/// policy + rate limit but before reading the parent secret (still audited
+/// as `Error`).
 pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
     let p: MintTokenParams = parse_params(params)?;
 
     enforce_policy(ctx, "mint_token", Some(&p.secret_name), None, None).await?;
 
-    let secret_value: Secret<String> = {
+    if p.kind != "aws-sts" {
+        audit_one(
+            ctx.audit,
+            AuditDraft {
+                peer: ctx.peer.clone(),
+                tool: "tool.mint_token".to_string(),
+                secret: Some(p.secret_name.clone()),
+                target: None,
+                result: AuditResult::Error,
+                note: Some(format!("kind={} unsupported", p.kind)),
+            },
+        )
+        .await?;
+        return Err(Error::Other("mint_token: kind not supported in v0.1"));
+    }
+
+    let secret_result: Result<Secret<String>> = {
         let v = ctx.vault.lock().await;
         if !v.is_unlocked() {
-            return Err(Error::Other("vault locked"));
+            Err(Error::Other("vault locked"))
+        } else {
+            v.show(&p.secret_name)
         }
-        v.show(&p.secret_name)?
+    };
+    let secret_value = match secret_result {
+        Ok(s) => s,
+        Err(e) => {
+            audit_one(
+                ctx.audit,
+                AuditDraft {
+                    peer: ctx.peer.clone(),
+                    tool: "tool.mint_token".to_string(),
+                    secret: Some(p.secret_name.clone()),
+                    target: None,
+                    result: AuditResult::Error,
+                    note: Some("vault-read-failed".to_string()),
+                },
+            )
+            .await?;
+            return Err(e);
+        }
     };
 
     let requested_ttl = p
@@ -804,131 +1283,11 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
         requested_ttl
     };
 
-    match p.kind.as_str() {
-        "aws-sts" => {
-            // Parse "<access_key_id>:<secret_access_key>".
-            let key_pair = secret_value.expose_secret();
-            let (akid, secret_key) = match key_pair.split_once(':') {
-                Some((a, b)) if !a.is_empty() && !b.is_empty() => (a, b),
-                _ => {
-                    audit_one(
-                        ctx.audit,
-                        AuditDraft {
-                            peer: ctx.peer.clone(),
-                            tool: "tool.mint_token".to_string(),
-                            secret: Some(p.secret_name.clone()),
-                            target: None,
-                            result: AuditResult::Error,
-                            note: Some("kind=aws-sts secret-shape-invalid".to_string()),
-                        },
-                    )
-                    .await?;
-                    return Err(Error::Other("aws-sts: secret must be 'AKID:SECRET'"));
-                }
-            };
-
-            // Region: from params.scope.region if present, else default.
-            let region: String = match &p.scope {
-                Value::Object(map) => match map.get("region").and_then(Value::as_str) {
-                    Some(r) if !r.is_empty() => r.to_string(),
-                    _ => "us-east-1".to_string(),
-                },
-                _ => "us-east-1".to_string(),
-            };
-
-            let session = match current_test_sts_factory() {
-                Some(factory) => {
-                    (factory)(
-                        akid.to_string(),
-                        secret_key.to_string(),
-                        region.clone(),
-                        ttl as i32,
-                    )
-                    .await
-                }
-                None => request_real_sts_session(akid, secret_key, &region, ttl as i32).await,
-            };
-
-            // Call STS GetSessionToken. On any AWS error, audit + return
-            // a constant-message error.
-            let creds = match session {
-                Ok(Some(c)) => c,
-                Ok(None) => {
-                    audit_one(
-                        ctx.audit,
-                        AuditDraft {
-                            peer: ctx.peer.clone(),
-                            tool: "tool.mint_token".to_string(),
-                            secret: Some(p.secret_name.clone()),
-                            target: None,
-                            result: AuditResult::Error,
-                            note: Some(format!(
-                                "kind=aws-sts ttl={ttl}s region={region} empty-credentials"
-                            )),
-                        },
-                    )
-                    .await?;
-                    return Err(Error::Other(
-                        "aws-sts: GetSessionToken returned no credentials",
-                    ));
-                }
-                Err(e) => {
-                    audit_one(
-                        ctx.audit,
-                        AuditDraft {
-                            peer: ctx.peer.clone(),
-                            tool: "tool.mint_token".to_string(),
-                            secret: Some(p.secret_name.clone()),
-                            target: None,
-                            result: AuditResult::Error,
-                            note: Some(format!(
-                                "kind=aws-sts ttl={ttl}s region={region} api-error"
-                            )),
-                        },
-                    )
-                    .await?;
-                    return Err(e);
-                }
-            };
-
-            let expiration_secs = creds.expiration_secs;
-            let expiration_dt: DateTime<Utc> =
-                DateTime::<Utc>::from_timestamp(expiration_secs, 0).unwrap_or_else(Utc::now);
-
-            // Encode the temporary credentials as a base64'd JSON envelope
-            // — this is the documented "token" wire shape.
-            let envelope = json!({
-                "access_key_id": creds.access_key_id,
-                "secret_access_key": creds.secret_access_key,
-                "session_token": creds.session_token,
-                "expiration": expiration_dt.to_rfc3339(),
-            });
-            let envelope_bytes = serde_json::to_vec(&envelope)
-                .map_err(|_| Error::Other("aws-sts: envelope encoding failed"))?;
-            let token = base64::engine::general_purpose::STANDARD.encode(envelope_bytes);
-
-            audit_one(
-                ctx.audit,
-                AuditDraft {
-                    peer: ctx.peer.clone(),
-                    tool: "tool.mint_token".to_string(),
-                    secret: Some(p.secret_name.clone()),
-                    target: None,
-                    result: AuditResult::Ok,
-                    note: Some(format!(
-                        "kind=aws-sts ttl={ttl}s region={region}{}",
-                        clamped_note.unwrap_or("")
-                    )),
-                },
-            )
-            .await?;
-
-            Ok(json!({
-                "token": token,
-                "expires_at": expiration_dt.to_rfc3339(),
-            }))
-        }
-        other => {
+    // Parse "<access_key_id>:<secret_access_key>".
+    let key_pair = secret_value.expose_secret();
+    let (akid, secret_key) = match key_pair.split_once(':') {
+        Some((a, b)) if !a.is_empty() && !b.is_empty() => (a, b),
+        _ => {
             audit_one(
                 ctx.audit,
                 AuditDraft {
@@ -937,13 +1296,147 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
                     secret: Some(p.secret_name.clone()),
                     target: None,
                     result: AuditResult::Error,
-                    note: Some(format!("kind={other} unsupported")),
+                    note: Some("kind=aws-sts secret-shape-invalid".to_string()),
                 },
             )
             .await?;
-            Err(Error::Other("mint_token: kind not supported in v0.1"))
+            return Err(Error::Other("aws-sts: secret must be 'AKID:SECRET'"));
         }
-    }
+    };
+
+    // Region: from params.scope.region if present, else default.
+    let region: String = match &p.scope {
+        Value::Object(map) => match map.get("region").and_then(Value::as_str) {
+            Some(r) if !r.is_empty() => r.to_string(),
+            _ => "us-east-1".to_string(),
+        },
+        _ => "us-east-1".to_string(),
+    };
+
+    audit_one(
+        ctx.audit,
+        AuditDraft {
+            peer: ctx.peer.clone(),
+            tool: "tool.mint_token".to_string(),
+            secret: Some(p.secret_name.clone()),
+            target: None,
+            result: AuditResult::Started,
+            note: Some(format!(
+                "kind=aws-sts ttl={ttl}s region={region} sts-started"
+            )),
+        },
+    )
+    .await?;
+
+    let session_future = async {
+        match current_test_sts_factory() {
+            Some(factory) => {
+                (factory)(
+                    akid.to_string(),
+                    secret_key.to_string(),
+                    region.clone(),
+                    ttl as i32,
+                )
+                .await
+            }
+            None => request_real_sts_session(akid, secret_key, &region, ttl as i32).await,
+        }
+    };
+    let session = match tokio::time::timeout(AWS_STS_REQUEST_TIMEOUT, session_future).await {
+        Ok(result) => result,
+        Err(_) => {
+            audit_one(
+                ctx.audit,
+                AuditDraft {
+                    peer: ctx.peer.clone(),
+                    tool: "tool.mint_token".to_string(),
+                    secret: Some(p.secret_name.clone()),
+                    target: None,
+                    result: AuditResult::Error,
+                    note: Some(format!("kind=aws-sts ttl={ttl}s region={region} timeout")),
+                },
+            )
+            .await?;
+            return Err(Error::Other("aws-sts: GetSessionToken timed out"));
+        }
+    };
+
+    // Call STS GetSessionToken. On any AWS error, audit + return
+    // a constant-message error.
+    let creds = match session {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            audit_one(
+                ctx.audit,
+                AuditDraft {
+                    peer: ctx.peer.clone(),
+                    tool: "tool.mint_token".to_string(),
+                    secret: Some(p.secret_name.clone()),
+                    target: None,
+                    result: AuditResult::Error,
+                    note: Some(format!(
+                        "kind=aws-sts ttl={ttl}s region={region} empty-credentials"
+                    )),
+                },
+            )
+            .await?;
+            return Err(Error::Other(
+                "aws-sts: GetSessionToken returned no credentials",
+            ));
+        }
+        Err(e) => {
+            audit_one(
+                ctx.audit,
+                AuditDraft {
+                    peer: ctx.peer.clone(),
+                    tool: "tool.mint_token".to_string(),
+                    secret: Some(p.secret_name.clone()),
+                    target: None,
+                    result: AuditResult::Error,
+                    note: Some(format!("kind=aws-sts ttl={ttl}s region={region} api-error")),
+                },
+            )
+            .await?;
+            return Err(e);
+        }
+    };
+
+    let expiration_secs = creds.expiration_secs;
+    let expiration_dt: DateTime<Utc> =
+        DateTime::<Utc>::from_timestamp(expiration_secs, 0).unwrap_or_else(Utc::now);
+
+    // Encode the temporary credentials as a base64'd JSON envelope
+    // — this is the documented "token" wire shape.
+    let envelope = json!({
+        "access_key_id": creds.access_key_id,
+        "secret_access_key": creds.secret_access_key,
+        "session_token": creds.session_token,
+        "expiration": expiration_dt.to_rfc3339(),
+    });
+    let envelope_bytes = serde_json::to_vec(&envelope)
+        .map_err(|_| Error::Other("aws-sts: envelope encoding failed"))?;
+    let token = base64::engine::general_purpose::STANDARD.encode(envelope_bytes);
+
+    audit_one(
+        ctx.audit,
+        AuditDraft {
+            peer: ctx.peer.clone(),
+            tool: "tool.mint_token".to_string(),
+            secret: Some(p.secret_name.clone()),
+            target: None,
+            result: AuditResult::Ok,
+            note: Some(format!(
+                "kind=aws-sts ttl={ttl}s region={region}{}",
+                clamped_note.unwrap_or("")
+            )),
+        },
+    )
+    .await?;
+
+    Ok(json!({
+        "token": token,
+        "expires_at": expiration_dt.to_rfc3339(),
+    }))
 }
 
 // -------------------------------------------------------------------------
@@ -960,7 +1453,7 @@ struct QueryAuditParams {
     tool: Option<String>,
     #[serde(default)]
     secret: Option<String>,
-    /// `"ok"` | `"denied"` | `"error"`.
+    /// `"started"` | `"ok"` | `"denied"` | `"error"`.
     #[serde(default)]
     result: Option<String>,
     #[serde(default)]
@@ -982,10 +1475,16 @@ pub async fn query_audit(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> 
 
     let result_kind = match p.result.as_deref() {
         None => None,
+        Some("started") => Some(AuditResult::Started),
         Some("ok") => Some(AuditResult::Ok),
         Some("denied") => Some(AuditResult::Denied),
         Some("error") => Some(AuditResult::Error),
         Some(_) => return Err(Error::IpcFraming("query_audit: unknown result filter")),
+    };
+
+    let limit = match p.limit {
+        Some(0) | None => MAX_AUDIT_QUERY_LIMIT,
+        Some(n) => n.min(MAX_AUDIT_QUERY_LIMIT),
     };
 
     let filter = AuditFilter {
@@ -994,7 +1493,7 @@ pub async fn query_audit(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> 
         tool: p.tool,
         secret: p.secret,
         result: result_kind,
-        limit: p.limit.unwrap_or(0),
+        limit,
     };
 
     let entries = {
@@ -1162,5 +1661,33 @@ mod tests {
         assert_eq!(policy_tool_name("sign_request"), "sign_request");
         assert_eq!(policy_tool_name("query_audit"), "query_audit");
         assert_eq!(policy_tool_name("nope"), "unknown");
+    }
+
+    #[test]
+    fn proxy_redaction_catches_echoed_secret_forms() {
+        let patterns = sensitive_response_patterns("user:super-secret");
+        let (body, redacted) = redact_body(
+            b"{\"Authorization\":\"Basic dXNlcjpzdXBlci1zZWNyZXQ=\",\"raw\":\"user:super-secret\"}"
+                .to_vec(),
+            &patterns,
+        );
+        let body = String::from_utf8(body).unwrap();
+        assert!(redacted);
+        assert!(!body.contains("user:super-secret"));
+        assert!(!body.contains("dXNlcjpzdXBlci1zZWNyZXQ="));
+        assert!(body.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn proxy_redaction_catches_bearer_echo() {
+        let patterns = sensitive_response_patterns("tok-secret");
+        let mut headers = BTreeMap::new();
+        headers.insert("x-debug-auth".to_string(), "Bearer tok-secret".to_string());
+        let (headers, redacted) = redact_header_map(headers, &patterns);
+        assert!(redacted);
+        assert_eq!(
+            headers.get("x-debug-auth").map(String::as_str),
+            Some("[REDACTED]")
+        );
     }
 }

@@ -1,4 +1,4 @@
-//! `cloak daemon {install,start,stop,status}` — per-component primitives
+//! `cloak daemon {install,start,stop,restart,status}` — per-component primitives
 //! for installing and supervising `cloakd`.
 //!
 //! These are the building blocks the `cloak setup` wizard composes. They
@@ -8,7 +8,7 @@
 //! # Platform matrix
 //! - macOS: per-user launchd LaunchAgent at
 //!   `~/Library/LaunchAgents/dev.cloak.cloakd.plist`. We use
-//!   `launchctl load -w` / `unload`. `launchctl print` is the status path.
+//!   `launchctl bootstrap` / `bootout`, with legacy fallbacks for older hosts.
 //! - Linux: per-user systemd unit at
 //!   `~/.config/systemd/user/cloakd.service`. Driven via
 //!   `systemctl --user`.
@@ -53,6 +53,31 @@ impl DaemonFlavour {
 /// Resolve the cloakd binary path. Searches alongside the running `cloak`
 /// binary first, then `$PATH`, then a few well-known install locations.
 pub fn resolve_cloakd_bin() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("CLOAKD_BIN") {
+        let candidate = PathBuf::from(path);
+        if !candidate.is_file() {
+            return Err(SystemError::boxed(format!(
+                "CLOAKD_BIN points to {}, but it is not a file",
+                candidate.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&candidate)
+                .with_context(|| format!("stat {}", candidate.display()))?
+                .permissions()
+                .mode();
+            if mode & 0o111 == 0 {
+                return Err(SystemError::boxed(format!(
+                    "CLOAKD_BIN points to {}, but it is not executable",
+                    candidate.display()
+                )));
+            }
+        }
+        return Ok(candidate);
+    }
+
     // Prefer a sibling of the running cloak binary so we pick up local
     // dev / homebrew installs uniformly.
     if let Ok(exe) = std::env::current_exe() {
@@ -116,6 +141,8 @@ pub fn launchd_log_dir() -> Result<PathBuf> {
 }
 
 fn launchd_plist_xml(cloakd_bin: &std::path::Path, log_dir: &std::path::Path) -> String {
+    let bin = xml_escape(&cloakd_bin.display().to_string());
+    let log = xml_escape(&log_dir.display().to_string());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -149,9 +176,17 @@ fn launchd_plist_xml(cloakd_bin: &std::path::Path, log_dir: &std::path::Path) ->
 </plist>
 "#,
         label = LAUNCHD_LABEL,
-        bin = cloakd_bin.display(),
-        log = log_dir.display(),
+        bin = bin,
+        log = log,
     )
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 /// Install the launchd LaunchAgent. Idempotent: re-running rewrites the
@@ -184,6 +219,14 @@ fn run_quiet(cmd: &mut Command) -> Result<bool> {
     Ok(out.status.success())
 }
 
+fn run_required(cmd: &mut Command, action: &str) -> Result<()> {
+    if run_quiet(cmd)? {
+        Ok(())
+    } else {
+        Err(SystemError::boxed(format!("{action} failed")))
+    }
+}
+
 /// Start the daemon (load & enable).
 pub fn start_daemon() -> Result<()> {
     match DaemonFlavour::auto()? {
@@ -192,28 +235,51 @@ pub fn start_daemon() -> Result<()> {
             if !plist.exists() {
                 let _ = install_launchd()?;
             }
-            // `load -w` is the historic command; we ignore its result
-            // because newer macOS prefers `bootstrap`. We then bootstrap
-            // explicitly and fall back to `kickstart`.
-            let _ = run_quiet(Command::new("launchctl").args(["unload", plist.to_str().unwrap()]));
-            let _ =
-                run_quiet(Command::new("launchctl").args(["load", "-w", plist.to_str().unwrap()]));
-            // Kickstart: best-effort restart so re-runs pick up new bin.
             let domain = format!("gui/{}", current_uid());
             let target = format!("{domain}/{LAUNCHD_LABEL}");
+            let _ = run_quiet(Command::new("launchctl").args(["bootout", &target]));
+            let bootstrapped = run_quiet(
+                Command::new("launchctl")
+                    .arg("bootstrap")
+                    .arg(&domain)
+                    .arg(&plist),
+            )?;
+            if !bootstrapped {
+                let _ = run_quiet(Command::new("launchctl").arg("unload").arg(&plist));
+                run_required(
+                    Command::new("launchctl").arg("load").arg("-w").arg(&plist),
+                    "launchctl bootstrap/load",
+                )?;
+            }
+            let _ = run_quiet(Command::new("launchctl").args(["enable", &target]));
             let _ = run_quiet(Command::new("launchctl").args(["kickstart", "-k", &target]));
-            Ok(())
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if daemon_alive() {
+                Ok(())
+            } else {
+                Err(SystemError::boxed(
+                    "launchd did not start cloakd; check ~/Library/Logs/cloak/cloakd.err.log",
+                ))
+            }
         }
         DaemonFlavour::SystemdUser => {
             install_systemd_unit()?;
-            run_quiet(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
-            run_quiet(Command::new("systemctl").args([
-                "--user",
-                "enable",
-                "--now",
-                "cloakd.service",
-            ]))?;
-            Ok(())
+            run_required(
+                Command::new("systemctl").args(["--user", "daemon-reload"]),
+                "systemctl daemon-reload",
+            )?;
+            run_required(
+                Command::new("systemctl").args(["--user", "enable", "--now", "cloakd.service"]),
+                "systemctl enable --now cloakd.service",
+            )?;
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if daemon_alive() {
+                Ok(())
+            } else {
+                Err(SystemError::boxed(
+                    "systemd reported start but cloakd socket is not reachable",
+                ))
+            }
         }
     }
 }
@@ -223,35 +289,75 @@ pub fn stop_daemon() -> Result<()> {
     match DaemonFlavour::auto()? {
         DaemonFlavour::Launchd => {
             let plist = launchd_plist_path()?;
-            if plist.exists() {
-                let _ =
-                    run_quiet(Command::new("launchctl").args(["unload", plist.to_str().unwrap()]));
-            }
-            // Belt-and-suspenders: bootout & stop.
             let domain = format!("gui/{}", current_uid());
             let target = format!("{domain}/{LAUNCHD_LABEL}");
-            let _ = run_quiet(Command::new("launchctl").args(["bootout", &target]));
-            Ok(())
+            let booted_out = run_quiet(Command::new("launchctl").args(["bootout", &target]))?;
+            if !booted_out && plist.exists() {
+                let _ = run_quiet(Command::new("launchctl").arg("unload").arg(&plist));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if daemon_alive() {
+                Err(SystemError::boxed(
+                    "launchd stop returned but cloakd is still running",
+                ))
+            } else {
+                Ok(())
+            }
         }
         DaemonFlavour::SystemdUser => {
-            let _ = run_quiet(Command::new("systemctl").args([
-                "--user",
-                "disable",
-                "--now",
-                "cloakd.service",
-            ]));
-            Ok(())
+            run_required(
+                Command::new("systemctl").args(["--user", "disable", "--now", "cloakd.service"]),
+                "systemctl disable --now cloakd.service",
+            )?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if daemon_alive() {
+                Err(SystemError::boxed(
+                    "systemd reported stop but cloakd socket is still reachable",
+                ))
+            } else {
+                Ok(())
+            }
         }
     }
 }
 
 /// Returns true if the daemon's UDS is live (we can connect, then close).
 pub fn daemon_alive() -> bool {
+    daemon_peer_verified().is_ok()
+}
+
+fn daemon_peer_verified() -> Result<()> {
     use std::os::unix::net::UnixStream;
     let Some(sock) = socket_path() else {
-        return false;
+        return Err(SystemError::boxed("could not resolve cloakd socket path"));
     };
-    UnixStream::connect(&sock).is_ok()
+    let stream = UnixStream::connect(&sock)
+        .with_context(|| format!("connect cloakd socket {}", sock.display()))?;
+    let peer = cloak_core::peer_auth::peer_info_from_std_unix(&stream)?;
+    if peer.uid != current_uid() {
+        return Err(SystemError::boxed("cloakd socket peer uid mismatch"));
+    }
+    if peer.basename().as_deref() != Some("cloakd") {
+        return Err(SystemError::boxed("cloakd socket peer is not cloakd"));
+    }
+    let expected = resolve_cloakd_bin().and_then(|p| {
+        std::fs::canonicalize(&p).with_context(|| format!("canonicalize {}", p.display()))
+    })?;
+    let actual = peer
+        .binary_path
+        .as_ref()
+        .ok_or_else(|| SystemError::boxed("cloakd socket peer path unavailable"))
+        .and_then(|p| {
+            std::fs::canonicalize(p).with_context(|| format!("canonicalize {}", p.display()))
+        })?;
+    if actual != expected {
+        return Err(SystemError::boxed(format!(
+            "cloakd socket peer path mismatch: expected {}, got {}",
+            expected.display(),
+            actual.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve the per-user cloakd UDS path (mirrors
@@ -344,6 +450,13 @@ pub fn run_start(_ctx: &Context) -> Result<()> {
 pub fn run_stop(_ctx: &Context) -> Result<()> {
     stop_daemon()?;
     println!("daemon: stopped");
+    Ok(())
+}
+
+pub fn run_restart(_ctx: &Context) -> Result<()> {
+    stop_daemon()?;
+    start_daemon()?;
+    println!("daemon: restarted");
     Ok(())
 }
 

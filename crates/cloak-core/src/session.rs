@@ -61,8 +61,8 @@ pub struct SessionRecord {
     /// Unique per-connection ID assigned by the daemon.
     pub conn_id: u64,
     /// Platform-specific non-recycling peer identity (macOS audit
-    /// token, Linux pidfd inode). `None` means the platform did not
-    /// supply one and validation must rely on the conn-id binding.
+    /// token, Linux pidfd inode). The daemon rejects new handshakes
+    /// without one; `None` is retained for legacy/unit-test records.
     pub peer_identity: Option<PeerIdentity>,
     /// UTC timestamp at issuance.
     pub issued_at: DateTime<Utc>,
@@ -182,8 +182,8 @@ impl SessionStore {
     /// that the candidate peer-identity bytes constant-time-match the
     /// stored ones. Used by the request hot-path on platforms that
     /// supply non-recycling identities (macOS audit token, Linux
-    /// pidfd-inode). If the platform has no identity for this peer,
-    /// behaves identically to [`validate`].
+    /// pidfd-inode). Legacy records without an identity behave like
+    /// [`validate`].
     pub async fn validate_with_identity(
         &self,
         token: &str,
@@ -263,6 +263,7 @@ mod tests {
             gid: 501,
             binary_path: Some(PathBuf::from(format!("/usr/local/bin/{basename}"))),
             code_sig_hash: Some([0u8; 32]),
+            code_directory_hash: None,
             identity: None,
         }
     }
@@ -274,6 +275,7 @@ mod tests {
             gid: 501,
             binary_path: Some(PathBuf::from(format!("/usr/local/bin/{basename}"))),
             code_sig_hash: Some([0u8; 32]),
+            code_directory_hash: None,
             identity: Some(PeerIdentity {
                 kind: PeerIdentityKind::MacAuditToken,
                 bytes,

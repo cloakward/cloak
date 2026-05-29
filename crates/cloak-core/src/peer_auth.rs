@@ -7,7 +7,8 @@
 //!   (vanishingly rare) failure.
 //! - `getpeereid(2)` for the peer UID/GID.
 //! - `proc_pidpath(3)` for the on-disk binary path.
-//! - SHA-256 over the binary file contents as the code-signature surrogate.
+//! - SHA-256 over the binary file contents plus the kernel-reported
+//!   CodeDirectory hash (`csops(CS_OPS_CDHASH)`) for the running peer.
 //! - `kqueue` + `EVFILT_PROC` + `NOTE_EXIT` for proactive peer-exit
 //!   notification (see [`PeerExitWatcher`]). The watcher is the gate
 //!   that closes A8 (PID-recycle attacks): on peer exit we revoke
@@ -17,8 +18,9 @@
 //! On Linux we use:
 //! - `SO_PEERCRED` (PID/UID/GID) and `/proc/<pid>/exe`.
 //! - `SO_PEERPIDFD` (Linux 6.5+) for a race-free kernel `pidfd` for
-//!   the peer, with a `pidfd_open(SO_PEERCRED.pid)` fallback on
-//!   older kernels. The pidfd's inode (`fstat(pidfd).st_ino`) is the
+//!   the peer. Cloak does not fall back to `pidfd_open(SO_PEERCRED.pid)`
+//!   for socket peers because that reintroduces a PID-reuse race. The
+//!   pidfd's inode (`fstat(pidfd).st_ino`) is the
 //!   non-recycling identity bytes we record on the [`PeerInfo`] —
 //!   it is stable for the life of the underlying task and the
 //!   kernel allocates a fresh inode for any later task that
@@ -28,9 +30,10 @@
 //!   means the referenced task has exited, which closes the
 //!   PID-recycle window the same way the macOS kqueue arm does.
 //!
-//! Full mach-o code-directory hashing via `SecStaticCodeCopyInformation`
-//! is deferred to v1.0 (see RFC 0001). For v0.1 the **on-disk basename
-//! allowlist** is the gate; the code-sig hash is recorded for audit.
+//! The file hash catches ordinary on-disk binary swaps; the macOS
+//! CodeDirectory hash binds the already-running peer process to the
+//! trusted signed/ad-hoc-signed binary and prevents path replacement
+//! between launch and handshake.
 //!
 //! All `unsafe` blocks here call libc / Mach directly. Each is
 //! documented with a `// SAFETY:` comment, per the convention in
@@ -53,17 +56,18 @@ pub struct PeerInfo {
     /// Resolved path to the peer's on-disk executable, if available.
     pub binary_path: Option<PathBuf>,
     /// Code-signature surrogate: SHA-256 of the on-disk binary, if it
-    /// could be read. v1.0 will replace this with a true code-directory
-    /// hash on macOS.
+    /// could be read.
     pub code_sig_hash: Option<[u8; 32]>,
+    /// macOS CodeDirectory hash for the running peer process, as reported
+    /// by the kernel. Present only on macOS.
+    pub code_directory_hash: Option<Vec<u8>>,
     /// Platform-specific non-recycling identity bytes for the peer.
     ///
     /// On macOS this is the 32-byte `audit_token_t` captured at
     /// `accept()` (its eighth `u32` is the kernel's "pidversion",
     /// which does not recycle when PIDs do). On Linux a pidfd-inode
-    /// identity is stored here. On platforms where no such identity
-    /// is available, this is `None` and session validation falls back
-    /// to the `(pid, basename, conn_id)` triple.
+    /// identity is stored here. The daemon refuses to issue new
+    /// sessions when no non-recycling identity is available.
     pub identity: Option<PeerIdentity>,
 }
 
@@ -104,21 +108,88 @@ pub struct PeerPolicy {
     pub allowed_basenames: Vec<String>,
     /// If true, peer UID must equal the daemon's UID.
     pub require_same_uid: bool,
+    /// Optional release-binary hash allowlist. When non-empty, the peer's
+    /// basename and SHA-256 file hash must match one of these entries.
+    pub allowed_binaries: Vec<TrustedPeerBinary>,
+}
+
+/// A trusted peer binary identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedPeerBinary {
+    /// Expected file basename.
+    pub basename: String,
+    /// SHA-256 of the trusted on-disk executable bytes.
+    pub sha256: [u8; 32],
+    /// macOS CodeDirectory hash for the trusted executable. Production
+    /// macOS policies require this in addition to the file hash so the
+    /// daemon authenticates the running code, not just the current path.
+    pub code_directory_hash: Option<Vec<u8>>,
 }
 
 impl PeerPolicy {
-    /// Default allowlist for v0.1 — `cloak` (CLI) and `cloak-mcp` (shim),
-    /// same UID required.
+    /// Default allowlist for tests and explicit embedding — `cloak` (CLI)
+    /// and `cloak-mcp` (shim), same UID required. Production daemon startup
+    /// uses [`Self::installed_v01`] so basename is not the only identity gate.
     pub fn default_v01() -> Self {
         Self {
-            allowed_basenames: vec![
-                "cloak".to_string(),
-                "cloak-mcp".to_string(),
-                "cloakd".to_string(),
-            ],
+            allowed_basenames: vec!["cloak".to_string(), "cloak-mcp".to_string()],
             require_same_uid: true,
+            allowed_binaries: Vec::new(),
         }
     }
+
+    /// Production allowlist derived from trusted release binaries installed
+    /// next to the running `cloakd`. This pins `cloak` / `cloak-mcp` peers to
+    /// the same build that installed the daemon instead of trusting any
+    /// same-UID file named `cloak`.
+    pub fn installed_v01() -> Result<Self> {
+        let mut policy = Self::default_v01();
+        let exe = std::env::current_exe()?;
+        let dir = exe
+            .parent()
+            .ok_or(Error::Other("cloakd executable has no parent directory"))?;
+        for basename in &policy.allowed_basenames {
+            let candidate = dir.join(basename);
+            if candidate.is_file() {
+                policy
+                    .allowed_binaries
+                    .push(trusted_binary_from_path(basename.clone(), &candidate)?);
+            }
+        }
+        if let Some(mcp_path) = std::env::var_os("CLOAK_MCP_BIN") {
+            let candidate = PathBuf::from(mcp_path);
+            if candidate.is_file() {
+                policy.allowed_binaries.push(trusted_binary_from_path(
+                    "cloak-mcp".to_string(),
+                    &candidate,
+                )?);
+            }
+        }
+        if !policy
+            .allowed_binaries
+            .iter()
+            .any(|b| b.basename == "cloak")
+        {
+            return Err(Error::Other(
+                "trusted cloak binary not found next to cloakd",
+            ));
+        }
+        Ok(policy)
+    }
+}
+
+fn trusted_binary_from_path(basename: String, path: &std::path::Path) -> Result<TrustedPeerBinary> {
+    let sha256 = hash_file(path)?;
+    #[cfg(target_os = "macos")]
+    let code_directory_hash = Some(macos::static_code_cdhash(path)?);
+    #[cfg(not(target_os = "macos"))]
+    let code_directory_hash = None;
+
+    Ok(TrustedPeerBinary {
+        basename,
+        sha256,
+        code_directory_hash,
+    })
 }
 
 /// Classification of a peer for routing purposes (CLI vs MCP).
@@ -164,7 +235,83 @@ pub fn check(peer: &PeerInfo, policy: &PeerPolicy, our_uid: u32) -> Result<()> {
     if !policy.allowed_basenames.iter().any(|b| b == &basename) {
         return Err(Error::PeerNotTrusted);
     }
+    if !policy.allowed_binaries.is_empty() {
+        let hash = peer.code_sig_hash.ok_or(Error::PeerNotTrusted)?;
+        let trusted = policy
+            .allowed_binaries
+            .iter()
+            .any(|b| trusted_binary_matches(peer, &basename, hash, b));
+        if !trusted {
+            return Err(Error::PeerNotTrusted);
+        }
+    }
+    let path = peer.binary_path.as_ref().ok_or(Error::PeerNotTrusted)?;
+    if !trusted_peer_path(path, our_uid) {
+        return Err(Error::PeerNotTrusted);
+    }
     Ok(())
+}
+
+fn trusted_binary_matches(
+    peer: &PeerInfo,
+    basename: &str,
+    sha256: [u8; 32],
+    trusted: &TrustedPeerBinary,
+) -> bool {
+    if trusted.basename != basename || trusted.sha256 != sha256 {
+        return false;
+    }
+    if let Some(expected_cdhash) = &trusted.code_directory_hash {
+        return peer
+            .code_directory_hash
+            .as_ref()
+            .is_some_and(|actual| actual == expected_cdhash);
+    }
+    true
+}
+
+#[cfg(unix)]
+fn trusted_peer_path(path: &std::path::Path, our_uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    if meta.uid() != 0 && meta.uid() != our_uid {
+        return false;
+    }
+    if meta.mode() & 0o022 != 0 {
+        return false;
+    }
+
+    let mut dir = match path.parent() {
+        Some(dir) => dir,
+        None => return false,
+    };
+    loop {
+        let Ok(meta) = std::fs::metadata(dir) else {
+            return false;
+        };
+        if meta.uid() != 0 && meta.uid() != our_uid {
+            return false;
+        }
+        if meta.mode() & 0o002 != 0 {
+            return false;
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent,
+            _ => break,
+        }
+    }
+    true
+}
+
+#[cfg(not(unix))]
+fn trusted_peer_path(_path: &std::path::Path, _our_uid: u32) -> bool {
+    true
 }
 
 // =========================================================================
@@ -178,6 +325,18 @@ pub fn check(peer: &PeerInfo, policy: &PeerPolicy, our_uid: u32) -> Result<()> {
 /// roll our own.
 #[cfg(unix)]
 pub fn peer_info_from_unix(stream: &tokio::net::UnixStream) -> Result<PeerInfo> {
+    use std::os::fd::AsRawFd;
+    let fd = stream.as_raw_fd();
+    peer_info_from_raw_fd(fd)
+}
+
+/// Resolve peer credentials from a connected blocking Unix stream.
+///
+/// This is used by the CLI before it sends any passphrase-bearing frame to
+/// `cloakd`. Socket path ownership proves only "same UID"; this verifies the
+/// connected server process itself.
+#[cfg(unix)]
+pub fn peer_info_from_std_unix(stream: &std::os::unix::net::UnixStream) -> Result<PeerInfo> {
     use std::os::fd::AsRawFd;
     let fd = stream.as_raw_fd();
     peer_info_from_raw_fd(fd)
@@ -204,12 +363,14 @@ fn peer_info_from_raw_fd(fd: std::os::fd::RawFd) -> Result<PeerInfo> {
     let (uid, gid) = macos::get_peer_eid(fd)?;
     let binary_path = macos::pid_to_path(pid).ok();
     let code_sig_hash = binary_path.as_ref().and_then(|p| hash_file(p).ok());
+    let code_directory_hash = macos::process_cdhash(pid).ok();
     Ok(PeerInfo {
         pid,
         uid,
         gid,
         binary_path,
         code_sig_hash,
+        code_directory_hash,
         identity,
     })
 }
@@ -225,6 +386,7 @@ fn peer_info_from_raw_fd(fd: std::os::fd::RawFd) -> Result<PeerInfo> {
         gid: cred.gid,
         binary_path,
         code_sig_hash,
+        code_directory_hash: None,
         identity: None,
     })
 }
@@ -237,9 +399,9 @@ fn peer_info_from_raw_fd(fd: std::os::fd::RawFd) -> Result<PeerInfo> {
 /// process-death watcher; when that fires the daemon revokes every
 /// session bound to the connection.
 ///
-/// Tries `SO_PEERPIDFD` (Linux 6.5+, race-free) first, then falls
-/// back to `pidfd_open(SO_PEERCRED.pid)` on older kernels. Mirrors
-/// the shape of the macOS path that consumes `LOCAL_PEERTOKEN`.
+/// Requires `SO_PEERPIDFD` (Linux 6.5+, race-free). We deliberately do
+/// not fall back to `pidfd_open(SO_PEERCRED.pid)` for socket peers
+/// because that can race PID reuse between `accept(2)` and the syscall.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn peer_info_with_pidfd_linux(
     stream: &tokio::net::UnixStream,
@@ -272,6 +434,7 @@ pub(crate) mod macos {
     use std::ffi::c_void;
     use std::os::fd::RawFd;
     use std::path::PathBuf;
+    use std::process::Command;
 
     use crate::error::{Error, Result};
 
@@ -286,9 +449,20 @@ pub(crate) mod macos {
     const PROC_PIDPATHINFO_MAXSIZE: usize = 4 * 1024;
     /// Number of bytes in an `audit_token_t` (8 × `u32`).
     pub const AUDIT_TOKEN_LEN: usize = 32;
+    /// `csops(2)` operation: get the running process CodeDirectory hash.
+    const CS_OPS_CDHASH: libc::c_uint = 5;
+    /// macOS exposes the canonical CDHash as the first 20 bytes of the
+    /// CodeDirectory hash, even when the underlying hash type is SHA-256.
+    const CDHASH_LEN: usize = 20;
 
     extern "C" {
         fn proc_pidpath(pid: libc::c_int, buffer: *mut c_void, buffersize: u32) -> libc::c_int;
+        fn csops(
+            pid: libc::pid_t,
+            ops: libc::c_uint,
+            useraddr: *mut c_void,
+            usersize: libc::size_t,
+        ) -> libc::c_int;
     }
 
     /// Resolve the peer's PID via `getsockopt(SOL_LOCAL, LOCAL_PEERPID)`.
@@ -399,6 +573,57 @@ pub(crate) mod macos {
         let s = String::from_utf8(buf)
             .map_err(|_| Error::Other("proc_pidpath returned non-utf8 path"))?;
         Ok(PathBuf::from(s))
+    }
+
+    /// Return the kernel CodeDirectory hash for a running process.
+    pub fn process_cdhash(pid: i32) -> Result<Vec<u8>> {
+        let mut buf = [0u8; CDHASH_LEN];
+        // SAFETY: `buf` is exclusive stack storage of `CDHASH_LEN` bytes,
+        // the size required by `CS_OPS_CDHASH`. `csops` copies bytes into
+        // the caller-provided buffer and does not retain the pointer.
+        let rc = unsafe {
+            csops(
+                pid as libc::pid_t,
+                CS_OPS_CDHASH,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len(),
+            )
+        };
+        if rc != 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        Ok(buf.to_vec())
+    }
+
+    /// Return the CodeDirectory hash for a trusted executable on disk.
+    ///
+    /// macOS ships `/usr/bin/codesign` in the base system. Parsing its
+    /// `CDHash=` line avoids linking Security.framework FFI into this hot
+    /// path while still using the platform verifier's canonical view of
+    /// signed or ad-hoc-signed Mach-O code.
+    pub fn static_code_cdhash(path: &std::path::Path) -> Result<Vec<u8>> {
+        let output = Command::new("/usr/bin/codesign")
+            .args(["-dv", "--verbose=4"])
+            .arg(path)
+            .output()?;
+        if !output.status.success() {
+            return Err(Error::Other("codesign could not read trusted binary"));
+        }
+
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        for line in text.lines() {
+            let Some(hex) = line.strip_prefix("CDHash=") else {
+                continue;
+            };
+            let bytes = hex::decode(hex.trim())
+                .map_err(|_| Error::Other("codesign returned invalid CDHash"))?;
+            if bytes.len() != CDHASH_LEN {
+                return Err(Error::Other("codesign returned unexpected CDHash size"));
+            }
+            return Ok(bytes);
+        }
+        Err(Error::Other("codesign output did not include CDHash"))
     }
 }
 
@@ -605,8 +830,8 @@ pub mod linux {
 
     /// `SO_PEERPIDFD` socket option (Linux 6.5+). Returns a kernel
     /// `pidfd` for the connected peer with no PID-recycle race.
-    /// Defined in `<asm-generic/socket.h>` as `0x4b`.
-    const SO_PEERPIDFD: libc::c_int = 0x4b;
+    /// Defined in `<asm-generic/socket.h>` as decimal 77 (`0x4d`).
+    const SO_PEERPIDFD: libc::c_int = 77;
 
     /// Linux peer credentials triple — PID/UID/GID at the moment the
     /// kernel snapshotted the connection.
@@ -738,14 +963,9 @@ pub mod linux {
         Ok(unsafe { OwnedFd::from_raw_fd(raw as RawFd) })
     }
 
-    /// Acquire a pidfd for the peer of a connected socket. Tries the
-    /// race-free `SO_PEERPIDFD` first, then falls back to
-    /// `pidfd_open(SO_PEERCRED.pid)` on older kernels.
-    pub fn acquire_peer_pidfd(fd: RawFd, peer_pid: i32) -> Result<OwnedFd> {
-        match get_peer_pidfd_via_sockopt(fd) {
-            Ok(p) => Ok(p),
-            Err(_) => pidfd_open_by_pid(peer_pid),
-        }
+    /// Acquire a race-free pidfd for the peer of a connected socket.
+    pub fn acquire_peer_pidfd(fd: RawFd, _peer_pid: i32) -> Result<OwnedFd> {
+        get_peer_pidfd_via_sockopt(fd)
     }
 
     /// `fstat(pidfd).st_ino`. The kernel allocates a unique inode for
@@ -866,74 +1086,195 @@ pub fn our_uid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+
+    fn test_uid() -> u32 {
+        our_uid()
+    }
+
+    fn other_uid() -> u32 {
+        let uid = test_uid();
+        if uid == 0 {
+            1
+        } else {
+            uid - 1
+        }
+    }
 
     fn mk(uid: u32, basename: &str) -> PeerInfo {
+        let dir = std::env::current_dir()
+            .expect("current dir")
+            .join("target")
+            .join("cloak-peer-auth-tests")
+            .join(format!("{}-{basename}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(basename);
+        let _ = std::fs::write(&path, b"test executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                dir.parent().expect("test root"),
+                std::fs::Permissions::from_mode(0o700),
+            );
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+        }
         PeerInfo {
             pid: 1234,
             uid,
             gid: uid,
-            binary_path: Some(PathBuf::from(format!("/usr/local/bin/{basename}"))),
+            binary_path: Some(path),
             code_sig_hash: Some([0u8; 32]),
+            code_directory_hash: None,
             identity: None,
         }
     }
 
     #[test]
     fn happy_path_cli() {
-        let peer = mk(501, "cloak");
+        let uid = test_uid();
+        let peer = mk(uid, "cloak");
         let pol = PeerPolicy::default_v01();
-        check(&peer, &pol, 501).unwrap();
+        check(&peer, &pol, uid).unwrap();
         assert_eq!(peer.kind(), PeerKind::Cli);
     }
 
     #[test]
     fn happy_path_mcp() {
-        let peer = mk(501, "cloak-mcp");
+        let uid = test_uid();
+        let peer = mk(uid, "cloak-mcp");
         let pol = PeerPolicy::default_v01();
-        check(&peer, &pol, 501).unwrap();
+        check(&peer, &pol, uid).unwrap();
         assert_eq!(peer.kind(), PeerKind::Mcp);
     }
 
     #[test]
     fn uid_mismatch_rejected() {
-        let peer = mk(0, "cloak");
+        let uid = test_uid();
+        let peer = mk(other_uid(), "cloak");
         let pol = PeerPolicy::default_v01();
         assert!(matches!(
-            check(&peer, &pol, 501),
+            check(&peer, &pol, uid),
             Err(Error::PeerNotTrusted)
         ));
     }
 
     #[test]
     fn basename_not_in_allowlist() {
-        let peer = mk(501, "evil-tool");
+        let uid = test_uid();
+        let peer = mk(uid, "evil-tool");
         let pol = PeerPolicy::default_v01();
         assert!(matches!(
-            check(&peer, &pol, 501),
+            check(&peer, &pol, uid),
             Err(Error::PeerNotTrusted)
         ));
     }
 
     #[test]
+    fn cloakd_not_in_default_peer_allowlist() {
+        let uid = test_uid();
+        let peer = mk(uid, "cloakd");
+        let pol = PeerPolicy::default_v01();
+        assert!(matches!(
+            check(&peer, &pol, uid),
+            Err(Error::PeerNotTrusted)
+        ));
+    }
+
+    #[test]
+    fn hash_allowlist_rejects_same_uid_fake_cloak() {
+        let uid = test_uid();
+        let peer = mk(uid, "cloak");
+        let pol = PeerPolicy {
+            allowed_basenames: vec!["cloak".into()],
+            require_same_uid: true,
+            allowed_binaries: vec![TrustedPeerBinary {
+                basename: "cloak".into(),
+                sha256: [7u8; 32],
+                code_directory_hash: None,
+            }],
+        };
+        assert!(matches!(
+            check(&peer, &pol, uid),
+            Err(Error::PeerNotTrusted)
+        ));
+    }
+
+    #[test]
+    fn hash_allowlist_accepts_matching_binary_hash() {
+        let uid = test_uid();
+        let peer = mk(uid, "cloak");
+        let pol = PeerPolicy {
+            allowed_basenames: vec!["cloak".into()],
+            require_same_uid: true,
+            allowed_binaries: vec![TrustedPeerBinary {
+                basename: "cloak".into(),
+                sha256: [0u8; 32],
+                code_directory_hash: None,
+            }],
+        };
+        check(&peer, &pol, uid).unwrap();
+    }
+
+    #[test]
+    fn code_directory_hash_must_match_when_policy_sets_it() {
+        let uid = test_uid();
+        let mut peer = mk(uid, "cloak");
+        peer.code_directory_hash = Some(vec![1, 2, 3]);
+        let pol = PeerPolicy {
+            allowed_basenames: vec!["cloak".into()],
+            require_same_uid: true,
+            allowed_binaries: vec![TrustedPeerBinary {
+                basename: "cloak".into(),
+                sha256: [0u8; 32],
+                code_directory_hash: Some(vec![9, 9, 9]),
+            }],
+        };
+        assert!(matches!(
+            check(&peer, &pol, uid),
+            Err(Error::PeerNotTrusted)
+        ));
+    }
+
+    #[test]
+    fn code_directory_hash_accepts_running_peer_match() {
+        let uid = test_uid();
+        let mut peer = mk(uid, "cloak");
+        peer.code_directory_hash = Some(vec![1, 2, 3]);
+        let pol = PeerPolicy {
+            allowed_basenames: vec!["cloak".into()],
+            require_same_uid: true,
+            allowed_binaries: vec![TrustedPeerBinary {
+                basename: "cloak".into(),
+                sha256: [0u8; 32],
+                code_directory_hash: Some(vec![1, 2, 3]),
+            }],
+        };
+        check(&peer, &pol, uid).unwrap();
+    }
+
+    #[test]
     fn missing_binary_path_rejected() {
-        let mut peer = mk(501, "cloak");
+        let uid = test_uid();
+        let mut peer = mk(uid, "cloak");
         peer.binary_path = None;
         let pol = PeerPolicy::default_v01();
         assert!(matches!(
-            check(&peer, &pol, 501),
+            check(&peer, &pol, uid),
             Err(Error::PeerNotTrusted)
         ));
     }
 
     #[test]
     fn require_same_uid_off_allows_other_uid() {
-        let peer = mk(0, "cloak");
+        let uid = test_uid();
+        let peer = mk(other_uid(), "cloak");
         let pol = PeerPolicy {
             allowed_basenames: vec!["cloak".into()],
             require_same_uid: false,
+            allowed_binaries: Vec::new(),
         };
-        check(&peer, &pol, 501).unwrap();
+        check(&peer, &pol, uid).unwrap();
     }
 
     #[test]
@@ -953,5 +1294,13 @@ mod tests {
         tok[28..32].copy_from_slice(&7u32.to_ne_bytes());
         assert_eq!(macos::audit_token_pid(&tok), 424242);
         assert_eq!(macos::audit_token_pidversion(&tok), 7);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn process_cdhash_matches_current_executable_cdhash() {
+        let process_cdhash = macos::process_cdhash(std::process::id() as i32).unwrap();
+        let static_cdhash = macos::static_code_cdhash(&std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(process_cdhash, static_cdhash);
     }
 }

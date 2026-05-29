@@ -7,6 +7,7 @@ on:
     branches: [main, beta]
   pull_request:
     branches: [main, beta]
+  workflow_call:
 
 concurrency:
   group: security-${{ github.workflow }}-${{ github.ref }}
@@ -23,10 +24,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: osv dependency scan
-        uses: google/osv-scanner-action/osv-scanner-action@v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2
         with:
           scan-args: |-
             --lockfile=Cargo.lock
@@ -36,23 +37,23 @@ jobs:
     name: security
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@aad518f59d88bae90133242f9ddac7f8bbc5dddf
 
       - name: Install bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.2.9"
 
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
         with:
           key: security
 
       - name: cargo deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@8f84122a46a358a27cb0625d85ad60ab436a1b87
         with:
           command: check
           arguments: --all-features
@@ -61,7 +62,7 @@ jobs:
       # We mirror the deny.toml justification there so both tools stay in
       # sync. See `.cargo/audit.toml` for the rationale.
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285
         with:
           tool: cargo-audit
 
@@ -79,7 +80,7 @@ jobs:
       # stack (libsodium + ring TLS) instead of pulling in a second.
       - name: aws-lc-rs forbidden in cloak-core dep tree
         run: |
-          if cargo tree -p cloak-core 2>&1 | grep -q 'aws-lc-rs'; then
+          if cargo tree --locked -p cloak-core 2>&1 | grep -q 'aws-lc-rs'; then
             echo "aws-lc-rs in cloak-core dep tree — forbidden, see PLAN.md R2"
             exit 1
           fi

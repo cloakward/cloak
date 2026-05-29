@@ -2,7 +2,7 @@
 
 ### Why does macOS say "Varun Menon will be running in your background"?
 
-That's me. Cloak v1.0 is signed with my individual Apple Developer ID, so any macOS surface that asks "do you trust this developer?" pulls my legal name from the cert. Apple Developer Program organization accounts can show a company or product-adjacent legal name, but they require a D-U-N-S number and a registered legal entity. Until Cloak has that organization account, the personal name on signed/notarized macOS downloads is expected.
+macOS is showing the Developer ID certificate subject, not a separate Cloak display name. Current signed downloads use an individual Apple Developer ID, so Gatekeeper or Background Items may show "Varun Menon". A product/company signer name requires an Apple organization account with a registered legal entity. Until Cloak has that account, the personal name on signed/notarized macOS downloads is expected.
 
 If you'd rather not see my name, build from source. Self-built binaries are ad-hoc-signed and have no developer identity attached.
 
@@ -14,18 +14,18 @@ By design. Same pattern as `sudo` or `ssh-keygen`: echo is off so a screen recor
 
 The passphrase is the cryptographic secret. It feeds Argon2id alongside the OS-keychain pepper to derive the master key. Touch ID is a presence check on top, not a key by itself.
 
-After the daemon is unlocked once per session, every reveal is gated by Touch ID with no passphrase prompt. A fully Touch-ID-gated unlock that trusts the macOS Keychain to hold the unlock material is a v1.0.1 opt-in.
+`cloak unlock` unlocks the daemon once per daemon start so MCP tools can operate without re-sending the passphrase. `cloak show` still opens the vault directly today, so it asks for the passphrase and then performs the Touch ID / polkit presence check. A fully Touch-ID-gated unlock that trusts the macOS Keychain to hold unlock material is still future work.
 
 ### Can I run it without trusting your binaries at all?
 
 Yes, two ways:
 
 1. **Build from source.** `cargo build --release --workspace` produces ad-hoc-signed binaries with no developer identity attached. Same code, your build.
-2. **Verify the signed releases.** Release tags built by the current workflow ship cosign keyless signatures and SLSA L3 provenance for tarballs, `sha256sums.txt`, and `.dxt` packages. Older preview `.dxt` assets may be unsigned; require matching `.sig` / `.cert` files and a SLSA subject before trusting them.
+2. **Verify the signed releases.** Release tags built by the current workflow ship cosign keyless signatures and SLSA L3 provenance for tarballs, `sha256sums.txt`, and macOS `.dxt` packages. Older preview `.dxt` assets may be unsigned; require matching `.sig` / `.cert` files and a SLSA subject before trusting them.
 
 ### Does Cloak phone home, telemetry, anything?
 
-No. cloakd makes zero outbound network calls except those your agent explicitly drives through `proxy_http` or `mint_token`, against the hosts your policy file allows. There is no analytics, no version-check ping, no usage reporting.
+No analytics, version-check pings, usage reporting, or Cloak-owned cloud calls. `cloakd` makes outbound network calls only when your agent invokes a networked tool. `proxy_authenticated_http_request` is constrained by your policy file's host allowlist. `mint_short_lived_token` is governed by tool/secret policy and currently calls AWS STS for the requested/default region; host allowlists do not apply to that STS call.
 
 ### What happens if I lose my passphrase?
 
@@ -59,4 +59,4 @@ brew uninstall cloak
 rm -rf ~/Library/Application\ Support/cloak  # or ~/.local/share/cloak on Linux
 ```
 
-`cloak panic` is also the right command if you suspect compromise: it tears everything down, zeroizes in-memory state, and removes the LaunchAgent.
+`cloak panic` is also the right command if you suspect compromise: it stops the daemon, revokes live sessions, and prints a rotation worksheet. It does not uninstall the LaunchAgent/systemd unit; use your package manager or remove the service file separately when uninstalling.

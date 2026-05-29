@@ -93,6 +93,8 @@ impl SqliteStore {
                 std::fs::create_dir_all(parent)?;
             }
         }
+        ensure_private_vault_file(path)?;
+        ensure_private_existing_sidecars(path)?;
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
@@ -106,6 +108,7 @@ impl SqliteStore {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // `STRICT` and `WITHOUT ROWID` flags are per-table, not pragmas.
+        chmod_vault_sidecars(path)?;
 
         let mut store = Self { conn };
         store.run_migrations()?;
@@ -402,6 +405,98 @@ impl SqliteStore {
     }
 }
 
+#[cfg(unix)]
+fn ensure_private_vault_file(path: &Path) -> Result<()> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            if !meta.is_file() {
+                return Err(Error::Other("vault path is not a regular file"));
+            }
+            let mode = meta.mode() & 0o777;
+            if mode & 0o077 != 0 {
+                return Err(Error::Other(
+                    "vault file is group/world accessible; chmod 600 before opening",
+                ));
+            }
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_vault_file(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn vault_sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(suffix);
+    std::path::PathBuf::from(p)
+}
+
+#[cfg(unix)]
+fn ensure_private_existing_sidecars(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    for suffix in ["-wal", "-shm"] {
+        let p = vault_sidecar_path(path, suffix);
+        match std::fs::metadata(&p) {
+            Ok(meta) => {
+                if !meta.is_file() {
+                    return Err(Error::Other("vault sidecar path is not a regular file"));
+                }
+                let mode = meta.mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    return Err(Error::Other(
+                        "vault sidecar is group/world accessible; chmod 600 before opening",
+                    ));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_existing_sidecars(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn chmod_vault_sidecars(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for suffix in ["", "-wal", "-shm"] {
+        let p = if suffix.is_empty() {
+            path.to_path_buf()
+        } else {
+            vault_sidecar_path(path, suffix)
+        };
+        if p.exists() {
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn chmod_vault_sidecars(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn row_to_secret(r: &rusqlite::Row<'_>) -> rusqlite::Result<SecretRow> {
     let nonce_v: Vec<u8> = r.get(7)?;
     let mut nonce = [0u8; 24];
@@ -451,6 +546,32 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert!(mode.eq_ignore_ascii_case("wal"), "got {mode}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_vault_file_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.cloak");
+        let _ = SqliteStore::open(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_world_readable_vault_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.cloak");
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = match SqliteStore::open(&path) {
+            Ok(_) => panic!("world-readable vault file should be rejected"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("group/world accessible"));
     }
 
     #[test]

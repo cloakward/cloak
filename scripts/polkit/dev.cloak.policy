@@ -12,9 +12,8 @@
   `CheckAuthorization` method with `AllowUserInteraction=true`, so the
   user is prompted by their session's polkit agent.
 
-  Default policy is `auth_self_keep`: the user must authenticate with
-  their own password, and the authorization is cached for the rest of
-  the session so a burst of `cloak show` calls only prompts once.
+  Default policy is `auth_self`: the user must authenticate with
+  their own password for each reveal authorization.
 
   To install distribution-wide:
     install -m 0644 dev.cloak.policy /usr/share/polkit-1/actions/
@@ -31,9 +30,9 @@
     <description>Reveal a secret stored in your Cloak vault</description>
     <message>Authentication is required to reveal a secret from your Cloak vault.</message>
     <defaults>
-      <allow_any>auth_self_keep</allow_any>
-      <allow_inactive>auth_self_keep</allow_inactive>
-      <allow_active>auth_self_keep</allow_active>
+      <allow_any>auth_self</allow_any>
+      <allow_inactive>auth_self</allow_inactive>
+      <allow_active>auth_self</allow_active>
     </defaults>
   </action>
 

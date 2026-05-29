@@ -1,6 +1,6 @@
 # docs/demo.tape
 # Render with: vhs docs/demo.tape
-# Outputs docs/cloak-demo.gif. Drop it in the README.
+# Outputs docs/cloak-demo.gif when maintainers want to regenerate a README demo.
 
 Output docs/cloak-demo.gif
 

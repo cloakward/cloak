@@ -56,6 +56,7 @@ fn open_policy() -> (PeerPolicy, String) {
         PeerPolicy {
             allowed_basenames: vec![basename.clone()],
             require_same_uid: true,
+            allowed_binaries: Vec::new(),
         },
         basename,
     )
@@ -381,6 +382,384 @@ async fn sign_request_does_not_leak_secret_into_response() {
 }
 
 #[tokio::test]
+async fn sign_request_audits_error_after_secret_read() {
+    let policy = r#"
+        [default]
+        action = "deny"
+        [[secrets]]
+        name = "BAD_AWS_KEY"
+        [secrets.tools.sign_request]
+        allow = true
+    "#;
+
+    let (_pol, basename) = open_policy();
+    let Some((socket, _dir, audit_path, shutdown, handle)) = spawn_daemon(basename, policy).await
+    else {
+        return;
+    };
+
+    let Some((mut stream, token)) =
+        connect_init_unlock_seed(&socket, &[("BAD_AWS_KEY", "not-a-sigv4-pair")]).await
+    else {
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        return;
+    };
+
+    let resp = rpc(
+        &mut stream,
+        Request {
+            id: "bad-sigv4".into(),
+            method: "tool.sign_request".into(),
+            params: json!({
+                "secret_name": "BAD_AWS_KEY",
+                "scheme": "aws-sigv4",
+                "method": "GET",
+                "url": "https://example.amazonaws.com/",
+                "aws_region": "us-east-1",
+                "aws_service": "execute-api",
+            }),
+            session_token: Some(token),
+        },
+    )
+    .await;
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("internal-error")
+    );
+
+    let audit_text = std::fs::read_to_string(&audit_path).expect("audit log");
+    assert!(
+        audit_text.lines().any(|line| {
+            line.contains(r#""tool":"tool.sign_request""#)
+                && line.contains(r#""result":"error""#)
+                && line.contains("scheme=aws-sigv4 sign-failed")
+        }),
+        "sign_request failure after secret read must be audited"
+    );
+    assert!(
+        !audit_text.contains("not-a-sigv4-pair"),
+        "audit log must not contain the malformed secret value"
+    );
+
+    drop(stream);
+    shutdown.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
+async fn sign_request_audits_missing_secret_after_policy_allow() {
+    let policy = r#"
+        [default]
+        action = "deny"
+        [tools.sign_request]
+        allow = true
+    "#;
+
+    let (_pol, basename) = open_policy();
+    let Some((socket, _dir, audit_path, shutdown, handle)) = spawn_daemon(basename, policy).await
+    else {
+        return;
+    };
+
+    let Some((mut stream, token)) =
+        connect_init_unlock_seed(&socket, &[("EXISTING_KEY", "sekret")]).await
+    else {
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        return;
+    };
+
+    let resp = rpc(
+        &mut stream,
+        Request {
+            id: "missing-sign-secret".into(),
+            method: "tool.sign_request".into(),
+            params: json!({
+                "secret_name": "MISSING_KEY",
+                "scheme": "hmac-sha256",
+                "method": "GET",
+                "url": "https://example.com/",
+            }),
+            session_token: Some(token),
+        },
+    )
+    .await;
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("secret-not-found")
+    );
+
+    let audit_text = std::fs::read_to_string(&audit_path).expect("audit log");
+    assert!(
+        audit_text.lines().any(|line| {
+            line.contains(r#""tool":"tool.sign_request""#)
+                && line.contains(r#""secret":"MISSING_KEY""#)
+                && line.contains(r#""result":"error""#)
+                && line.contains("vault-read-failed")
+        }),
+        "sign_request vault-read failure after policy allow must be audited"
+    );
+
+    drop(stream);
+    shutdown.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
+async fn proxy_http_audits_missing_secret_after_policy_allow() {
+    let policy = r#"
+        [default]
+        action = "deny"
+        [tools.proxy_authenticated_http_request]
+        allow = true
+    "#;
+
+    let (_pol, basename) = open_policy();
+    let Some((socket, _dir, audit_path, shutdown, handle)) = spawn_daemon(basename, policy).await
+    else {
+        return;
+    };
+
+    let Some((mut stream, token)) =
+        connect_init_unlock_seed(&socket, &[("EXISTING_KEY", "sekret")]).await
+    else {
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        return;
+    };
+
+    let resp = rpc(
+        &mut stream,
+        Request {
+            id: "missing-proxy-secret".into(),
+            method: "tool.proxy_http".into(),
+            params: json!({
+                "secret_name": "MISSING_KEY",
+                "method": "GET",
+                "url": "https://api.example.com/",
+                "auth_scheme": "bearer",
+            }),
+            session_token: Some(token),
+        },
+    )
+    .await;
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("secret-not-found")
+    );
+
+    let audit_text = std::fs::read_to_string(&audit_path).expect("audit log");
+    assert!(
+        audit_text.lines().any(|line| {
+            line.contains(r#""tool":"tool.proxy_http""#)
+                && line.contains(r#""secret":"MISSING_KEY""#)
+                && line.contains(r#""result":"error""#)
+                && line.contains("vault-read-failed")
+        }),
+        "proxy_http vault-read failure after policy allow must be audited"
+    );
+
+    drop(stream);
+    shutdown.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
+async fn mint_token_audits_missing_secret_after_policy_allow() {
+    let policy = r#"
+        [default]
+        action = "deny"
+        [tools.mint_short_lived_token]
+        allow = true
+    "#;
+
+    let (_pol, basename) = open_policy();
+    let Some((socket, _dir, audit_path, shutdown, handle)) = spawn_daemon(basename, policy).await
+    else {
+        return;
+    };
+
+    let Some((mut stream, token)) =
+        connect_init_unlock_seed(&socket, &[("EXISTING_KEY", "AKIA:secret")]).await
+    else {
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        return;
+    };
+
+    let resp = rpc(
+        &mut stream,
+        Request {
+            id: "missing-mint-secret".into(),
+            method: "tool.mint_token".into(),
+            params: json!({
+                "secret_name": "MISSING_KEY",
+                "kind": "aws-sts",
+                "ttl_seconds": 900,
+                "scope": {"region": "us-east-1"},
+            }),
+            session_token: Some(token),
+        },
+    )
+    .await;
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("secret-not-found")
+    );
+
+    let audit_text = std::fs::read_to_string(&audit_path).expect("audit log");
+    assert!(
+        audit_text.lines().any(|line| {
+            line.contains(r#""tool":"tool.mint_token""#)
+                && line.contains(r#""secret":"MISSING_KEY""#)
+                && line.contains(r#""result":"error""#)
+                && line.contains("vault-read-failed")
+        }),
+        "mint_token vault-read failure after policy allow must be audited"
+    );
+
+    drop(stream);
+    shutdown.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
+async fn sign_request_rejects_credential_bearing_inputs_before_vault_read() {
+    let policy = r#"
+        [default]
+        action = "deny"
+        [[secrets]]
+        name = "TEST_HMAC_KEY"
+        [secrets.tools.sign_request]
+        allow = true
+    "#;
+
+    let (_pol, basename) = open_policy();
+    let Some((socket, _dir, _audit, shutdown, handle)) = spawn_daemon(basename, policy).await
+    else {
+        return;
+    };
+
+    let Some((mut stream, token)) =
+        connect_init_unlock_seed(&socket, &[("TEST_HMAC_KEY", "sekret")]).await
+    else {
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        return;
+    };
+
+    let lock = rpc(
+        &mut stream,
+        Request {
+            id: "lock".into(),
+            method: "vault.lock".into(),
+            params: json!({}),
+            session_token: Some(token.clone()),
+        },
+    )
+    .await;
+    assert!(lock.error.is_none(), "lock: {:?}", lock.error);
+
+    for (id, params, expected) in [
+        (
+            "url-userinfo",
+            json!({
+                "secret_name": "TEST_HMAC_KEY",
+                "scheme": "hmac-sha256",
+                "method": "GET",
+                "url": "https://user:pass@example.com/foo",
+            }),
+            "credential",
+        ),
+        (
+            "url-query",
+            json!({
+                "secret_name": "TEST_HMAC_KEY",
+                "scheme": "hmac-sha256",
+                "method": "GET",
+                "url": "https://example.com/foo?clientSecret=pasted",
+            }),
+            "credential",
+        ),
+        (
+            "header",
+            json!({
+                "secret_name": "TEST_HMAC_KEY",
+                "scheme": "hmac-sha256",
+                "method": "GET",
+                "url": "https://example.com/foo",
+                "headers": {"X-AccessToken": "pasted"},
+            }),
+            "credential",
+        ),
+        (
+            "control-header",
+            json!({
+                "secret_name": "TEST_HMAC_KEY",
+                "scheme": "hmac-sha256",
+                "method": "GET",
+                "url": "https://example.com/foo",
+                "headers": {"Host": "attacker.example"},
+            }),
+            "request-control",
+        ),
+        (
+            "invalid-body",
+            json!({
+                "secret_name": "TEST_HMAC_KEY",
+                "scheme": "hmac-sha256",
+                "method": "POST",
+                "url": "https://example.com/foo",
+                "body_b64": "not-base64",
+            }),
+            "body_b64",
+        ),
+        (
+            "invalid-method",
+            json!({
+                "secret_name": "TEST_HMAC_KEY",
+                "scheme": "hmac-sha256",
+                "method": "TRACE",
+                "url": "https://example.com/foo",
+            }),
+            "http method",
+        ),
+        (
+            "unsupported-scheme",
+            json!({
+                "secret_name": "TEST_HMAC_KEY",
+                "scheme": "ed25519",
+                "method": "GET",
+                "url": "https://example.com/foo",
+            }),
+            "scheme",
+        ),
+    ] {
+        let resp = rpc(
+            &mut stream,
+            Request {
+                id: id.into(),
+                method: "tool.sign_request".into(),
+                params,
+                session_token: Some(token.clone()),
+            },
+        )
+        .await;
+        let err = resp.error.expect("credential input rejected");
+        assert_ne!(err.message, "vault locked");
+        assert!(
+            err.message.contains(expected),
+            "unexpected error for {id}: {err:?}"
+        );
+    }
+
+    drop(stream);
+    shutdown.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
 async fn proxy_http_disallowed_host_denied() {
     let policy = r#"
         [default]
@@ -424,6 +803,187 @@ async fn proxy_http_disallowed_host_denied() {
         resp.error.as_ref().map(|e| e.code.as_str()),
         Some("policy-denied")
     );
+
+    drop(stream);
+    shutdown.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
+async fn proxy_http_rejects_credential_bearing_urls_before_vault_read() {
+    let policy = r#"
+        [default]
+        action = "deny"
+        [[secrets]]
+        name = "API_KEY"
+        [secrets.tools.proxy_authenticated_http_request]
+        allowed_hosts = ["api.example.com"]
+    "#;
+
+    let (_pol, basename) = open_policy();
+    let Some((socket, _dir, _audit, shutdown, handle)) = spawn_daemon(basename, policy).await
+    else {
+        return;
+    };
+
+    let Some((mut stream, token)) =
+        connect_init_unlock_seed(&socket, &[("API_KEY", "tok-redacted")]).await
+    else {
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        return;
+    };
+
+    let lock = rpc(
+        &mut stream,
+        Request {
+            id: "lock".into(),
+            method: "vault.lock".into(),
+            params: json!({}),
+            session_token: Some(token.clone()),
+        },
+    )
+    .await;
+    assert!(lock.error.is_none(), "lock: {:?}", lock.error);
+
+    for (id, url) in [
+        ("url-userinfo", "https://user:pass@api.example.com/x"),
+        (
+            "url-query-snake",
+            "https://api.example.com/x?access_token=pasted",
+        ),
+        (
+            "url-query-camel",
+            "https://api.example.com/x?clientSecret=pasted",
+        ),
+    ] {
+        let resp = rpc(
+            &mut stream,
+            Request {
+                id: id.into(),
+                method: "tool.proxy_http".into(),
+                params: json!({
+                    "secret_name": "API_KEY",
+                    "method": "GET",
+                    "url": url,
+                    "auth_scheme": "bearer",
+                }),
+                session_token: Some(token.clone()),
+            },
+        )
+        .await;
+        let err = resp.error.expect("credential URL rejected");
+        assert_ne!(err.message, "vault locked");
+        assert!(
+            err.message.contains("credential"),
+            "unexpected error for {id}: {err:?}"
+        );
+    }
+
+    drop(stream);
+    shutdown.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
+async fn proxy_http_rejects_invalid_inputs_before_vault_read() {
+    let policy = r#"
+        [default]
+        action = "deny"
+        [[secrets]]
+        name = "API_KEY"
+        [secrets.tools.proxy_authenticated_http_request]
+        allowed_hosts = ["api.example.com"]
+    "#;
+
+    let (_pol, basename) = open_policy();
+    let Some((socket, _dir, _audit, shutdown, handle)) = spawn_daemon(basename, policy).await
+    else {
+        return;
+    };
+
+    let Some((mut stream, token)) =
+        connect_init_unlock_seed(&socket, &[("API_KEY", "tok-redacted")]).await
+    else {
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        return;
+    };
+
+    let lock = rpc(
+        &mut stream,
+        Request {
+            id: "lock".into(),
+            method: "vault.lock".into(),
+            params: json!({}),
+            session_token: Some(token.clone()),
+        },
+    )
+    .await;
+    assert!(lock.error.is_none(), "lock: {:?}", lock.error);
+
+    for (id, params, expected) in [
+        (
+            "control-header",
+            json!({
+                "secret_name": "API_KEY",
+                "method": "GET",
+                "url": "https://api.example.com/x",
+                "auth_scheme": "bearer",
+                "headers": {"Transfer-Encoding": "chunked"},
+            }),
+            "request-control",
+        ),
+        (
+            "control-auth-header",
+            json!({
+                "secret_name": "API_KEY",
+                "method": "GET",
+                "url": "https://api.example.com/x",
+                "auth_scheme": "header",
+                "header_name": "Host",
+            }),
+            "request-control",
+        ),
+        (
+            "invalid-body",
+            json!({
+                "secret_name": "API_KEY",
+                "method": "POST",
+                "url": "https://api.example.com/x",
+                "auth_scheme": "bearer",
+                "body_b64": "not-base64",
+            }),
+            "body_b64",
+        ),
+        (
+            "invalid-method",
+            json!({
+                "secret_name": "API_KEY",
+                "method": "TRACE",
+                "url": "https://api.example.com/x",
+                "auth_scheme": "bearer",
+            }),
+            "http method",
+        ),
+    ] {
+        let resp = rpc(
+            &mut stream,
+            Request {
+                id: id.into(),
+                method: "tool.proxy_http".into(),
+                params,
+                session_token: Some(token.clone()),
+            },
+        )
+        .await;
+        let err = resp.error.expect("invalid input rejected");
+        assert_ne!(err.message, "vault locked");
+        assert!(
+            err.message.contains(expected),
+            "unexpected error for {id}: {err:?}"
+        );
+    }
 
     drop(stream);
     shutdown.notify_waiters();
@@ -487,7 +1047,7 @@ async fn proxy_http_allowed_host_round_trip() {
     let _ = port; // referenced via URL below
 
     let (_pol, basename) = open_policy();
-    let Some((socket, _dir, _audit, shutdown, handle)) = spawn_daemon(basename, policy).await
+    let Some((socket, _dir, audit_path, shutdown, handle)) = spawn_daemon(basename, policy).await
     else {
         server_handle.abort();
         return;
@@ -513,7 +1073,7 @@ async fn proxy_http_allowed_host_round_trip() {
                 "method": "GET",
                 "url": url,
                 "auth_scheme": "bearer",
-                "headers": {"User-Agent": "cloak-test"},
+                "headers": {"User-Agent": "cloak-test", "X-AccessToken": "pasted"},
             }),
             session_token: Some(token),
         },
@@ -544,6 +1104,34 @@ async fn proxy_http_allowed_host_round_trip() {
     assert!(
         request_lc.contains("authorization: bearer secret-bearer-tok"),
         "expected auth header on the wire, got: {request_text}"
+    );
+    assert!(
+        !request_lc.contains("x-accesstoken: pasted"),
+        "credential-shaped caller header was not stripped: {request_text}"
+    );
+
+    let audit_text = std::fs::read_to_string(&audit_path).expect("audit log");
+    assert!(
+        !audit_text.contains("secret-bearer-tok"),
+        "audit log must not contain the bearer secret"
+    );
+    let proxy_results: Vec<&str> = audit_text
+        .lines()
+        .filter(|line| line.contains(r#""tool":"tool.proxy_http""#))
+        .filter_map(|line| {
+            if line.contains(r#""result":"started""#) {
+                Some("started")
+            } else if line.contains(r#""result":"ok""#) {
+                Some("ok")
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        proxy_results,
+        ["started", "ok"],
+        "proxy_http must audit started before the outbound side effect and ok after"
     );
 
     drop(stream);
@@ -753,6 +1341,69 @@ async fn mint_token_aws_sts_real_path_with_mock() {
     shutdown.notify_waiters();
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     set_test_sts_factory(None);
+}
+
+#[tokio::test]
+async fn mint_token_unsupported_kind_does_not_decrypt_parent_secret() {
+    let policy = r#"
+        [default]
+        action = "deny"
+        [[secrets]]
+        name = "APP_SECRET"
+        [secrets.tools.mint_short_lived_token]
+        allow = true
+    "#;
+
+    let (_pol, basename) = open_policy();
+    let Some((socket, _dir, _audit_path, shutdown, handle)) = spawn_daemon(basename, policy).await
+    else {
+        return;
+    };
+
+    let Some((mut stream, token)) =
+        connect_init_unlock_seed(&socket, &[("APP_SECRET", "parent-secret")]).await
+    else {
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        return;
+    };
+
+    let lock = rpc(
+        &mut stream,
+        Request {
+            id: "lock".into(),
+            method: "vault.lock".into(),
+            params: json!({}),
+            session_token: Some(token.clone()),
+        },
+    )
+    .await;
+    assert!(lock.error.is_none(), "lock: {:?}", lock.error);
+
+    let resp = rpc(
+        &mut stream,
+        Request {
+            id: "unsupported".into(),
+            method: "tool.mint_token".into(),
+            params: json!({
+                "secret_name": "APP_SECRET",
+                "kind": "github-app",
+                "ttl_seconds": 900,
+            }),
+            session_token: Some(token),
+        },
+    )
+    .await;
+    let err = resp.error.expect("unsupported kind rejected");
+    assert_ne!(err.message, "vault locked");
+    assert!(
+        err.message.contains("not supported"),
+        "unexpected error: {err:?}"
+    );
+
+    drop(stream);
+    shutdown.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 }
 
 /// Property-style: every privileged tool that touches a secret must NOT

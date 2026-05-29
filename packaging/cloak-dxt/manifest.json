@@ -1,22 +1,26 @@
 {
-  "mcpb_version": "0.1",
+  "manifest_version": "0.3",
   "name": "cloak",
   "display_name": "Cloak",
-  "version": "1.0.1-rc1",
-  "description": "MCP-native secrets vault. The model never sees plaintext secrets.",
-  "long_description": "Cloak replaces the anti-pattern of pasting API keys into prompts with a hardened local daemon that never exposes raw secret material to the model. Agents call action-shaped MCP tools (sign_request, proxy_authenticated_http_request, mint_short_lived_token) and the daemon performs the privileged operation on the agent's behalf. Reveal is a deliberate biometric-gated CLI act, not a tool call.\n\nThis extension bundles the cloak-mcp shim. It requires the cloak CLI + cloakd daemon to be installed separately (see https://cloakward.dev/install). On first activation the extension runs `cloak setup` which walks you through vault init, daemon launch, and biometric/passphrase prompts via your OS-native dialog flow — no terminal commands required.",
+  "version": "1.0.2-rc1",
+  "description": "MCP-native secrets vault. Raw stored secrets are not returned as MCP tool output.",
+  "long_description": "Cloak replaces the anti-pattern of pasting API keys into prompts with a hardened local daemon that never returns raw stored secret values to the model. Agents call action-shaped MCP tools (sign_request, proxy_authenticated_http_request, mint_short_lived_token) and the daemon performs the privileged operation on the agent's behalf. Derived tokens and proxied upstream responses are still visible to the MCP client by design. Reveal is a deliberate user-presence-gated CLI act, not a tool call.\n\nThis extension bundles the cloak-mcp shim. It requires the cloak CLI + cloakd daemon to be installed and set up separately (see https://github.com/cloakward/cloak#install). Run `cloak setup` in a terminal first so Cloak can safely display and verify the one-time recovery seed, then run `cloak daemon start` and `cloak unlock`. Restart Claude Desktop after the daemon is running and unlocked.",
   "author": {
     "name": "cloakward",
-    "url": "https://cloakward.dev"
+    "url": "https://github.com/cloakward"
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/cloakward/cloak"
   },
-  "homepage": "https://cloakward.dev",
+  "homepage": "https://github.com/cloakward/cloak",
   "documentation": "https://github.com/cloakward/cloak#readme",
   "support": "https://github.com/cloakward/cloak/issues",
   "license": "Apache-2.0",
+  "privacy_policies": [
+    "https://github.com/cloakward/cloak/blob/v1.0.2-rc1/docs/PRIVACY.md",
+    "https://aws.amazon.com/privacy/"
+  ],
   "keywords": [
     "mcp",
     "secrets",
@@ -30,15 +34,12 @@
     "entry_point": "server/binaries/cloak-mcp",
     "mcp_config": {
       "command": "${__dirname}/server/binaries/cloak-mcp",
-      "args": [],
+      "args": ["--dxt-first-run", "${__dirname}/server/first-run.js"],
       "env": {
         "CLOAK_DXT_FIRST_RUN": "${__dirname}/server/first-run.js"
       },
-      "platforms": {
+      "platform_overrides": {
         "darwin": {
-          "command": "${__dirname}/server/binaries/cloak-mcp"
-        },
-        "linux": {
           "command": "${__dirname}/server/binaries/cloak-mcp"
         }
       }
@@ -59,11 +60,11 @@
     },
     {
       "name": "proxy_authenticated_http_request",
-      "description": "Perform an authenticated HTTP request via the daemon, attaching a stored secret as bearer / basic / custom-header / query-param auth. Allowlisted hosts only. Returns the upstream response; the secret never leaves the daemon."
+      "description": "Perform an authenticated HTTPS request via the daemon, attaching a stored secret as bearer, basic, or custom-header auth to the outbound request. Allowlisted hosts only. Returns status, redacted headers, and base64 body; query-string auth is disabled. The stored secret is not returned to the MCP client."
     },
     {
       "name": "mint_short_lived_token",
-      "description": "Mint a short-lived derived token from a long-lived parent secret (AWS STS session credentials, GitHub App installation token, scoped GitLab PAT). Returns the derived token and its expiry. The long-lived parent never leaves the daemon."
+      "description": "Mint a short-lived derived token from a long-lived parent secret. AWS STS is implemented; GitHub App and GitLab PAT kinds are reserved and currently return not-supported. Returns the derived token and its expiry. The long-lived parent never leaves the daemon."
     },
     {
       "name": "query_audit",
@@ -73,6 +74,6 @@
   "tools_generated": false,
   "compatibility": {
     "claude_desktop": ">=0.10.0",
-    "platforms": ["darwin", "linux"]
+    "platforms": ["darwin"]
   }
 }

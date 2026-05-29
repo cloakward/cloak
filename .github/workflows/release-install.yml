@@ -9,6 +9,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -23,29 +24,48 @@ jobs:
           - os: macos-26
             target: aarch64-apple-darwin
             platform: macos
+            dxt_platform: macos-arm64
             skip_mcp: "0"
           - os: macos-26-intel
             target: x86_64-apple-darwin
             platform: macos
+            dxt_platform: macos-x64
             skip_mcp: "0"
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             platform: linux
+            dxt_platform: ""
             skip_mcp: "0"
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             platform: linux
+            dxt_platform: ""
             skip_mcp: "1"
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux
+            dxt_platform: ""
             skip_mcp: "1"
 
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Validate release tag input
+        env:
+          REF_NAME: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::ref must be a SemVer release tag like v1.2.3 or v1.2.3-rc1"
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/tags/${REF_NAME}" ]; then
+            echo "::error::release-install must run from the same tag ref. Use: gh workflow run release-install.yml --ref ${REF_NAME} -f ref=${REF_NAME}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Install libsodium (macOS)
         if: matrix.platform == 'macos'
@@ -57,17 +77,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsodium-dev pkg-config
 
-      - name: Download and extract release tarball
-        id: release
+      - name: Download release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.ref }}
           TARGET: ${{ matrix.target }}
+          DXT_PLATFORM: ${{ matrix.dxt_platform }}
+          SKIP_MCP: ${{ matrix.skip_mcp }}
         shell: bash
         run: |
           set -euo pipefail
           version="${TAG#v}"
           stage="cloak-${version}-${TARGET}"
+          dxt="Cloak-${version}-${DXT_PLATFORM}.dxt"
           mkdir -p "${RUNNER_TEMP}/release"
           gh release download "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
@@ -78,6 +100,150 @@ jobs:
             --pattern "sha256sums.txt*" \
             --dir "${RUNNER_TEMP}/release"
           cd "${RUNNER_TEMP}/release"
+          for f in \
+            "${stage}.tar.gz" \
+            "${stage}.tar.gz.sig" \
+            "${stage}.tar.gz.cert" \
+            "sha256sums.txt" \
+            "sha256sums.txt.sig" \
+            "sha256sums.txt.cert" \
+          ; do
+            test -f "$f" || { echo "::error::missing release asset ${f}"; exit 1; }
+          done
+          if [ -n "$DXT_PLATFORM" ]; then
+            gh release download "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "${dxt}*" \
+              --dir "${RUNNER_TEMP}/release"
+            for f in "${dxt}" "${dxt}.sig" "${dxt}.cert"; do
+              test -f "$f" || { echo "::error::missing release asset ${f}"; exit 1; }
+            done
+          fi
+
+      - name: Verify release asset inventory is exactly expected
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          {
+            for target in \
+              aarch64-apple-darwin \
+              x86_64-apple-darwin \
+              x86_64-unknown-linux-gnu \
+              x86_64-unknown-linux-musl \
+              aarch64-unknown-linux-gnu
+            do
+              printf 'cloak-%s-%s.tar.gz\n' "$version" "$target"
+              printf 'cloak-%s-%s.tar.gz.sig\n' "$version" "$target"
+              printf 'cloak-%s-%s.tar.gz.cert\n' "$version" "$target"
+            done
+            for platform in macos-arm64 macos-x64; do
+              printf 'Cloak-%s-%s.dxt\n' "$version" "$platform"
+              printf 'Cloak-%s-%s.dxt.sig\n' "$version" "$platform"
+              printf 'Cloak-%s-%s.dxt.cert\n' "$version" "$platform"
+            done
+            printf '%s\n' \
+              sha256sums.txt \
+              sha256sums.txt.sig \
+              sha256sums.txt.cert \
+              multiple.intoto.jsonl
+          } | sort > "$tmp/expected-assets.txt"
+          jq -r '.assets[].name' <<<"$release_json" | sort > "$tmp/actual-assets.txt"
+          if ! diff -u "$tmp/expected-assets.txt" "$tmp/actual-assets.txt"; then
+            echo "::error::release ${TAG} asset inventory includes missing or unexpected assets"
+            exit 1
+          fi
+
+      - name: Write release-install evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          tag_sha="$(git rev-parse HEAD)"
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          release_id="$(jq -r '.id' <<<"$release_json")"
+          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+            echo "::error::could not resolve release id for ${TAG}"
+            exit 1
+          fi
+          sha256sums_sha256="$(openssl dgst -sha256 -r "${RUNNER_TEMP}/release/sha256sums.txt" | awk '{print $1}')"
+          assets="$(jq -c '[.assets[] | {name, id:(.id|tostring), size:(.size|tostring)}] | sort_by(.name)' <<<"$release_json")"
+          jq -n \
+            --arg tag "$TAG" \
+            --arg target "$TARGET" \
+            --arg tag_sha "$tag_sha" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg release_id "$release_id" \
+            --arg sha256sums_sha256 "$sha256sums_sha256" \
+            --argjson assets "$assets" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            '{tag:$tag, target:$target, tag_sha:$tag_sha, repository:$repository, release_id:$release_id, sha256sums_sha256:$sha256sums_sha256, assets:$assets, run_id:$run_id, run_attempt:$run_attempt, workflow_ref:$workflow_ref, captured_at: (now | todateiso8601)}' \
+            > "evidence/release-install-${TAG}-${TARGET}.json"
+
+      - name: Upload release-install evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-install-evidence-${{ matrix.target }}
+          path: evidence/release-install-${{ inputs.ref }}-${{ matrix.target }}.json
+          if-no-files-found: error
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: Verify cosign signatures
+        env:
+          TAG: ${{ inputs.ref }}
+          TARGET: ${{ matrix.target }}
+          DXT_PLATFORM: ${{ matrix.dxt_platform }}
+          SKIP_MCP: ${{ matrix.skip_mcp }}
+          COSIGN_EXPERIMENTAL: "1"
+          EXPECTED_ISSUER: "https://token.actions.githubusercontent.com"
+          EXPECTED_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ inputs.ref }}"
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          stage="cloak-${version}-${TARGET}"
+          cd "${RUNNER_TEMP}/release"
+          files=("${stage}.tar.gz" "sha256sums.txt")
+          if [ -n "$DXT_PLATFORM" ]; then
+            files+=("Cloak-${version}-${DXT_PLATFORM}.dxt")
+          fi
+          for f in "${files[@]}"; do
+            cosign verify-blob \
+              --certificate "${f}.cert" \
+              --signature "${f}.sig" \
+              --certificate-oidc-issuer "$EXPECTED_ISSUER" \
+              --certificate-identity "$EXPECTED_IDENTITY" \
+              "$f"
+          done
+
+      - name: Verify checksum, tar path safety, and extract
+        id: release
+        env:
+          TAG: ${{ inputs.ref }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          stage="cloak-${version}-${TARGET}"
+          cd "${RUNNER_TEMP}/release"
+
           expected="$(awk -v f="${stage}.tar.gz" '$2 == f { print $1 }' sha256sums.txt)"
           if [ -z "$expected" ]; then
             echo "::error::sha256sums.txt has no entry for ${stage}.tar.gz"
@@ -90,35 +256,37 @@ jobs:
             echo "actual:   $actual"
             exit 1
           fi
+
+          tar -tzf "${stage}.tar.gz" > tar.list
+          entries=0
+          while IFS= read -r entry; do
+            entries=$((entries + 1))
+            case "$entry" in
+              ""|/*|../*|*/../*|*/..|..)
+                echo "::error::unsafe tar path in ${stage}.tar.gz: ${entry}"
+                exit 1
+                ;;
+            esac
+            case "$entry" in
+              "${stage}"|"${stage}/"|"${stage}/"*) ;;
+              *)
+                echo "::error::unexpected top-level tar path in ${stage}.tar.gz: ${entry}"
+                exit 1
+                ;;
+            esac
+          done < tar.list
+          if [ "$entries" -eq 0 ]; then
+            echo "::error::tarball ${stage}.tar.gz is empty"
+            exit 1
+          fi
+
+          if ! tar -tvzf "${stage}.tar.gz" | awk '$1 ~ /^[lh]/ { print; bad=1 } END { exit bad }'; then
+            echo "::error::tarball ${stage}.tar.gz contains symlink or hardlink entries; refusing extraction"
+            exit 1
+          fi
+
           tar -C "${RUNNER_TEMP}/release" -xzf "${RUNNER_TEMP}/release/${stage}.tar.gz"
           echo "bin_dir=${RUNNER_TEMP}/release/${stage}/bin" >> "$GITHUB_OUTPUT"
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-        with:
-          cosign-release: "v2.4.1"
-
-      - name: Verify cosign signatures
-        env:
-          TAG: ${{ inputs.ref }}
-          TARGET: ${{ matrix.target }}
-          COSIGN_EXPERIMENTAL: "1"
-          EXPECTED_ISSUER: "https://token.actions.githubusercontent.com"
-          EXPECTED_IDENTITY_REGEX: "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ inputs.ref }}$"
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${TAG#v}"
-          stage="cloak-${version}-${TARGET}"
-          cd "${RUNNER_TEMP}/release"
-          for f in "${stage}.tar.gz" "sha256sums.txt"; do
-            cosign verify-blob \
-              --certificate "${f}.cert" \
-              --signature "${f}.sig" \
-              --certificate-oidc-issuer "$EXPECTED_ISSUER" \
-              --certificate-identity-regexp "$EXPECTED_IDENTITY_REGEX" \
-              "$f"
-          done
 
       - name: Verify macOS code signatures
         if: matrix.platform == 'macos'
@@ -132,6 +300,42 @@ jobs:
             codesign --verify --strict --verbose=2 "$bin"
           done
 
+      - name: Verify Claude Desktop DXT package
+        if: matrix.dxt_platform != ''
+        env:
+          TAG: ${{ inputs.ref }}
+          DXT_PLATFORM: ${{ matrix.dxt_platform }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          dxt="${RUNNER_TEMP}/release/Cloak-${version}-${DXT_PLATFORM}.dxt"
+          case "$DXT_PLATFORM" in
+            macos-*) expected_os="darwin" ;;
+            linux-*) expected_os="linux" ;;
+            *) echo "::error::unknown DXT platform ${DXT_PLATFORM}"; exit 1 ;;
+          esac
+          unzip -t "$dxt"
+          manifest="$(mktemp)"
+          unzip -p "$dxt" manifest.json > "$manifest"
+          privacy_url="https://github.com/cloakward/cloak/blob/${TAG}/docs/PRIVACY.md"
+          jq -e --arg os "$expected_os" --arg privacy_url "$privacy_url" '
+            .manifest_version == "0.3"
+            and (.mcpb_version | not)
+            and .name == "cloak"
+            and .display_name == "Cloak"
+            and (.privacy_policies | index($privacy_url) != null)
+            and (.privacy_policies | index("https://aws.amazon.com/privacy/") != null)
+            and .server.entry_point == "server/binaries/cloak-mcp"
+            and (.server.mcp_config.platforms | not)
+            and .compatibility.platforms == [$os]
+            and (.server.mcp_config.platform_overrides | keys == [$os])
+            and .server.mcp_config.platform_overrides[$os].command == "${__dirname}/server/binaries/cloak-mcp"
+          ' "$manifest"
+          unzip -p "$dxt" server/binaries/cloak-mcp > "${RUNNER_TEMP}/release/dxt-cloak-mcp"
+          chmod 755 "${RUNNER_TEMP}/release/dxt-cloak-mcp"
+          "${RUNNER_TEMP}/release/dxt-cloak-mcp" --version
+
       - name: Check release binary versions
         env:
           BIN_DIR: ${{ steps.release.outputs.bin_dir }}
@@ -141,9 +345,159 @@ jobs:
           "$BIN_DIR/cloak" --version
           "$BIN_DIR/cloakd" --version
 
+      - name: Verify release binaries do not dynamically link libsodium
+        env:
+          BIN_DIR: ${{ steps.release.outputs.bin_dir }}
+          PLATFORM: ${{ matrix.platform }}
+          SKIP_MCP: ${{ matrix.skip_mcp }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bins=("$BIN_DIR/cloak" "$BIN_DIR/cloakd")
+          if [ "$SKIP_MCP" != "1" ]; then
+            bins+=("$BIN_DIR/cloak-mcp")
+          fi
+          for bin in "${bins[@]}"; do
+            test -x "$bin"
+            if [ "$PLATFORM" = "macos" ]; then
+              if otool -L "$bin" | grep -i libsodium; then
+                echo "::error::${bin} dynamically links libsodium; release binaries must use the pinned static source build"
+                exit 1
+              fi
+            else
+              if ldd "$bin" 2>/dev/null | grep -i libsodium; then
+                echo "::error::${bin} dynamically links libsodium; release binaries must use the pinned static source build"
+                exit 1
+              fi
+            fi
+          done
+
       - name: Run release artifact smoke test
         env:
           CLOAK_SMOKE_BIN_DIR: ${{ steps.release.outputs.bin_dir }}
           CLOAK_SMOKE_SKIP_MCP: ${{ matrix.skip_mcp }}
           CLOAK_SMOKE_STRICT_MCP: "1"
         run: ./scripts/smoke-test.sh
+
+  mark-verified:
+    name: mark release install verified
+    needs: release-install
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+
+      - name: Download release-install evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: evidence
+          pattern: release-install-evidence-*
+          merge-multiple: true
+
+      - name: Write verification marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p marker
+          tag_sha="$(git rev-list -n 1 "$TAG")"
+          test -n "$tag_sha" || { echo "::error::could not resolve ${TAG}"; exit 1; }
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          release_id="$(jq -r '.id' <<<"$release_json")"
+          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+            echo "::error::could not resolve release id for ${TAG}"
+            exit 1
+          fi
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          version="${TAG#v}"
+          {
+            for target in \
+              aarch64-apple-darwin \
+              x86_64-apple-darwin \
+              x86_64-unknown-linux-gnu \
+              x86_64-unknown-linux-musl \
+              aarch64-unknown-linux-gnu
+            do
+              printf 'cloak-%s-%s.tar.gz\n' "$version" "$target"
+              printf 'cloak-%s-%s.tar.gz.sig\n' "$version" "$target"
+              printf 'cloak-%s-%s.tar.gz.cert\n' "$version" "$target"
+            done
+            for platform in macos-arm64 macos-x64; do
+              printf 'Cloak-%s-%s.dxt\n' "$version" "$platform"
+              printf 'Cloak-%s-%s.dxt.sig\n' "$version" "$platform"
+              printf 'Cloak-%s-%s.dxt.cert\n' "$version" "$platform"
+            done
+            printf '%s\n' \
+              sha256sums.txt \
+              sha256sums.txt.sig \
+              sha256sums.txt.cert \
+              multiple.intoto.jsonl
+          } | sort > "$tmp/expected-assets.txt"
+          jq -r '.assets[].name' <<<"$release_json" | sort > "$tmp/actual-assets.txt"
+          if ! diff -u "$tmp/expected-assets.txt" "$tmp/actual-assets.txt"; then
+            echo "::error::release ${TAG} asset inventory includes missing or unexpected assets"
+            exit 1
+          fi
+          sha_asset_id="$(jq -r '.assets[] | select(.name == "sha256sums.txt") | .id' <<<"$release_json" | head -n1)"
+          if [ -z "$sha_asset_id" ] || [ "$sha_asset_id" = "null" ]; then
+            echo "::error::release ${TAG} is missing sha256sums.txt"
+            exit 1
+          fi
+          gh api \
+            -H "Accept: application/octet-stream" \
+            "repos/${GITHUB_REPOSITORY}/releases/assets/${sha_asset_id}" \
+            > marker/sha256sums.txt
+          sha256sums_sha256="$(sha256sum marker/sha256sums.txt | awk '{print $1}')"
+          assets="$(jq -c '[.assets[] | {name, id:(.id|tostring), size:(.size|tostring)}] | sort_by(.name)' <<<"$release_json")"
+          expected_targets=(
+            aarch64-apple-darwin
+            x86_64-apple-darwin
+            x86_64-unknown-linux-gnu
+            x86_64-unknown-linux-musl
+            aarch64-unknown-linux-gnu
+          )
+          for target in "${expected_targets[@]}"; do
+            evidence_file="$(find evidence -type f -name "release-install-${TAG}-${target}.json" -print -quit)"
+            if [ -z "$evidence_file" ]; then
+              echo "::error::missing release-install evidence for ${target}"
+              exit 1
+            fi
+            if ! jq -e \
+              --arg tag "$TAG" \
+              --arg target "$target" \
+              --arg tag_sha "$tag_sha" \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg release_id "$release_id" \
+              --arg sha256sums_sha256 "$sha256sums_sha256" \
+              --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+              --argjson assets "$assets" \
+              '.tag == $tag and .target == $target and .tag_sha == $tag_sha and .repository == $repository and .release_id == $release_id and .sha256sums_sha256 == $sha256sums_sha256 and .workflow_ref == $workflow_ref and .assets == $assets' \
+              "$evidence_file" >/dev/null
+            then
+              echo "::error::release-install evidence ${evidence_file} does not match the current release assets for ${TAG}"
+              cat "$evidence_file"
+              exit 1
+            fi
+          done
+          jq -n \
+            --arg tag "$TAG" \
+            --arg tag_sha "$tag_sha" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg release_id "$release_id" \
+            --arg sha256sums_sha256 "$sha256sums_sha256" \
+            --argjson assets "$assets" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            '{tag:$tag, tag_sha:$tag_sha, repository:$repository, release_id:$release_id, sha256sums_sha256:$sha256sums_sha256, assets:$assets, run_id:$run_id, run_attempt:$run_attempt, workflow_ref:$workflow_ref, verified_at: (now | todateiso8601)}' \
+            > "marker/release-install-${TAG}.json"
+
+      - name: Upload verification marker
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-install-${{ inputs.ref }}
+          path: marker/release-install-${{ inputs.ref }}.json
+          if-no-files-found: error

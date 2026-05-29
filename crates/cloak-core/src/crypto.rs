@@ -496,6 +496,7 @@ pub mod kdf {
             t_cost: t_cost.ok_or(Error::VaultFormat("phc: missing t"))?,
             p_cost: p_cost.ok_or(Error::VaultFormat("phc: missing p"))?,
         };
+        validate_params(&params)?;
         let salt_v = B64
             .decode(salt_b64)
             .map_err(|_| Error::VaultFormat("phc: bad b64 salt"))?;
@@ -505,6 +506,26 @@ pub mod kdf {
         let mut salt = [0u8; SALT_LEN];
         salt.copy_from_slice(&salt_v);
         Ok((params, salt))
+    }
+
+    fn validate_params(p: &KdfParams) -> Result<()> {
+        const MIN_MEM_KIB: u32 = 8 * 1024;
+        const MAX_MEM_KIB: u32 = 1024 * 1024;
+        const MIN_T_COST: u32 = 1;
+        const MAX_T_COST: u32 = 16;
+        const MIN_P_COST: u32 = 1;
+        const MAX_P_COST: u32 = 16;
+
+        if !(MIN_MEM_KIB..=MAX_MEM_KIB).contains(&p.mem_kib) {
+            return Err(Error::VaultFormat("phc: m out of supported bounds"));
+        }
+        if !(MIN_T_COST..=MAX_T_COST).contains(&p.t_cost) {
+            return Err(Error::VaultFormat("phc: t out of supported bounds"));
+        }
+        if !(MIN_P_COST..=MAX_P_COST).contains(&p.p_cost) {
+            return Err(Error::VaultFormat("phc: p out of supported bounds"));
+        }
+        Ok(())
     }
 }
 

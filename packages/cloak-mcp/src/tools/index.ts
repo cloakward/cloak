@@ -5,6 +5,7 @@ import { signRequest } from "./sign_request.ts";
 import { proxyAuthenticatedHttpRequest } from "./proxy_authenticated_http_request.ts";
 import { mintShortLivedToken } from "./mint_short_lived_token.ts";
 import { queryAudit } from "./query_audit.ts";
+import { redactText } from "./validation.ts";
 
 export const tools: ReadonlyArray<CloakTool> = [
   listSecretNames,
@@ -30,7 +31,7 @@ export async function dispatchTool(name: string, args: unknown): Promise<ToolRes
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
-      content: [{ type: "text", text: `error: ${msg}` }],
+      content: [{ type: "text", text: `error: ${redactText(msg)}` }],
       isError: true,
     };
   }

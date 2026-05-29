@@ -18,11 +18,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::hash::sha256;
 use crate::error::{Error, Result};
+use crate::keychain::{AuditHead, AuditHeadAnchor};
 
 /// Outcome recorded for an audit entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditResult {
+    /// The operation passed policy/rate-limit checks and is about to
+    /// perform an external side effect. A final `ok` or `error` entry
+    /// should follow when the operation returns.
+    Started,
     /// The operation was allowed and succeeded.
     Ok,
     /// The operation was denied by policy.
@@ -101,6 +106,7 @@ pub struct AuditFilter {
 
 /// All-zero hex string used as the genesis `prev_hash`.
 const GENESIS_PREV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const GENESIS_HASH: [u8; 32] = [0u8; 32];
 
 /// Append-only hash-chained audit log.
 pub struct AuditLog {
@@ -123,6 +129,7 @@ impl AuditLog {
         let _ = open_appendable(path)?;
 
         let (last_seq, last_hash) = recover_tail(path)?;
+        validate_or_seed_audit_head(head_from_parts(last_seq, &last_hash)?, true)?;
         Ok(Self {
             path: path.to_path_buf(),
             last_seq,
@@ -137,16 +144,19 @@ impl AuditLog {
         // Acquire exclusive lock; blocks until other appenders release.
         FileExt::lock_exclusive(&file)?;
 
-        // Re-read tail under the lock so multi-process appenders converge.
+        // Re-read tail under the lock so multi-process appenders converge,
+        // and compare that tail to the keychain/file-backed anchor before
+        // accepting it as the next append point. This catches valid-prefix
+        // truncation, tail edits, and whole-chain rewrites.
         let (last_seq, last_hash) = read_tail_from_open(&mut file)?;
-        if last_seq > self.last_seq {
-            self.last_seq = last_seq;
-            self.last_hash = last_hash;
-        } else if last_seq == 0 {
-            // Empty file: keep cached genesis.
-            self.last_seq = 0;
-            self.last_hash = GENESIS_PREV.to_string();
-        }
+        let old_head = head_from_parts(last_seq, &last_hash)?;
+        validate_or_seed_audit_head(old_head, true)?;
+        self.last_seq = last_seq;
+        self.last_hash = if last_seq == 0 {
+            GENESIS_PREV.to_string()
+        } else {
+            last_hash
+        };
 
         let entry = AuditEntry {
             seq: self.last_seq + 1,
@@ -165,18 +175,38 @@ impl AuditLog {
         // Sanity — never embed a newline in a single record.
         debug_assert!(!line.contains('\n'));
 
-        // Move to end of file before writing (O_APPEND should already do
-        // this on Unix, but explicit seek matches Windows semantics too).
-        file.seek(SeekFrom::End(0))?;
-        file.write_all(line.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.sync_data()?;
-
         // Compute new chain head hash from the entry's canonical form.
         let canonical = serde_jcs::to_string(&entry)
             .map_err(|_| Error::Other("audit: canonical json failed"))?;
+        let new_hash = sha256(canonical.as_bytes());
+        let new_head = AuditHead {
+            seq: entry.seq,
+            hash: new_hash,
+        };
+
+        crate::keychain::write_audit_head_pending(old_head, new_head)?;
+
+        // Move to end of file before writing (O_APPEND should already do
+        // this on Unix, but explicit seek matches Windows semantics too).
+        let append_result = (|| -> Result<()> {
+            file.seek(SeekFrom::End(0))?;
+            file.write_all(line.as_bytes())?;
+            file.write_all(b"\n")?;
+            file.sync_data()?;
+            Ok(())
+        })();
+        if let Err(e) = append_result {
+            let _ = crate::keychain::clear_audit_head_pending();
+            return Err(e);
+        }
+
+        crate::keychain::write_audit_head_anchor(new_head)?;
+        if let Err(e) = crate::keychain::clear_audit_head_pending() {
+            tracing::warn!(error = %e, "failed to clear pending audit-head anchor");
+        }
+
         self.last_seq = entry.seq;
-        self.last_hash = hex_lower(&sha256(canonical.as_bytes()));
+        self.last_hash = hex_lower(&new_hash);
 
         // Lock drops on file close at the end of this scope.
         let _ = FileExt::unlock(&file);
@@ -218,7 +248,33 @@ impl AuditLog {
             prev_seq = entry.seq;
             count += 1;
         }
+        validate_or_seed_audit_head(head_from_parts(prev_seq, &prev_hash)?, false)?;
         Ok(count)
+    }
+
+    /// Explicitly adopt the current on-disk chain head as the external
+    /// audit-head anchor. This is intentionally separate from [`Self::open`]:
+    /// production code must not silently seed a missing anchor for a non-empty
+    /// log, but operators upgrading from a pre-anchor version need a deliberate
+    /// recovery path after reviewing the existing log.
+    pub fn adopt_existing_head(path: &Path) -> Result<AuditHead> {
+        let mut file = open_appendable(path)?;
+        FileExt::lock_exclusive(&file)?;
+        let (last_seq, last_hash) = read_tail_from_open(&mut file)?;
+        let head = head_from_parts(last_seq, &last_hash)?;
+
+        match crate::keychain::read_audit_head_anchor()? {
+            None => {
+                crate::keychain::write_audit_head_anchor(head)?;
+                Ok(head)
+            }
+            Some(AuditHeadAnchor::Committed(anchor)) if anchor == head => Ok(head),
+            Some(AuditHeadAnchor::Pending { pending, .. }) if pending == head => {
+                repair_audit_head_anchor(head)?;
+                Ok(head)
+            }
+            Some(_) => Err(Error::AuditHeadMismatch),
+        }
     }
 
     /// Return the last `n` entries (or all of them if fewer exist).
@@ -279,6 +335,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 fn open_appendable(path: &Path) -> Result<File> {
+    validate_audit_path(path)?;
     let mut opts = OpenOptions::new();
     opts.read(true).append(true).create(true);
     #[cfg(unix)]
@@ -287,6 +344,32 @@ fn open_appendable(path: &Path) -> Result<File> {
         opts.mode(0o600);
     }
     Ok(opts.open(path)?)
+}
+
+#[cfg(unix)]
+fn validate_audit_path(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(Error::Other("audit file must be a regular file"));
+    }
+    // SAFETY: `geteuid` has no preconditions and does not dereference pointers.
+    let uid = unsafe { libc::geteuid() };
+    if meta.uid() != uid {
+        return Err(Error::Other("audit file is not owned by current user"));
+    }
+    if meta.mode() & 0o077 != 0 {
+        return Err(Error::Other("audit file is group/world accessible"));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_audit_path(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Read the entire file once and return the parsed `(last_seq, last_hash)`.
@@ -303,16 +386,28 @@ fn recover_tail(path: &Path) -> Result<(u64, String)> {
     let reader = BufReader::new(f);
     let mut last_seq = 0u64;
     let mut last_hash = GENESIS_PREV.to_string();
-    for line in reader.lines() {
-        let line = line?;
+    let mut prev_seq = 0u64;
+    let mut prev_hash = GENESIS_PREV.to_string();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = (idx as u64) + 1;
+        let line = line.map_err(|_| Error::AuditChainBroken(line_no))?;
         if line.is_empty() {
-            continue;
+            return Err(Error::AuditChainBroken(line_no));
         }
-        let entry: AuditEntry = serde_json::from_str(&line)?;
-        let canonical = serde_jcs::to_string(&entry)
-            .map_err(|_| Error::Other("audit: canonical json failed"))?;
+        let entry: AuditEntry =
+            serde_json::from_str(&line).map_err(|_| Error::AuditChainBroken(line_no))?;
+        if entry.seq != prev_seq + 1 {
+            return Err(Error::AuditChainBroken(line_no));
+        }
+        if entry.prev_hash != prev_hash {
+            return Err(Error::AuditChainBroken(line_no));
+        }
+        let canonical =
+            serde_jcs::to_string(&entry).map_err(|_| Error::AuditChainBroken(line_no))?;
         last_hash = hex_lower(&sha256(canonical.as_bytes()));
         last_seq = entry.seq;
+        prev_hash = last_hash.clone();
+        prev_seq = entry.seq;
     }
     Ok((last_seq, last_hash))
 }
@@ -323,15 +418,27 @@ fn read_tail_from_open(f: &mut File) -> Result<(u64, String)> {
     f.read_to_string(&mut buf)?;
     let mut last_seq = 0u64;
     let mut last_hash = GENESIS_PREV.to_string();
-    for line in buf.lines() {
+    let mut prev_seq = 0u64;
+    let mut prev_hash = GENESIS_PREV.to_string();
+    for (idx, line) in buf.lines().enumerate() {
+        let line_no = (idx as u64) + 1;
         if line.is_empty() {
-            continue;
+            return Err(Error::AuditChainBroken(line_no));
         }
-        let entry: AuditEntry = serde_json::from_str(line)?;
-        let canonical = serde_jcs::to_string(&entry)
-            .map_err(|_| Error::Other("audit: canonical json failed"))?;
+        let entry: AuditEntry =
+            serde_json::from_str(line).map_err(|_| Error::AuditChainBroken(line_no))?;
+        if entry.seq != prev_seq + 1 {
+            return Err(Error::AuditChainBroken(line_no));
+        }
+        if entry.prev_hash != prev_hash {
+            return Err(Error::AuditChainBroken(line_no));
+        }
+        let canonical =
+            serde_jcs::to_string(&entry).map_err(|_| Error::AuditChainBroken(line_no))?;
         last_hash = hex_lower(&sha256(canonical.as_bytes()));
         last_seq = entry.seq;
+        prev_hash = last_hash.clone();
+        prev_seq = entry.seq;
     }
     Ok((last_seq, last_hash))
 }
@@ -344,15 +451,84 @@ fn read_all_entries(path: &Path) -> Result<Vec<AuditEntry>> {
     };
     let reader = BufReader::new(f);
     let mut out = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
+    let mut prev_seq = 0u64;
+    let mut prev_hash = GENESIS_PREV.to_string();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = (idx as u64) + 1;
+        let line = line.map_err(|_| Error::AuditChainBroken(line_no))?;
         if line.is_empty() {
-            continue;
+            return Err(Error::AuditChainBroken(line_no));
         }
-        let entry: AuditEntry = serde_json::from_str(&line)?;
+        let entry: AuditEntry =
+            serde_json::from_str(&line).map_err(|_| Error::AuditChainBroken(line_no))?;
+        if entry.seq != prev_seq + 1 {
+            return Err(Error::AuditChainBroken(line_no));
+        }
+        if entry.prev_hash != prev_hash {
+            return Err(Error::AuditChainBroken(line_no));
+        }
+        let canonical =
+            serde_jcs::to_string(&entry).map_err(|_| Error::AuditChainBroken(line_no))?;
+        prev_hash = hex_lower(&sha256(canonical.as_bytes()));
+        prev_seq = entry.seq;
         out.push(entry);
     }
+    validate_or_seed_audit_head(head_from_parts(prev_seq, &prev_hash)?, false)?;
     Ok(out)
+}
+
+fn head_from_parts(seq: u64, hash_hex: &str) -> Result<AuditHead> {
+    if seq == 0 && hash_hex == GENESIS_PREV {
+        return Ok(AuditHead {
+            seq,
+            hash: GENESIS_HASH,
+        });
+    }
+    let decoded = hex::decode(hash_hex).map_err(|_| Error::AuditHeadMismatch)?;
+    if decoded.len() != 32 {
+        return Err(Error::AuditHeadMismatch);
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&decoded);
+    Ok(AuditHead { seq, hash })
+}
+
+fn validate_or_seed_audit_head(file_head: AuditHead, allow_seed: bool) -> Result<()> {
+    if crate::keychain::audit_head_anchor_enforcement_disabled() {
+        return Ok(());
+    }
+    match crate::keychain::read_audit_head_anchor()? {
+        Some(AuditHeadAnchor::Committed(anchor)) => {
+            if anchor == file_head {
+                Ok(())
+            } else {
+                Err(Error::AuditHeadMismatch)
+            }
+        }
+        Some(AuditHeadAnchor::Pending { committed, pending }) => {
+            if file_head == pending {
+                repair_audit_head_anchor(pending)
+            } else {
+                tracing::error!(
+                    file_seq = file_head.seq,
+                    committed_seq = committed.seq,
+                    pending_seq = pending.seq,
+                    "audit head mismatch: file is not the pending anchor target"
+                );
+                Err(Error::AuditHeadMismatch)
+            }
+        }
+        None if allow_seed && file_head.seq == 0 => {
+            crate::keychain::write_audit_head_anchor(file_head)?;
+            Ok(())
+        }
+        None => Err(Error::AuditHeadMismatch),
+    }
+}
+
+fn repair_audit_head_anchor(head: AuditHead) -> Result<()> {
+    crate::keychain::write_audit_head_anchor(head)?;
+    crate::keychain::clear_audit_head_pending()
 }
 
 // ------------------------------------------------------------------------
@@ -477,12 +653,11 @@ mod tests {
         let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
         lines[2] = lines[2].replace("\"REDACTED\"", "\"REDACTEX\"");
         std::fs::write(&p, lines.join("\n") + "\n").unwrap();
-        let log2 = AuditLog::open(&p).unwrap();
-        match log2.verify() {
+        match AuditLog::open(&p) {
             // When seq3's hash chain breaks, the *next* line (4) is what
             // notices the mismatch via prev_hash.
             Err(Error::AuditChainBroken(line_no)) => assert_eq!(line_no, 4),
-            other => panic!("expected AuditChainBroken, got {other:?}"),
+            _ => panic!("expected AuditChainBroken"),
         }
     }
 
@@ -499,10 +674,9 @@ mod tests {
         // Delete the 3rd line.
         lines.remove(2);
         std::fs::write(&p, lines.join("\n") + "\n").unwrap();
-        let log2 = AuditLog::open(&p).unwrap();
-        match log2.verify() {
+        match AuditLog::open(&p) {
             Err(Error::AuditChainBroken(_)) => {}
-            other => panic!("expected break, got {other:?}"),
+            _ => panic!("expected break"),
         }
     }
 
@@ -519,8 +693,10 @@ mod tests {
         // Swap lines 3 and 4 (0-indexed 2 and 3).
         lines.swap(2, 3);
         std::fs::write(&p, lines.join("\n") + "\n").unwrap();
-        let log2 = AuditLog::open(&p).unwrap();
-        assert!(matches!(log2.verify(), Err(Error::AuditChainBroken(_))));
+        assert!(matches!(
+            AuditLog::open(&p),
+            Err(Error::AuditChainBroken(_))
+        ));
     }
 
     #[test]
@@ -636,5 +812,40 @@ mod tests {
         assert_eq!(e.prev_hash, GENESIS_PREV);
         assert_eq!(e.prev_hash.len(), 64);
         assert!(e.prev_hash.chars().all(|c| c == '0'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_group_world_accessible_audit_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("audit.jsonl");
+        std::fs::write(&p, "").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        match AuditLog::open(&p) {
+            Err(Error::Other(msg)) => assert!(msg.contains("group/world accessible")),
+            Ok(_) => panic!("expected inaccessible audit file rejection"),
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_audit_file() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().unwrap();
+        let target = tmp.path().join("target.jsonl");
+        let link = tmp.path().join("audit.jsonl");
+        std::fs::write(&target, "").unwrap();
+        symlink(&target, &link).unwrap();
+
+        match AuditLog::open(&link) {
+            Err(Error::Other(msg)) => assert!(msg.contains("regular file")),
+            Ok(_) => panic!("expected symlink audit file rejection"),
+            Err(e) => panic!("unexpected error: {e}"),
+        }
     }
 }

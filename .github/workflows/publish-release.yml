@@ -1,0 +1,98 @@
+name: publish-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Release tag to publish (e.g. v1.0.1 or v1.0.1-rc1)"
+        required: true
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  publish:
+    name: publish verified draft
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Validate release tag input
+        env:
+          REF_NAME: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::ref must be a SemVer release tag like v1.2.3 or v1.2.3-rc1"
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/tags/${REF_NAME}" ]; then
+            echo "::error::publish-release must run from the same tag ref. Use: gh workflow run publish-release.yml --ref ${REF_NAME} -f ref=${REF_NAME}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: refs/tags/${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Require release-install marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          ./scripts/require-release-install-marker.sh "$TAG"
+
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          is_draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"
+          if [ "$is_draft" != "true" ]; then
+            echo "::error::release ${TAG} is not a draft; refusing to edit an already-published release"
+            exit 1
+          fi
+          gh release edit "$TAG" --draft=false
+
+  guard:
+    name: guard manual publish
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Verify published release has install marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if ./scripts/require-release-install-marker.sh "$TAG"; then
+            exit 0
+          fi
+          echo "::error::published release ${TAG} does not have a matching install-test marker; restoring draft status"
+          for attempt in 1 2 3; do
+            if gh release edit "$TAG" --draft=true; then
+              echo "::error::release ${TAG} was restored to draft status after an unauthorized publish"
+              exit 1
+            fi
+            echo "::warning::failed to restore draft status on attempt ${attempt}"
+            sleep 5
+          done
+          echo "::error::could not restore draft status for unauthorized publish ${TAG}"
+          exit 1

@@ -2,10 +2,10 @@
 #
 # W9e — Multi-arch container image for `cloakd` (the Cloak daemon).
 #
-# This image ships ONLY the daemon. The `cloak` CLI and the `cloak-mcp`
-# shim are designed for an interactive desktop and have no place in a
-# headless container — IPC into the daemon happens over a Unix domain
-# socket which the host application is expected to mount.
+# This image starts the daemon and also carries the trusted `cloak` CLI
+# sibling needed by installed-binary peer pinning. It does not ship the
+# `cloak-mcp` shim; IPC into the daemon happens over a Unix domain socket
+# which the host application is expected to mount.
 #
 # Build: `docker build -t cloakd-local .`              (host arch only)
 # Multi-arch builds happen in CI (.github/workflows/docker-push.yml)
@@ -27,62 +27,64 @@
 # -----------------------------------------------------------------------------
 # Stage 1 — builder
 # -----------------------------------------------------------------------------
-# `rust:1-bookworm` tracks the latest stable Rust on Debian 12, which
-# matches `rust-toolchain.toml` (channel = "stable"). Bookworm is also
-# what the distroless runtime is built from, so glibc versions line up.
+# `rust:1.94.1-bookworm` matches `rust-toolchain.toml` and is pinned by
+# multi-arch index digest. Bookworm is also what the distroless runtime is
+# built from, so glibc versions line up.
+#
+# Debian apt inputs are pinned to a snapshot timestamp so rerunning the same
+# tag does not silently pick up newer build tools. Bump this timestamp in the
+# same review as any intentional Docker builder package refresh.
+ARG DEBIAN_SNAPSHOT=20250115T000000Z
 #
 # No `--platform=$BUILDPLATFORM` here: each CI build runs on a native
 # runner for the target architecture (ubuntu-24.04 for amd64,
 # ubuntu-24.04-arm for arm64), so the builder pulls the right
-# rust:1-bookworm tag automatically and the entire compile is native.
-FROM rust:1-bookworm AS builder
+# pinned rust index automatically and the entire compile is native.
+FROM rust:1.94.1-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS builder
+ARG DEBIAN_SNAPSHOT=20250115T000000Z
 
-# `libsodium-sys-stable` is configured with the `fetch-latest` feature
-# in the workspace Cargo.toml, so the build script downloads and
-# statically links libsodium itself. We still need pkg-config and the
-# usual C toolchain for the build script to run, plus libclang for any
-# bindgen invocations.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-        pkg-config \
-        libsodium-dev \
-        ca-certificates \
-        build-essential \
-        clang \
- && rm -rf /var/lib/apt/lists/*
+# The workspace builds libsodium from a source archive pinned by SHA via
+# `scripts/prepare-libsodium-dist.sh`, so the C crypto library does not move
+# without an intentional hash update.
+RUN set -eux; \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; \
+    printf '%s\n' \
+      "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} bookworm main" \
+      "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT} bookworm-security main" \
+      > /etc/apt/sources.list; \
+    apt-get -o Acquire::Check-Valid-Until=false update; \
+    apt-get install -y --no-install-recommends \
+      pkg-config \
+      ca-certificates \
+      curl \
+      build-essential \
+      clang; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY . .
 
-# Build only the daemon — the CLI and MCP shim are not shipped here.
-# `cargo build --release -p cloak-core --bin cloakd` is the canonical
-# invocation; the workspace `Cargo.lock` is committed so we get a
-# reproducible build. No `--target` flag because the host arch IS
-# the target arch (native build per-runner).
+# Build the daemon and its trusted CLI sibling. The container entrypoint is
+# still `cloakd`, but the daemon's installed-binary peer pin requires a
+# `cloak` binary next to `cloakd` at startup. The MCP shim is not shipped in
+# this image.
+RUN ./scripts/prepare-libsodium-dist.sh /src/.cargo/libsodium-dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     set -eux; \
-    cargo build --release -p cloak-core --bin cloakd; \
-    cp /src/target/release/cloakd /cloakd
+    SODIUM_DIST_DIR=/src/.cargo/libsodium-dist \
+      cargo build --locked --release -p cloak-core --bin cloakd -p cloak-cli --bin cloak; \
+    cp /src/target/release/cloakd /cloakd; \
+    cp /src/target/release/cloak /cloak
 
-# Resolve any dynamic libsodium dependency. With `fetch-latest`,
-# libsodium is statically linked into `cloakd`, so `ldd` reports no
-# libsodium entry and we leave a zero-byte placeholder. If a future
-# toolchain change switches to dynamic linking, this branch copies the
-# `.so` so the runtime image still works.
-#
-# The placeholder exists because `COPY --from=builder` in stage 2
-# requires the source path to be present; conditional COPY is not a
-# Dockerfile feature.
+# The release image must not depend on a runtime-provided libsodium. If the
+# build ever regresses to dynamic libsodium linkage, fail here instead of
+# shipping an image that only works when an unpinned system library happens to
+# be present.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eux; \
-    mkdir -p /sodium; \
-    if ldd /cloakd | grep -q libsodium; then \
-        SODIUM_PATH="$(ldd /cloakd | awk '/libsodium/ {print $3}')"; \
-        cp -L "${SODIUM_PATH}" /sodium/libsodium.so; \
-    else \
-        : > /sodium/.static; \
-    fi
+    ! ldd /cloakd | grep -i libsodium; \
+    ! ldd /cloak | grep -i libsodium
 
 # Seed the runtime volume with directories owned by distroless nonroot
 # (uid/gid 65532). Docker named volumes copy this ownership from the
@@ -99,9 +101,9 @@ RUN set -eux; \
 # Stage 2 — runtime (distroless)
 # -----------------------------------------------------------------------------
 # `cc-debian12` ships glibc + libgcc + libstdc++ but no shell and no
-# package manager, which keeps the attack surface minimal. The daemon
+# package manager, and is pinned by multi-arch index digest. The daemon
 # never needs to shell out, so this is sufficient.
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:bd2899c12b335c827750ccf2359879eab09c09b206023dcebea408947d54127c
 
 LABEL org.opencontainers.image.source="https://github.com/cloakward/cloak"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
@@ -111,12 +113,7 @@ LABEL org.opencontainers.image.documentation="https://github.com/cloakward/cloak
 LABEL io.cloak.volume.var-lib-cloak="vault state — mount a named volume here so secrets survive container restarts"
 
 COPY --from=builder /cloakd /cloakd
-# Copy the libsodium directory from stage 1. With the current
-# `fetch-latest` build this contains only a `.static` marker (which is
-# harmless); if dynamic linking ever returns it will contain the
-# `libsodium.so` the linker resolves at runtime. Distroless's dynamic
-# linker searches /usr/lib by default.
-COPY --from=builder /sodium/ /usr/lib/cloak/
+COPY --from=builder /cloak /cloak
 COPY --from=builder --chown=65532:65532 /runtime-var-lib-cloak/ /var/lib/cloak/
 
 # Vault/audit/config/runtime state. Operators are expected to mount a named

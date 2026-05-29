@@ -1,8 +1,8 @@
 //! `cloak doctor` — read-only diagnostic.
 //!
 //! Walks the install: binaries on PATH, daemon up + socket sane, vault
-//! present + unlocked, biometric available, every detected MCP client
-//! has a `cloak` server registered. For each failed check we print a
+//! initialized, daemon vault unlocked, biometric available, every detected
+//! MCP client has a `cloak` server registered. For each failed check we print a
 //! one-line remediation hint.
 //!
 //! Exit code: `0` if every check passes; `1` otherwise (mirrors the
@@ -49,17 +49,21 @@ pub fn run_with_exit(ctx: &Context) -> Result<ExitCode> {
         check_binary("cloak"),
         check_binary("cloakd"),
         check_binary("cloak-mcp"),
+        // 1b. Linux peer identity needs a modern kernel feature.
+        check_linux_peer_identity(),
         // 2. Daemon up + socket sane.
         check_daemon(),
         // 3. Vault state.
         check_vault(ctx),
-        // 4. Policy file present + parses.
+        // 4. Daemon vault unlock state.
+        check_daemon_vault_unlocked(),
+        // 5. Policy file present + parses.
         check_policy(&default_policy_path()),
-        // 5. Biometric availability (best-effort).
+        // 6. Biometric availability (best-effort).
         check_biometric(),
     ];
 
-    // 6. MCP clients registered.
+    // 7. MCP clients registered.
     checks.extend(clients::detected().into_iter().map(check_client));
 
     let mut failed = 0u32;
@@ -81,6 +85,102 @@ pub fn run_with_exit(ctx: &Context) -> Result<ExitCode> {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::from(1))
+    }
+}
+
+fn check_linux_peer_identity() -> Check {
+    if !cfg!(target_os = "linux") {
+        return Check {
+            name: "peer identity kernel support".into(),
+            status: Status::Ok,
+            detail: "not required on this OS".into(),
+            remediation: None,
+        };
+    }
+
+    let release = std::process::Command::new("uname")
+        .arg("-r")
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+    check_linux_kernel_release(release.as_deref())
+}
+
+fn check_linux_kernel_release(release: Option<&str>) -> Check {
+    let name = "peer identity kernel support".to_string();
+    let Some(release) = release else {
+        return Check {
+            name,
+            status: Status::Fail,
+            detail: "could not determine Linux kernel release".into(),
+            remediation: Some("use Linux 6.5+ so cloakd can use SO_PEERPIDFD".into()),
+        };
+    };
+
+    match linux_kernel_supports_so_peerpidfd(release) {
+        Some(true) => Check {
+            name,
+            status: Status::Ok,
+            detail: format!("Linux {release} supports SO_PEERPIDFD"),
+            remediation: None,
+        },
+        Some(false) => Check {
+            name,
+            status: Status::Fail,
+            detail: format!("Linux {release} is older than 6.5"),
+            remediation: Some(
+                "upgrade to Linux 6.5+; cloakd refuses MCP/CLI sessions without SO_PEERPIDFD"
+                    .into(),
+            ),
+        },
+        None => Check {
+            name,
+            status: Status::Fail,
+            detail: format!("could not parse Linux kernel release `{release}`"),
+            remediation: Some("use Linux 6.5+ so cloakd can use SO_PEERPIDFD".into()),
+        },
+    }
+}
+
+fn linux_kernel_supports_so_peerpidfd(release: &str) -> Option<bool> {
+    let mut parts = release.split(['.', '-']);
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    Some(major > 6 || (major == 6 && minor >= 5))
+}
+
+fn check_daemon_vault_unlocked() -> Check {
+    match super::status::query_daemon_vault_state() {
+        super::status::DaemonVaultState::Known { locked: false } => Check {
+            name: "daemon vault unlocked".into(),
+            status: Status::Ok,
+            detail: "MCP tools can read allowed secrets".into(),
+            remediation: None,
+        },
+        super::status::DaemonVaultState::Known { locked: true } => Check {
+            name: "daemon vault unlocked".into(),
+            status: Status::Fail,
+            detail: "daemon is running but vault is locked".into(),
+            remediation: Some("run `cloak unlock` after every daemon start/restart".into()),
+        },
+        super::status::DaemonVaultState::NotRunning => Check {
+            name: "daemon vault unlocked".into(),
+            status: Status::Fail,
+            detail: "daemon is not running".into(),
+            remediation: Some("run `cloak daemon start`, then `cloak unlock`".into()),
+        },
+        super::status::DaemonVaultState::Unknown(reason) => Check {
+            name: "daemon vault unlocked".into(),
+            status: Status::Fail,
+            detail: reason,
+            remediation: Some("run `cloak status`; restart and unlock cloakd if needed".into()),
+        },
     }
 }
 
@@ -373,5 +473,17 @@ mod tests {
         let c = check_policy(&path);
         assert_eq!(c.status, Status::Fail);
         assert!(c.remediation.is_some());
+    }
+
+    #[test]
+    fn linux_kernel_parser_enforces_peerpidfd_minimum() {
+        assert_eq!(linux_kernel_supports_so_peerpidfd("6.4.16"), Some(false));
+        assert_eq!(linux_kernel_supports_so_peerpidfd("6.5.0"), Some(true));
+        assert_eq!(
+            linux_kernel_supports_so_peerpidfd("6.8.0-31-generic"),
+            Some(true)
+        );
+        assert_eq!(linux_kernel_supports_so_peerpidfd("7.0.0"), Some(true));
+        assert_eq!(linux_kernel_supports_so_peerpidfd("not-a-kernel"), None);
     }
 }

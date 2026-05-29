@@ -1,7 +1,7 @@
 # Cloak policy — default deny-by-default with a few common allow rules.
 #
-# Reload: restart `cloakd` to pick up policy changes. Hot-reload via SIGHUP is planned for v1.0.1.
-# Validate: `cloak policy validate ./policy.toml`.
+# Reload: restart `cloakd` to pick up policy changes (`cloak daemon restart`).
+# Check: run `cloak doctor` after copying this file to the default policy path.
 
 [default]
 # What happens when no rule matches.
@@ -15,14 +15,14 @@ refill_per_minute = 30
 # Per-tool defaults — can be overridden by [[secrets]] rules below.
 [tools.proxy_authenticated_http_request]
 allowed_hosts = []  # empty = deny all; populate per-secret instead
-require_confirmation = false
 
 [tools.sign_request]
-require_confirmation = false
+allow = false
 
 [tools.mint_short_lived_token]
-require_confirmation = true
-confirmation_timeout_seconds = 30
+# Derived tokens are returned to the MCP client. Leave this denied globally;
+# opt in per secret only after reviewing that exposure.
+allow = false
 
 [tools.query_audit]
 # Reading the audit log is always allowed for any authenticated peer.
@@ -48,4 +48,3 @@ kind = "api_key"
 allowed_hosts = ["*.amazonaws.com"]
 [secrets.tools.mint_short_lived_token]
 allow = true
-require_confirmation = true

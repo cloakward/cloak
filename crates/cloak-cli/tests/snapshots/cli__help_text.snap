@@ -1,10 +1,10 @@
 ---
 source: crates/cloak-cli/tests/cli.rs
-assertion_line: 66
+assertion_line: 91
 expression: normalized
 ---
 Cloak is a local secrets vault. Secrets are AEAD-encrypted at rest under a key derived from your
-passphrase via Argon2id. Reveal is gated behind Touch ID on macOS.
+passphrase via Argon2id. Reveal is gated behind local user-presence checks.
 
 Usage: cloak [OPTIONS] <COMMAND>
 
@@ -18,18 +18,20 @@ Commands:
                  plaintext
   list           List secrets (metadata only). Empty vault prints "(no secrets)"
   rm             Remove secret(s). Bulk modes: `--tag T`, `--all`
-  show           Reveal a secret's plaintext (Touch ID gated, TTY-only)
-  status         Print vault status (path, record count, KDF params, lock state)
+  show           Reveal a secret's plaintext (user-presence gated, TTY-only)
+  status         Print vault file status and daemon unlock state when available
   completions    Print shell completions
   daemon-unlock  Push the vault passphrase to the running `cloakd` so MCP peers can serve requests
+                 [aliases: unlock]
   import         Import a `.env` file into the vault
-  export         Export the vault to a `.env` file (Touch ID gated)
+  export         Export the vault to a `.env` file (user-presence gated)
   run            Run a command with vault secrets injected as environment variables
   panic          Emergency: lock the vault, kill the daemon, print rotation worksheet
-  daemon         Manage the cloakd background daemon (install/start/stop/status)
+  daemon         Manage the cloakd background daemon (install/start/stop/restart/status)
   claude         Register `cloak` with installed MCP clients (Claude Desktop, etc.)
   restore        Re-derive vault access from your 24-word BIP-39 recovery seed
   backup         Backup utilities: confirm the recovery seed you wrote down
+  audit          Audit-log utilities
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -37,7 +39,8 @@ Options:
           Path to the vault file (default: `$DATA_DIR/cloak/vault.cloak`)
 
       --no-biometric
-          Disable Touch ID; always fall back to passphrase re-entry on `cloak show`
+          Disable local user-presence prompts after passphrase unlock for secret materialization
+          commands
 
   -h, --help
           Print help (see a summary with '-h')

@@ -11,9 +11,17 @@
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { argValue } from "./argv.ts";
+import { findCloak } from "./trust.ts";
 
 const MAX_FRAME_BYTES = 4 * 1024 * 1024; // 4 MiB
 const REQUEST_TIMEOUT_MS = 30_000;
+// The daemon must own completion for side-effecting calls. It has bounded
+// execution for both paths (`reqwest` proxy timeout and STS timeout), so the
+// MCP shim waits for the authoritative daemon outcome instead of returning an
+// ambiguous client-side timeout that might trigger a duplicate retry.
+const DAEMON_BOUNDED_SIDE_EFFECTING_METHODS = new Set(["tool.proxy_http", "tool.mint_token"]);
 
 export interface IpcError {
   code: string;
@@ -23,7 +31,7 @@ export interface IpcError {
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 interface RequestBody {
@@ -45,9 +53,26 @@ let sessionToken: string | null = null;
 const pending = new Map<string, PendingRequest>();
 let recvBuffer = Buffer.alloc(0);
 
+function socketOverridesAllowed(): boolean {
+  return (
+    process.env["CLOAK_UNSAFE_TEST_MODE"] === "1" ||
+    process.argv.includes("--unsafe-allow-socket-override")
+  );
+}
+
+function requestTimeoutMs(method: string): number | null {
+  return DAEMON_BOUNDED_SIDE_EFFECTING_METHODS.has(method) ? null : REQUEST_TIMEOUT_MS;
+}
+
 export function socketPath(): string {
-  if (process.env["CLOAK_SOCK"]) {
-    return process.env["CLOAK_SOCK"];
+  if (socketOverridesAllowed()) {
+    const socketArg = argValue(process.argv, ["--socket", "--cloak-sock"]);
+    if (socketArg) {
+      return socketArg;
+    }
+    if (process.env["CLOAK_SOCK"]) {
+      return process.env["CLOAK_SOCK"];
+    }
   }
   const runtimeDir = process.env["XDG_RUNTIME_DIR"];
   if (runtimeDir && runtimeDir.length > 0) {
@@ -60,10 +85,30 @@ export function socketPath(): string {
 
 function failAllPending(err: Error): void {
   for (const [, p] of pending) {
-    clearTimeout(p.timer);
+    if (p.timer) clearTimeout(p.timer);
     p.reject(err);
   }
   pending.clear();
+}
+
+function verifyDaemonWithCli(): void {
+  if (socketOverridesAllowed()) {
+    return;
+  }
+  const cloak = findCloak();
+  if (!cloak) {
+    throw new Error("trusted cloak CLI not found; install Cloak before connecting to cloakd");
+  }
+
+  const result = spawnSync(cloak, ["daemon", "status"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    env: process.env,
+  });
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "daemon status check failed").trim();
+    throw new Error(`cloakd identity check failed: ${detail}`);
+  }
 }
 
 function onData(chunk: Buffer): void {
@@ -103,7 +148,7 @@ function onData(chunk: Buffer): void {
         const p = pending.get(firstId);
         if (p) {
           pending.delete(firstId);
-          clearTimeout(p.timer);
+          if (p.timer) clearTimeout(p.timer);
           p.reject(new Error(`cloakd returned malformed JSON: ${msg}`));
         }
       }
@@ -119,7 +164,7 @@ function onData(chunk: Buffer): void {
       continue;
     }
     pending.delete(parsed.id);
-    clearTimeout(p.timer);
+    if (p.timer) clearTimeout(p.timer);
     if (parsed.error) {
       p.reject(
         new Error(`cloakd error [${parsed.error.code}]: ${parsed.error.message}`),
@@ -134,6 +179,12 @@ async function connectIpc(): Promise<Socket> {
   if (socket && !socket.destroyed) return socket;
   if (connecting) return connecting;
   const path = socketPath();
+  try {
+    verifyDaemonWithCli();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return Promise.reject(new Error(`cloakd connect refused at ${path}: ${msg}`));
+  }
   connecting = new Promise<Socket>((resolve, reject) => {
     const s = createConnection(path);
     let settled = false;
@@ -188,15 +239,16 @@ export async function request(method: string, params: object): Promise<unknown> 
   }
   const frame = encodeFrame(body);
   return new Promise<unknown>((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const timeoutMs = requestTimeoutMs(method);
+    const timer = timeoutMs === null ? null : setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`cloakd request timed out after ${REQUEST_TIMEOUT_MS}ms (method=${method})`));
-    }, REQUEST_TIMEOUT_MS);
+      reject(new Error(`cloakd request timed out after ${timeoutMs}ms (method=${method})`));
+    }, timeoutMs);
     pending.set(id, { resolve, reject, timer });
     s.write(frame, (err) => {
       if (err) {
         pending.delete(id);
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         reject(new Error(`cloakd write failed: ${err.message}`));
       }
     });
@@ -227,4 +279,8 @@ export function _resetForTests(): void {
 
 export function _getSessionToken(): string | null {
   return sessionToken;
+}
+
+export function _requestTimeoutMsForTests(method: string): number | null {
+  return requestTimeoutMs(method);
 }

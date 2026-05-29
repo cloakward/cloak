@@ -22,16 +22,37 @@ use tokio::net::{UnixListener, UnixStream};
 
 /// Resolve a pidfd for the *peer* of a connected `UnixStream` and read
 /// its inode — used to model what the daemon records at handshake.
-fn peer_pidfd_inode(stream: &UnixStream) -> (OwnedFd, u64) {
+fn peer_pidfd_inode(stream: &UnixStream) -> Option<(OwnedFd, u64)> {
     let sock_fd = stream.as_raw_fd();
     let cred = linux_pa::get_peer_cred(sock_fd).expect("SO_PEERCRED");
-    let fd = linux_pa::acquire_peer_pidfd(sock_fd, cred.pid).expect("pidfd");
+    let fd = match linux_pa::acquire_peer_pidfd(sock_fd, cred.pid) {
+        Ok(fd) => fd,
+        Err(e) if linux_kernel_supports_so_peerpidfd() == Some(false) => {
+            eprintln!("skipping SO_PEERPIDFD test on Linux kernel older than 6.5: {e}");
+            return None;
+        }
+        Err(e) => panic!("SO_PEERPIDFD must work on supported Linux kernels: {e}"),
+    };
     let ino = linux_pa::pidfd_inode(fd.as_raw_fd()).expect("fstat");
-    (fd, ino)
+    Some((fd, ino))
+}
+
+fn linux_kernel_supports_so_peerpidfd() -> Option<bool> {
+    let output = std::process::Command::new("uname")
+        .arg("-r")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let release = String::from_utf8_lossy(&output.stdout);
+    let mut parts = release.trim().split(['.', '-']);
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    Some(major > 6 || (major == 6 && minor >= 5))
 }
 
 #[tokio::test]
-#[ignore = "pidfd watcher disabled for v0.9.0-rc1; re-enable with #21"]
 async fn pidfd_inode_is_stable_per_process() {
     // Two pidfds for the *same* peer (this test process) must report
     // the same inode. This locks in our identity-key invariant: the
@@ -50,8 +71,12 @@ async fn pidfd_inode_is_stable_per_process() {
     let _c2 = UnixStream::connect(&socket_path).await.expect("connect2");
     let (s1, s2) = server.await.expect("join");
 
-    let (fd1, ino1) = peer_pidfd_inode(&s1);
-    let (fd2, ino2) = peer_pidfd_inode(&s2);
+    let Some((fd1, ino1)) = peer_pidfd_inode(&s1) else {
+        return;
+    };
+    let Some((fd2, ino2)) = peer_pidfd_inode(&s2) else {
+        return;
+    };
     assert_eq!(
         ino1, ino2,
         "two pidfds for the same task must share the same inode",
@@ -60,7 +85,6 @@ async fn pidfd_inode_is_stable_per_process() {
 }
 
 #[tokio::test]
-#[ignore = "pidfd watcher disabled for v0.9.0-rc1; re-enable with #21"]
 async fn session_revoked_when_peer_process_exits() {
     // The attack model: a privileged peer hands off a session token,
     // exits, and a hostile process at the same UID grabs the freed
@@ -101,7 +125,6 @@ async fn session_revoked_when_peer_process_exits() {
 }
 
 #[tokio::test]
-#[ignore = "pidfd watcher disabled for v0.9.0-rc1; re-enable with #21"]
 async fn inode_revoke_path_drops_only_matching_sessions() {
     // Direct unit-style assertion on `SessionStore::revoke_by_identity`
     // for the `LinuxPidfdInode` variant: issue two sessions with
@@ -121,6 +144,7 @@ async fn inode_revoke_path_drops_only_matching_sessions() {
         gid: 1000,
         binary_path: Some(PathBuf::from("/usr/local/bin/cloak")),
         code_sig_hash: Some([0u8; 32]),
+        code_directory_hash: None,
         identity: Some(PeerIdentity {
             kind: PeerIdentityKind::LinuxPidfdInode,
             bytes: inode.to_le_bytes().to_vec(),

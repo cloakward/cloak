@@ -20,9 +20,10 @@ use std::io::{IsTerminal, Write};
 use anyhow::Result;
 use cloak_core::Error;
 
+use cloak_core::audit::AuditResult;
 use cloak_core::biometric;
 
-use super::{open_vault, unlock::unlock_interactive, Context};
+use super::{audit_log, open_vault, unlock::unlock_interactive, Context};
 
 /// Reveal a single secret's plaintext.
 pub fn run(ctx: &Context, name: &str, allow_redirect: bool, newline: bool) -> Result<()> {
@@ -66,6 +67,7 @@ pub fn run(ctx: &Context, name: &str, allow_redirect: bool, newline: bool) -> Re
         Err(Error::SecretNotFound(_)) => anyhow::bail!("secret not found: {name}"),
         Err(other) => return Err(other.into()),
     };
+    audit_log::append_required("cli.show", Some(name), AuditResult::Ok, None)?;
     {
         let mut out = std::io::stdout().lock();
         out.write_all(plaintext.expose_secret().as_bytes())?;

@@ -1,23 +1,27 @@
 # Cloak MCP tool spec
 
 The Cloak MCP server exposes exactly **six** action-shaped tools to the model
-surface. Schemas in this document are **authoritative** — they are
-copy-paste of the JSON Schema (Draft 2020-12) literals in
-`packages/cloak-mcp/src/tools/`. Tool descriptions are verbatim from the same
-files; the description-contract test at
-`packages/cloak-mcp/tests/tools.test.ts:163-200` fails CI if any of them drifts.
+surface. This document is the human-readable reference; the source of truth for
+JSON Schema literals and tool text is `packages/cloak-mcp/src/tools/`.
 
-The single overarching invariant: **no tool returns plaintext secret material.**
-This is enforced by the schemas (no `value` / `secret` / `plaintext` field is
-ever populated), by the daemon (the CLI-only gate at
-`crates/cloak-core/src/daemon.rs:300-308,420-427` keeps `vault.show` off the
-MCP-callable surface), and by the per-tool plaintext-leak property test at
-`packages/cloak-mcp/tests/tools.test.ts:140-161`.
+The single overarching invariant: **no tool returns raw stored secret values.**
+This is enforced by the schemas (no stored-secret `value` / `plaintext` field is
+ever populated), by the daemon (`crates/cloak-core/src/daemon.rs` keeps
+`vault.show`, `vault.unlock`, and `vault.lock` off the MCP-callable surface), and
+by the per-tool plaintext-leak property tests in
+`packages/cloak-mcp/tests/tools.test.ts`.
+
+Two outputs still need to be treated as credentials or sensitive data:
+`mint_short_lived_token` intentionally returns a derived credential to the MCP
+client, and `proxy_authenticated_http_request` returns the upstream response
+body and headers. Cloak redacts exact representations of the attached secret,
+but it cannot prove that a remote API will never echo transformed credentials or
+unrelated sensitive data in its response.
 
 ## Tool registry
 
 ```ts
-// packages/cloak-mcp/src/tools/index.ts:9-16
+// packages/cloak-mcp/src/tools/index.ts
 export const tools: ReadonlyArray<CloakTool> = [
   listSecretNames,
   getSecretMetadata,
@@ -33,15 +37,15 @@ export const tools: ReadonlyArray<CloakTool> = [
 | `list_secret_names` | `vault.list` | metadata array (no values) |
 | `get_secret_metadata` | `vault.get_metadata` | metadata row (no value) |
 | `sign_request` | `tool.sign_request` | computed auth headers |
-| `proxy_authenticated_http_request` | `tool.proxy_http` | status, headers, body |
-| `mint_short_lived_token` | `tool.mint_token` | derived token + expiry |
+| `proxy_authenticated_http_request` | `tool.proxy_http` | upstream status, headers, body |
+| `mint_short_lived_token` | `tool.mint_token` | derived credential + expiry |
 | `query_audit` | `tool.query_audit` | audit entries (no values) |
 
 ---
 
 ## 1. `list_secret_names`
 
-**Description (verbatim):**
+**Description:**
 > List the names and metadata of secrets stored in the local Cloak vault.
 > Returns names, kinds, and tags only — never the secret values themselves.
 
@@ -76,7 +80,7 @@ The shim returns the daemon body verbatim as the tool result text. No values.
 
 ## 2. `get_secret_metadata`
 
-**Description (verbatim):**
+**Description:**
 > Return metadata about a single named secret (kind, tags, created/updated
 > timestamps, version). Never returns the secret value.
 
@@ -114,7 +118,7 @@ The shim returns the daemon body verbatim as the tool result text. No values.
 
 ## 3. `sign_request`
 
-**Description (verbatim):**
+**Description:**
 > Compute authentication headers for an outbound HTTP request using a stored
 > secret as the signing key. Supports AWS SigV4 and generic HMAC-SHA256.
 > Returns only the computed headers — the underlying secret is never
@@ -127,16 +131,18 @@ The shim returns the daemon body verbatim as the tool result text. No values.
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
-    "secret_name": { "type": "string", "minLength": 1, "description": "Name of the stored secret to use as signing key." },
+    "secret_name": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Name of the stored secret to use as signing key." },
     "scheme":      { "type": "string", "enum": ["aws-sigv4", "hmac-sha256"], "description": "Signing scheme." },
-    "method":      { "type": "string", "minLength": 1, "description": "HTTP method, e.g. GET, POST." },
-    "url":         { "type": "string", "minLength": 1, "description": "Full request URL including query string." },
+    "method":      { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "description": "HTTP method." },
+    "url":         { "type": "string", "format": "uri", "pattern": "^https?://", "maxLength": 8192, "description": "Full http(s) request URL including query string. URL username/password and credential-shaped query parameters are rejected." },
     "headers": {
       "type": "object",
       "additionalProperties": { "type": "string" },
-      "description": "Optional request headers (case-insensitive keys handled by daemon)."
+      "description": "Optional request headers (case-insensitive keys handled by daemon). Credential-bearing input headers are rejected."
     },
-    "body_b64":    { "type": "string", "description": "Optional base64-encoded request body." }
+    "body_b64":    { "type": "string", "description": "Optional standard base64-encoded request body." },
+    "aws_region":  { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9-]+$", "description": "AWS SigV4 region, for example us-east-1. Used only when scheme is aws-sigv4." },
+    "aws_service": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9-]+$", "description": "AWS SigV4 service, for example execute-api or s3. Used only when scheme is aws-sigv4." }
   },
   "required": ["secret_name", "scheme", "method", "url"],
   "additionalProperties": false
@@ -148,10 +154,11 @@ The shim returns the daemon body verbatim as the tool result text. No values.
 - `hmac-sha256` — daemon computes
   `HMAC-SHA256(key, "{METHOD}\n{URL}\n{sha256_hex(body)}\n")` and returns
   `{ "X-Cloak-Signature": "<lowercase hex>" }`.
-- `aws-sigv4` — daemon shells through `aws-sigv4` to produce a real
-  AWS-accepted SigV4 signature. The secret value must be in the form
-  `<access_key_id>:<secret_access_key>`. KAT-verified against the published
-  `get-vanilla` test vector (post-W1; see `CHANGELOG.md`).
+- `aws-sigv4` — daemon signs in-process with the Rust `aws-sigv4` crate. The
+  secret value must be in the form `<access_key_id>:<secret_access_key>`.
+  `aws_region` defaults to `us-east-1` and `aws_service` defaults to
+  `execute-api` when omitted. KAT-verified against the published `get-vanilla`
+  test vector.
 
 **Example request:**
 ```json
@@ -181,13 +188,11 @@ body, and signing key never appear in the response and are never logged.
 
 ## 4. `proxy_authenticated_http_request`
 
-**Description (verbatim):**
-> Send an HTTP request to a host on the user's allowlist, with the named
-> secret attached by the daemon as authentication. The request and response
-> transit the local daemon, never this tool. Returns status, headers, and
-> base64-encoded body. The auth header is stripped from the echoed request
-> metadata. Use this to call APIs (GitHub, OpenAI, Stripe, etc.) without
-> ever handling the key.
+**Description:**
+> Send an HTTPS request to a host on the user's allowlist, with the named
+> secret attached by the daemon as bearer, basic, or custom-header
+> authentication. Returns status, redacted headers, and base64-encoded body.
+> Query-string auth is disabled because URLs are commonly logged.
 
 **Input schema:**
 ```json
@@ -197,20 +202,19 @@ body, and signing key never appear in the response and are never logged.
   "properties": {
     "secret_name": { "type": "string", "minLength": 1, "description": "Name of the stored secret to attach as auth." },
     "method":      { "type": "string", "minLength": 1, "description": "HTTP method, e.g. GET, POST." },
-    "url":         { "type": "string", "minLength": 1, "description": "Full request URL. Must be on the user's allowlist." },
+    "url":         { "type": "string", "minLength": 1, "description": "Full HTTPS request URL. Must be on the user's allowlist and must not include URL username/password or credential-shaped query parameters." },
     "headers": {
       "type": "object",
       "additionalProperties": { "type": "string" },
-      "description": "Optional request headers. Auth header is added by the daemon."
+      "description": "Optional request headers. Auth header is added by the daemon; credential-bearing input headers are rejected by the MCP schema and stripped defensively by the daemon."
     },
     "body_b64":    { "type": "string", "description": "Optional base64-encoded request body." },
     "auth_scheme": {
       "type": "string",
-      "enum": ["bearer", "basic", "header", "query"],
-      "description": "How to attach the secret: 'bearer' = Authorization: Bearer <s>; 'basic' = HTTP Basic; 'header' = custom header (provide header_name); 'query' = URL query parameter (provide query_name)."
+      "enum": ["bearer", "basic", "header"],
+      "description": "How to attach the secret: 'bearer' = Authorization: Bearer <s>; 'basic' = HTTP Basic; 'header' = custom header (provide header_name). Query-string auth is disabled because URLs are commonly logged."
     },
-    "header_name": { "type": "string", "description": "Required when auth_scheme is 'header'." },
-    "query_name":  { "type": "string", "description": "Required when auth_scheme is 'query'." }
+    "header_name": { "type": "string", "description": "Required when auth_scheme is 'header'." }
   },
   "required": ["secret_name", "method", "url", "auth_scheme"],
   "additionalProperties": false
@@ -224,10 +228,15 @@ body, and signing key never appear in the response and are never logged.
 | `bearer` | Adds `Authorization: Bearer <secret>` |
 | `basic`  | Adds `Authorization: Basic base64(secret)` (secret should be `user:pass`) |
 | `header` | Adds `<header_name>: <secret>` |
-| `query`  | Appends `?<query_name>=<secret>` to the URL |
 
 The daemon strips any caller-supplied `Authorization`, `Cookie`, or
-`X-Api-Key` headers before attaching its own — no smuggling.
+credential-shaped headers before attaching its own — no smuggling.
+
+Caveat: the upstream response is returned to the MCP client. Cloak redacts exact
+secret forms from response body/headers and marks `redacted=true` if it changed
+anything, but transformed credentials, submitted bodies, and unrelated sensitive
+data can still appear in a remote response. Only allow hosts whose response
+behavior you trust.
 
 **Example request:**
 ```json
@@ -252,7 +261,8 @@ date: Sun, 04 May 2026 10:00:00 GMT
 ```
 
 The shim renders status / headers / body as plain text. Binary bodies
-become `<binary, N bytes>` (`packages/cloak-mcp/src/tools/proxy_authenticated_http_request.ts:50-82`).
+become `<binary, N bytes>` in
+`packages/cloak-mcp/src/tools/proxy_authenticated_http_request.ts`.
 
 The url's host must match `policy.toml::allowed_hosts`, evaluated by the
 daemon before the secret is read.
@@ -261,7 +271,7 @@ daemon before the secret is read.
 
 ## 5. `mint_short_lived_token`
 
-**Description (verbatim):**
+**Description:**
 > Mint a short-lived derived token from a long-lived parent secret. Examples:
 > STS session credentials from an AWS access key, an installation token from
 > a GitHub App private key, a scoped PAT from a parent PAT. Returns the
@@ -325,14 +335,15 @@ daemon before the secret is read.
 }
 ```
 
-The parent secret is never echoed. The minted token is a derivative; rotating
-the parent is a separate flow.
+The parent secret is never echoed. The minted token is a derived credential that
+the MCP client receives by design, and it can authorize actions until it
+expires. Rotating the parent is a separate flow.
 
 ---
 
 ## 6. `query_audit`
 
-**Description (verbatim):**
+**Description:**
 > Query the local Cloak audit log of privileged operations. Filterable by
 > time range, tool name, secret name, and result. Returns audit entries —
 > never secret values.
@@ -347,7 +358,7 @@ the parent is a separate flow.
     "until":  { "type": "string",  "description": "Exclusive upper bound (RFC3339 timestamp) for audit entries." },
     "tool":   { "type": "string",  "description": "Filter by tool name (e.g. 'sign_request')." },
     "secret": { "type": "string",  "description": "Filter by secret name." },
-    "result": { "type": "string",  "description": "Filter by result tag (e.g. 'ok', 'denied', 'error')." },
+    "result": { "type": "string",  "description": "Filter by result tag (e.g. 'started', 'ok', 'denied', 'error')." },
     "limit":  { "type": "integer", "minimum": 1, "description": "Maximum number of entries to return." }
   },
   "required": [],
@@ -391,14 +402,17 @@ Entries never contain secret values. The `prev_hash` chains each entry to
 the previous; `cloak audit verify` recomputes the chain and rejects any
 mutated, deleted, or reordered line.
 
+Network side-effecting tools write a `started` entry before the outbound
+request and a final `ok` or `error` entry after it returns.
+
 ---
 
 ## What is **not** in this surface
 
 - No `get_secret`, `reveal_secret`, `read_secret`, or any other accessor that
   would return raw stored material to the model.
-- No `vault.add`, `vault.set`, `vault.rm`, `vault.show` — those are CLI-only
-  per `crates/cloak-core/src/daemon.rs:300-308,420-427`.
+- No `vault.add`, `vault.set`, `vault.rm`, `vault.show` — write/reveal methods
+  are CLI-only in `crates/cloak-core/src/daemon.rs`.
 - No streaming, no bidirectional pushes — request/response only.
 
 If you propose a new tool, it requires a Discussion + varun approval

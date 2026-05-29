@@ -1,12 +1,12 @@
 import { z } from "zod";
 import { request } from "../ipc.ts";
-import type { CloakTool, ToolResult } from "./types.ts";
-import { secretListSchema } from "./validation.ts";
+import { jsonToolResult, type CloakTool, type ToolResult } from "./types.ts";
+import { JSON_SCHEMA_URI, secretListJsonSchema, secretListSchema } from "./validation.ts";
 
 const argsSchema = z.object({}).strict();
 
 const inputSchema = {
-  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $schema: JSON_SCHEMA_URI,
   type: "object",
   properties: {},
   additionalProperties: false,
@@ -17,12 +17,11 @@ export const listSecretNames: CloakTool = {
   description:
     "List the names and metadata of secrets stored in the local Cloak vault. Returns names, kinds, and tags only — never the secret values themselves.",
   inputSchema,
+  outputSchema: secretListJsonSchema,
   async handler(rawArgs: unknown): Promise<ToolResult> {
     argsSchema.parse(rawArgs ?? {});
     const result = await request("vault.list", {});
     const parsed = secretListSchema.parse(result);
-    return {
-      content: [{ type: "text", text: JSON.stringify(parsed) }],
-    };
+    return jsonToolResult(parsed);
   },
 };

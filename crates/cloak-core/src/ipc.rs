@@ -127,6 +127,7 @@ impl From<&Error> for RpcError {
             Error::AuditChainBroken(line) => {
                 rpc_error("audit-broken", format!("audit chain broken at line {line}"))
             }
+            Error::AuditHeadMismatch => rpc_error("audit-broken", "audit head anchor mismatch"),
             Error::Aead(m) => rpc_error("aead-failure", *m),
             Error::Kdf(m) => rpc_error("internal-error", *m),
             Error::SodiumInit => rpc_error("internal-error", "sodium init failed"),

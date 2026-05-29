@@ -5,6 +5,7 @@ use cloak_core::crypto::Secret;
 use cloak_core::vault::SecretKind;
 use cloak_core::Error;
 
+use super::audit_log;
 use super::{open_vault, unlock::unlock_interactive, Context};
 
 /// Add a new secret. Vault must be initialized. Prompts for the value
@@ -36,14 +37,40 @@ pub fn run(ctx: &Context, name: &str, kind: SecretKind, tags: Vec<String>) -> Re
     };
     let value: Secret<String> = Secret::new(raw_value);
 
+    audit_log::append_required(
+        "cli.add",
+        Some(name),
+        cloak_core::audit::AuditResult::Started,
+        Some("add".into()),
+    )?;
     match vault.add(name, kind, tags, &value) {
         Ok(()) => {
+            audit_log::append_required(
+                "cli.add",
+                Some(name),
+                cloak_core::audit::AuditResult::Ok,
+                Some("add".into()),
+            )?;
             println!("added: {name}");
             Ok(())
         }
         Err(Error::SecretExists(_)) => {
+            audit_log::append_required(
+                "cli.add",
+                Some(name),
+                cloak_core::audit::AuditResult::Error,
+                Some("secret already exists".into()),
+            )?;
             anyhow::bail!("secret already exists: {name}");
         }
-        Err(other) => Err(other.into()),
+        Err(other) => {
+            audit_log::append_required(
+                "cli.add",
+                Some(name),
+                cloak_core::audit::AuditResult::Error,
+                Some("add failed".into()),
+            )?;
+            Err(other.into())
+        }
     }
 }

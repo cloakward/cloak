@@ -4,10 +4,12 @@
 > CI, security scans, smoke tests, Apple signing/notarization, cosign/SLSA
 > verification, downstream publish jobs, and published-artifact install
 > checks must pass before a stable tag is recommended. Windows is not part
-> of the current release artifacts yet ([issue #3](https://github.com/cloakward/cloak/issues/3)).
+> of the current release artifacts yet ([issue #2](https://github.com/cloakward/cloak/issues/2)).
 > On Linux the desktop pepper uses freedesktop Secret Service and `cloak show`
-> gates the reveal on polkit (`dev.cloak.show-secret`; install
-> `scripts/polkit/dev.cloak.policy` under `/usr/share/polkit-1/actions/`).
+> gates the reveal on polkit (`dev.cloak.show-secret`; install the packaged
+> `dev.cloak.policy` under `/usr/share/polkit-1/actions/`).
+> Linux daemon peer-auth also requires Linux 6.5+ for `SO_PEERPIDFD`;
+> older kernels fail closed before issuing CLI or MCP session tokens.
 > The walkthrough starts macOS-flavored; Linux systemd guidance follows.
 
 ## Gatekeeper note (macOS)
@@ -23,35 +25,83 @@ Bare command-line Mach-O binaries cannot be stapled in-place like `.pkg` or
 Gatekeeper may need an online ticket lookup on first launch.
 
 Release tags built by the current workflow are also cosign-signed and
-SLSA-attested for tarballs, `sha256sums.txt`, and Claude Desktop `.dxt`
+SLSA-attested for tarballs, `sha256sums.txt`, and macOS Claude Desktop `.dxt`
 packages. Older preview `.dxt` files may not be covered; require matching
 `.sig` / `.cert` files and a SLSA subject before treating a `.dxt` as verified.
 
 If you build from source there is no Gatekeeper friction either — your local toolchain produces an ad-hoc-signed binary that runs immediately.
 
-## 1. Build
+macOS trust surfaces such as Gatekeeper and Background Items show the
+Developer ID certificate subject, not the package name. Current signed
+downloads may therefore display the individual Developer ID name
+"Varun Menon"; that is expected until Cloak uses an Apple organization
+account.
+
+## 1. Full install: CLI + daemon + MCP shim
+
+On macOS arm64/x64 and Linux x64 glibc:
+
+```sh
+brew install cloakward/cloak/cloak
+cloak setup
+```
+
+This installs `cloak`, `cloakd`, and `cloak-mcp`, then walks through vault
+creation, daemon setup, and MCP-client registration. For Linux x64 musl or
+Linux arm64, use the verified release tarball for your target from GitHub
+Releases. Linux x64 musl and Linux arm64 currently ship the CLI and daemon
+only; native `cloak-mcp` packages are built for macOS arm64/x64 and Linux x64
+glibc.
+
+## 1b. Build from source
 
 ```sh
 git clone <this-repo>
 cd cloak
-cargo build --release --workspace
+./scripts/prepare-libsodium-dist.sh
+SODIUM_DIST_DIR="$PWD/.cargo/libsodium-dist" cargo build --release --workspace
 cd packages/cloak-mcp && bun install --frozen-lockfile && bun run build
+cd ../..
+mkdir -p "$HOME/.local/bin"
+install -m 755 target/release/cloak "$HOME/.local/bin/cloak"
+install -m 755 target/release/cloakd "$HOME/.local/bin/cloakd"
+install -m 755 packages/cloak-mcp/dist/cloak-mcp "$HOME/.local/bin/cloak-mcp"
 ```
 
 Binaries:
-- `target/release/cloak` — CLI
-- `target/release/cloakd` — daemon
-- `packages/cloak-mcp/dist/cloak-mcp` — MCP server (single binary)
+- `$HOME/.local/bin/cloak` — CLI
+- `$HOME/.local/bin/cloakd` — daemon
+- `$HOME/.local/bin/cloak-mcp` — MCP server (single binary)
 
-## 2. Install the daemon (launchd, per-user)
+Keep all three installed in the same directory. The production daemon pins
+trusted client binaries by hash at startup and trusts the `cloak-mcp` sibling
+next to `cloakd`; pointing an MCP client at `packages/cloak-mcp/dist/cloak-mcp`
+while the daemon runs from another install directory can fail peer auth.
+
+## 1c. MCP shim only
+
+Claude Desktop users on macOS can drag-and-drop a verified `Cloak-*.dxt` after
+`cloak` and `cloakd` are already installed. The `.dxt` installs the
+`cloak-mcp` shim only. It does not install the vault CLI or daemon. The
+`.dxt` first-run flow never initializes the vault from inside Claude
+Desktop; it shows setup guidance and requires you to run `cloak setup` in a
+terminal so the one-time recovery seed can be displayed and verified safely.
+Then run `cloak daemon start` and `cloak unlock`, and restart Claude Desktop.
+
+npm distribution is paused until it can ship audited native `cloak-mcp`
+binaries per supported platform. Use Homebrew, release tarballs, or signed
+macOS `.dxt` assets for Claude Desktop installs.
+
+## 2. Install the daemon manually (source builds, macOS launchd)
 
 ```sh
-./scripts/install-launchd.sh
-launchctl list | grep cloakd     # should show running
+cloak daemon install --launchd
+cloak daemon start
+launchctl print "gui/$(id -u)/dev.cloak.cloakd"
 tail -f ~/Library/Logs/cloak/cloakd.err.log
 ```
 
-## 2b. Install the daemon on Linux (systemd user)
+## 2b. Install the daemon manually on Linux (systemd user)
 
 Install the binaries somewhere on your user `PATH`:
 
@@ -64,6 +114,15 @@ install -Dm755 packages/cloak-mcp/dist/cloak-mcp ~/.local/bin/cloak-mcp
 Install the polkit action so `cloak show` can perform a user-presence check:
 
 ```sh
+# Homebrew on Linux:
+sudo install -Dm644 "$(brew --prefix cloak)/share/cloak/dev.cloak.policy" \
+  /usr/share/polkit-1/actions/dev.cloak.policy
+
+# Release tarball, run from the extracted cloak-<version>-<target> directory:
+sudo install -Dm644 share/polkit-1/actions/dev.cloak.policy \
+  /usr/share/polkit-1/actions/dev.cloak.policy
+
+# Source checkout:
 sudo install -Dm644 scripts/polkit/dev.cloak.policy \
   /usr/share/polkit-1/actions/dev.cloak.policy
 ```
@@ -157,13 +216,16 @@ must be told the passphrase **once per `cloakd` start** — that is, after every
 reboot, manual `launchctl unload/load`, or daemon crash:
 
 ```sh
-cloak daemon-unlock              # prompts for the passphrase, pushes it
+cloak unlock                     # prompts for the passphrase, pushes it
                                  # to the running cloakd over the UDS
 ```
 
-The daemon stays unlocked for the rest of the session. `cloak status` will
-show whether it's locked or unlocked. If you skip this step, MCP tool
-calls that need to read a secret will return `vault-locked`.
+`cloak daemon-unlock` is the same command under its older name. The daemon
+stays unlocked until it exits or receives `vault.lock`. `cloak status`
+prints vault-file metadata plus `daemon state: locked` / `unlocked` when
+the daemon is reachable; `cloak daemon status` only reports whether the
+background process is running. If you skip this step, MCP tool calls that
+need to read a secret will return `vault-locked`.
 
 ## 6. Wire into Claude Desktop
 
@@ -173,7 +235,7 @@ Add to your `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "cloak": {
-      "command": "/absolute/path/to/cloak/packages/cloak-mcp/dist/cloak-mcp"
+      "command": "/Users/YOU/.local/bin/cloak-mcp"
     }
   }
 }
@@ -185,11 +247,33 @@ Restart Claude Desktop. In a new chat, ask:
 
 You'll see a `list_secret_names` tool call. The model will receive names and metadata only — never values.
 
-To make an authenticated call without ever handling the key:
+To make an authenticated call without ever handling the stored key:
 
 > "Send a GET to https://api.openai.com/v1/models using my OPENAI_API_KEY."
 
-The model will call `proxy_authenticated_http_request`. The daemon attaches the key, makes the request, returns status + body. The key never leaves the daemon.
+The starter policy is default-deny. Before that prompt can succeed, edit
+the policy file, uncomment or add an `OPENAI_API_KEY` rule that allows
+`api.openai.com`, then restart and unlock the daemon. `cloak doctor` prints
+the exact policy path; by default it is
+`~/Library/Application Support/cloak/policy.toml` on macOS and
+`~/.config/cloak/policy.toml` on Linux:
+
+```toml
+[[secrets]]
+name = "OPENAI_API_KEY"
+
+[secrets.tools.proxy_authenticated_http_request]
+allowed_hosts = ["api.openai.com"]
+```
+
+```sh
+cloak daemon restart
+cloak unlock
+```
+
+The model will call `proxy_authenticated_http_request`. The daemon attaches the stored key, makes the request, and returns the upstream status, headers, and body to the MCP client. Cloak strips the auth header it attached, but it does not scrub arbitrary upstream responses; only allow hosts you trust not to echo credentials.
+
+If you use `mint_short_lived_token`, the returned token is intentionally sent to the MCP client. It is not the long-lived parent secret, but it is still a credential until it expires.
 
 ## 7. Inspect the audit log
 
@@ -197,6 +281,19 @@ The hash-chained JSONL audit log lives at `~/Library/Application Support/cloak/a
 
 ```sh
 tail -n 20 ~/Library/Application\ Support/cloak/audit.jsonl
+cloak audit verify
+```
+
+If you are upgrading an existing install that already has a non-empty
+`audit.jsonl` from before external audit-head anchoring existed, new writes
+fail closed until you review the log and explicitly adopt its current head.
+The adopt command recomputes and verifies the hash chain before seeding the
+external anchor:
+
+```sh
+tail -n 20 ~/Library/Application\ Support/cloak/audit.jsonl
+cloak audit adopt-head --yes
+cloak audit verify
 ```
 
 ## What's deliberately not here yet
@@ -204,7 +301,5 @@ tail -n 20 ~/Library/Application\ Support/cloak/audit.jsonl
 - Windows installers.
 - Automated secret rotation (`cloak rotate NAME`).
 - Production `.pkg` / `.dmg` with offline-stapled notarization tickets.
-- Fully pinned-by-digest release infrastructure for every GitHub Action and
-  Docker base image.
 
 See `CHANGELOG.md` for the full deferred list.

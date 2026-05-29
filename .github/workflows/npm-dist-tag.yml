@@ -1,19 +1,17 @@
-# One-shot dist-tag operations on @cloak-ward/mcp.
+# One-shot dist-tag cleanup operations on @cloak-ward/mcp.
 #
 # npm requires 2FA-or-bypass-token for dist-tag changes regardless of
 # whether the maintainer has 2FA configured locally. Running the
-# operation here uses the repo's NPM_TOKEN secret (a granular access
-# token with bypass-2FA enabled), so the maintainer does not need to
-# wrangle tokens or OTP codes on their laptop.
+# operation here uses the repo's NPM_TOKEN secret (a granular access token
+# with bypass-2FA enabled), so the maintainer does not need to wrangle tokens
+# or OTP codes on their laptop. Adding/promoting dist-tags is paused while
+# npm publishing is paused; removal remains available for cleanup.
 #
 # Trigger via GitHub UI (Actions → npm-dist-tag → Run workflow) or:
 #   gh workflow run npm-dist-tag.yml --repo cloakward/cloak \
-#     -f action=add -f version=0.9.0-rc1 -f tag=beta
-#   gh workflow run npm-dist-tag.yml --repo cloakward/cloak \
 #     -f action=rm -f tag=latest
 #
-# `version` is required for `add` and ignored for `rm` (npm's CLI uses
-# only the package name + dist-tag for removal).
+# `version` is currently ignored.
 
 name: npm-dist-tag
 
@@ -21,18 +19,17 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "add | rm"
+        description: "rm"
         required: true
         type: choice
         options:
-          - add
           - rm
       tag:
         description: "Dist-tag (e.g. beta, latest, next)"
         required: true
         type: string
       version:
-        description: "Package version (e.g. 0.9.0-rc1) — required for `add`, ignored for `rm`"
+        description: "Ignored while npm publishing is paused"
         required: false
         type: string
 
@@ -45,7 +42,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Setup Node.js 24
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
@@ -63,14 +60,6 @@ jobs:
             exit 1
           fi
           case "$ACTION" in
-            add)
-              if [ -z "${VERSION:-}" ]; then
-              echo "::error::version input is required for action=add"
-                exit 1
-              fi
-              echo "==> npm dist-tag add @cloak-ward/mcp@${VERSION} ${TAG}"
-              npm dist-tag add "@cloak-ward/mcp@${VERSION}" "${TAG}"
-              ;;
             rm)
               echo "==> npm dist-tag rm @cloak-ward/mcp ${TAG}"
               npm dist-tag rm "@cloak-ward/mcp" "${TAG}"

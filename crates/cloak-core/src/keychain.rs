@@ -28,6 +28,12 @@ pub const ACCOUNT: &str = "vault.pepper";
 /// item's ACL surface (and so a stale mirror on its own can never leak
 /// pepper material). Stored as 8 bytes, big-endian `u64`.
 pub const ROLLBACK_COUNTER_ACCOUNT: &str = "vault.rollback-counter.v1";
+/// Account name for an in-progress rollback-counter mirror update.
+pub const ROLLBACK_COUNTER_PENDING_ACCOUNT: &str = "vault.rollback-counter-pending.v1";
+/// Account name for the audit-log head anchor.
+pub const AUDIT_HEAD_ACCOUNT: &str = "audit.head.v1";
+/// Account name for an in-progress audit-log head update.
+pub const AUDIT_HEAD_PENDING_ACCOUNT: &str = "audit.head-pending.v1";
 
 /// Length of the random pepper, in bytes.
 pub const PEPPER_LEN: usize = 32;
@@ -40,6 +46,52 @@ pub const PEPPER_LEN: usize = 32;
 /// roll the vault back can also roll the counter file back in lockstep,
 /// defeating the detection. The OS keychain path is the real defense.
 const ROLLBACK_COUNTER_FILENAME: &str = "rollback-counter";
+const ROLLBACK_COUNTER_PENDING_FILENAME: &str = "rollback-counter-pending";
+const PENDING_COUNTER_MAGIC: &[u8; 8] = b"CLKRCP01";
+const AUDIT_HEAD_FILENAME: &str = "audit-head";
+const AUDIT_HEAD_PENDING_FILENAME: &str = "audit-head-pending";
+const PENDING_AUDIT_HEAD_MAGIC: &[u8; 8] = b"CLKAHP01";
+
+/// Rollback-counter mirror state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollbackCounterMirror {
+    /// The mirror is cleanly committed to this counter value.
+    Committed(u64),
+    /// A write was in flight. `committed` is the last durable value before
+    /// the SQLite transaction; `pending` is the counter written by that
+    /// transaction if it committed before the process exited.
+    Pending {
+        /// Last known committed counter before the pending write.
+        committed: u64,
+        /// Counter expected after the pending SQLite transaction commits.
+        pending: u64,
+    },
+}
+
+/// Audit-log head anchored outside `audit.jsonl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditHead {
+    /// Final sequence number in the audit log.
+    pub seq: u64,
+    /// SHA-256 hash of the final audit entry's canonical JSON, or all zeroes
+    /// for an empty audit log.
+    pub hash: [u8; 32],
+}
+
+/// Committed or in-flight audit-head anchor state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditHeadAnchor {
+    /// The anchor is cleanly committed to this head.
+    Committed(AuditHead),
+    /// A write was in flight. `committed` is the durable head before the
+    /// append and `pending` is the head after the appended audit entry.
+    Pending {
+        /// Last known committed audit head before the pending append.
+        committed: AuditHead,
+        /// Expected audit head after the pending append.
+        pending: AuditHead,
+    },
+}
 
 /// Env var: if set, points at a file holding the pepper bytes.
 ///
@@ -230,16 +282,14 @@ pub fn delete_pepper() -> Result<()> {
 // vault open compares the file counter to the mirror:
 //
 // - file == mirror   → ok
-// - file >  mirror   → vault was bumped externally (e.g. an rsync from
-//                      another device); refresh the mirror to the file.
-// - file <  mirror   → ROLLBACK. Refuse to open with
-//                      `Error::VaultRollbackDetected`.
+// - file != mirror   → rollback/mirror-integrity failure. Refuse to open
+//                      with `Error::VaultRollbackDetected`.
 // - mirror missing   → first run after upgrade; seed mirror from file.
 //
-// Order on writes: write the file first (the source of truth), then
-// mirror to the keychain. A failed mirror write is logged but does NOT
-// fail the vault write — the file's counter is what protects against
-// future rollbacks; the mirror only catches them at *read* time.
+// Order on writes: record a pending mirror transition (`old -> new`),
+// commit the SQLite transaction, then finalize the committed mirror. If
+// the process exits in the middle, the next open accepts exactly the old
+// or new counter named by the pending marker and repairs the mirror.
 
 /// Read the rollback-counter mirror, honoring `CLOAK_PEPPER_FILE` first.
 /// Returns `Ok(None)` if no mirror has been written yet (fresh install or
@@ -255,10 +305,42 @@ pub fn read_keychain_counter() -> Result<Option<u64>> {
     keychain_counter_read()
 }
 
+/// Read committed or pending rollback-counter mirror state.
+pub fn read_rollback_counter_mirror() -> Result<Option<RollbackCounterMirror>> {
+    #[cfg(any(test, feature = "test-util"))]
+    if rollback_mirror_disabled() {
+        return Ok(None);
+    }
+    let committed = read_keychain_counter()?;
+    let pending = if let Some(path) = std::env::var_os(PEPPER_FILE_ENV) {
+        file_pending_counter_read(std::path::Path::new(&path))?
+    } else {
+        keychain_pending_counter_read()?
+    };
+    if let Some((committed_before, pending_after)) = pending {
+        return match committed {
+            Some(mirror) if mirror == pending_after => {
+                Ok(Some(RollbackCounterMirror::Committed(mirror)))
+            }
+            Some(mirror) if mirror == committed_before => {
+                Ok(Some(RollbackCounterMirror::Pending {
+                    committed: committed_before,
+                    pending: pending_after,
+                }))
+            }
+            Some(mirror) => Ok(Some(RollbackCounterMirror::Committed(mirror))),
+            None => Ok(Some(RollbackCounterMirror::Pending {
+                committed: committed_before,
+                pending: pending_after,
+            })),
+        };
+    }
+    Ok(committed.map(RollbackCounterMirror::Committed))
+}
+
 /// Write the rollback-counter mirror to the OS keychain (or the file
-/// fallback). The keychain is best-effort by design: on any failure the
-/// caller should warn but not abort the surrounding write — the file
-/// counter is the source of truth.
+/// fallback). Mutating vault operations call this before committing their
+/// SQLite transaction; any failure aborts the operation.
 pub fn mirror_counter(value: u64) -> Result<()> {
     #[cfg(any(test, feature = "test-util"))]
     if rollback_mirror_disabled() {
@@ -268,6 +350,99 @@ pub fn mirror_counter(value: u64) -> Result<()> {
         return file_counter_write(std::path::Path::new(&path), value);
     }
     keychain_counter_write(value)
+}
+
+/// Record that a rollback-counter update is in flight.
+pub fn mirror_counter_pending(committed: u64, pending: u64) -> Result<()> {
+    #[cfg(any(test, feature = "test-util"))]
+    if rollback_mirror_disabled() {
+        return Ok(());
+    }
+    if let Some(path) = std::env::var_os(PEPPER_FILE_ENV) {
+        return file_pending_counter_write(std::path::Path::new(&path), committed, pending);
+    }
+    keychain_pending_counter_write(committed, pending)
+}
+
+/// Clear the in-flight rollback-counter marker.
+pub fn clear_counter_pending() -> Result<()> {
+    #[cfg(any(test, feature = "test-util"))]
+    if rollback_mirror_disabled() {
+        return Ok(());
+    }
+    if let Some(path) = std::env::var_os(PEPPER_FILE_ENV) {
+        return file_pending_counter_delete(std::path::Path::new(&path));
+    }
+    keychain_pending_counter_delete()
+}
+
+/// Read committed or pending audit-head anchor state.
+pub fn read_audit_head_anchor() -> Result<Option<AuditHeadAnchor>> {
+    #[cfg(any(test, feature = "test-util"))]
+    if audit_head_anchor_disabled() {
+        return Ok(None);
+    }
+    let committed = if let Some(path) = std::env::var_os(PEPPER_FILE_ENV) {
+        file_audit_head_read(std::path::Path::new(&path))?
+    } else {
+        keychain_audit_head_read()?
+    };
+    let pending = if let Some(path) = std::env::var_os(PEPPER_FILE_ENV) {
+        file_pending_audit_head_read(std::path::Path::new(&path))?
+    } else {
+        keychain_pending_audit_head_read()?
+    };
+    if let Some((committed_before, pending_after)) = pending {
+        return match committed {
+            Some(anchor) if anchor == pending_after => Ok(Some(AuditHeadAnchor::Committed(anchor))),
+            Some(anchor) if anchor == committed_before => Ok(Some(AuditHeadAnchor::Pending {
+                committed: committed_before,
+                pending: pending_after,
+            })),
+            Some(anchor) => Ok(Some(AuditHeadAnchor::Committed(anchor))),
+            None => Ok(Some(AuditHeadAnchor::Pending {
+                committed: committed_before,
+                pending: pending_after,
+            })),
+        };
+    }
+    Ok(committed.map(AuditHeadAnchor::Committed))
+}
+
+/// Write the committed audit-head anchor.
+pub fn write_audit_head_anchor(head: AuditHead) -> Result<()> {
+    #[cfg(any(test, feature = "test-util"))]
+    if audit_head_anchor_disabled() {
+        return Ok(());
+    }
+    if let Some(path) = std::env::var_os(PEPPER_FILE_ENV) {
+        return file_audit_head_write(std::path::Path::new(&path), head);
+    }
+    keychain_audit_head_write(head)
+}
+
+/// Record that an audit-head update is in flight.
+pub fn write_audit_head_pending(committed: AuditHead, pending: AuditHead) -> Result<()> {
+    #[cfg(any(test, feature = "test-util"))]
+    if audit_head_anchor_disabled() {
+        return Ok(());
+    }
+    if let Some(path) = std::env::var_os(PEPPER_FILE_ENV) {
+        return file_pending_audit_head_write(std::path::Path::new(&path), committed, pending);
+    }
+    keychain_pending_audit_head_write(committed, pending)
+}
+
+/// Clear the in-flight audit-head marker.
+pub fn clear_audit_head_pending() -> Result<()> {
+    #[cfg(any(test, feature = "test-util"))]
+    if audit_head_anchor_disabled() {
+        return Ok(());
+    }
+    if let Some(path) = std::env::var_os(PEPPER_FILE_ENV) {
+        return file_pending_audit_head_delete(std::path::Path::new(&path));
+    }
+    keychain_pending_audit_head_delete()
 }
 
 /// Test-only escape hatch. When `CLOAK_DISABLE_ROLLBACK_MIRROR=1` is
@@ -292,6 +467,23 @@ fn rollback_mirror_disabled() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(any(test, feature = "test-util"))]
+fn audit_head_anchor_disabled() -> bool {
+    std::env::var_os("CLOAK_ENABLE_AUDIT_HEAD")
+        .map(|v| v != "1")
+        .unwrap_or(true)
+}
+
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) fn audit_head_anchor_enforcement_disabled() -> bool {
+    audit_head_anchor_disabled()
+}
+
+#[cfg(not(any(test, feature = "test-util")))]
+pub(crate) fn audit_head_anchor_enforcement_disabled() -> bool {
+    false
+}
+
 /// Encode/decode helpers — 8 bytes big-endian.
 fn encode_counter(v: u64) -> [u8; 8] {
     v.to_be_bytes()
@@ -308,6 +500,72 @@ fn decode_counter(bytes: &[u8]) -> Result<u64> {
     Ok(u64::from_be_bytes(a))
 }
 
+fn encode_pending_counter(committed: u64, pending: u64) -> [u8; 24] {
+    let mut out = [0u8; 24];
+    out[..8].copy_from_slice(PENDING_COUNTER_MAGIC);
+    out[8..16].copy_from_slice(&committed.to_be_bytes());
+    out[16..24].copy_from_slice(&pending.to_be_bytes());
+    out
+}
+
+fn decode_pending_counter(bytes: &[u8]) -> Result<(u64, u64)> {
+    if bytes.len() != 24 || &bytes[..8] != PENDING_COUNTER_MAGIC {
+        return Err(Error::Keychain(format!(
+            "rollback pending counter has wrong format: {} bytes",
+            bytes.len()
+        )));
+    }
+    let mut committed = [0u8; 8];
+    committed.copy_from_slice(&bytes[8..16]);
+    let mut pending = [0u8; 8];
+    pending.copy_from_slice(&bytes[16..24]);
+    Ok((u64::from_be_bytes(committed), u64::from_be_bytes(pending)))
+}
+
+fn encode_audit_head(head: AuditHead) -> [u8; 40] {
+    let mut out = [0u8; 40];
+    out[..8].copy_from_slice(&head.seq.to_be_bytes());
+    out[8..40].copy_from_slice(&head.hash);
+    out
+}
+
+fn decode_audit_head(bytes: &[u8]) -> Result<AuditHead> {
+    if bytes.len() != 40 {
+        return Err(Error::Keychain(format!(
+            "audit head anchor has wrong length: {} (expected 40)",
+            bytes.len()
+        )));
+    }
+    let mut seq = [0u8; 8];
+    seq.copy_from_slice(&bytes[..8]);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&bytes[8..40]);
+    Ok(AuditHead {
+        seq: u64::from_be_bytes(seq),
+        hash,
+    })
+}
+
+fn encode_pending_audit_head(committed: AuditHead, pending: AuditHead) -> [u8; 88] {
+    let mut out = [0u8; 88];
+    out[..8].copy_from_slice(PENDING_AUDIT_HEAD_MAGIC);
+    out[8..48].copy_from_slice(&encode_audit_head(committed));
+    out[48..88].copy_from_slice(&encode_audit_head(pending));
+    out
+}
+
+fn decode_pending_audit_head(bytes: &[u8]) -> Result<(AuditHead, AuditHead)> {
+    if bytes.len() != 88 || &bytes[..8] != PENDING_AUDIT_HEAD_MAGIC {
+        return Err(Error::Keychain(format!(
+            "audit pending head has wrong format: {} bytes",
+            bytes.len()
+        )));
+    }
+    let committed = decode_audit_head(&bytes[8..48])?;
+    let pending = decode_audit_head(&bytes[48..88])?;
+    Ok((committed, pending))
+}
+
 /// Resolve the file-fallback counter path: sibling of the pepper file.
 fn counter_file_path(pepper_path: &std::path::Path) -> std::path::PathBuf {
     pepper_path
@@ -315,6 +573,30 @@ fn counter_file_path(pepper_path: &std::path::Path) -> std::path::PathBuf {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(ROLLBACK_COUNTER_FILENAME)
+}
+
+fn pending_counter_file_path(pepper_path: &std::path::Path) -> std::path::PathBuf {
+    pepper_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(ROLLBACK_COUNTER_PENDING_FILENAME)
+}
+
+fn audit_head_file_path(pepper_path: &std::path::Path) -> std::path::PathBuf {
+    pepper_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(AUDIT_HEAD_FILENAME)
+}
+
+fn pending_audit_head_file_path(pepper_path: &std::path::Path) -> std::path::PathBuf {
+    pepper_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(AUDIT_HEAD_PENDING_FILENAME)
 }
 
 fn file_counter_read(pepper_path: &std::path::Path) -> Result<Option<u64>> {
@@ -344,11 +626,128 @@ fn file_counter_read(pepper_path: &std::path::Path) -> Result<Option<u64>> {
 }
 
 fn file_counter_write(pepper_path: &std::path::Path, value: u64) -> Result<()> {
+    file_write_private(&counter_file_path(pepper_path), &encode_counter(value))
+}
+
+fn file_pending_counter_read(pepper_path: &std::path::Path) -> Result<Option<(u64, u64)>> {
+    let path = pending_counter_file_path(pepper_path);
+    if !path.exists() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| Error::Keychain(format!("stat pending counter file: {e}")))?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(Error::Keychain(format!(
+                "rollback pending counter file {} is world/group accessible (mode {:o}); refusing to load",
+                path.display(),
+                mode
+            )));
+        }
+    }
+    let bytes = std::fs::read(&path)
+        .map_err(|e| Error::Keychain(format!("read pending counter file: {e}")))?;
+    decode_pending_counter(&bytes).map(Some)
+}
+
+fn file_pending_counter_write(
+    pepper_path: &std::path::Path,
+    committed: u64,
+    pending: u64,
+) -> Result<()> {
+    file_write_private(
+        &pending_counter_file_path(pepper_path),
+        &encode_pending_counter(committed, pending),
+    )
+}
+
+fn file_pending_counter_delete(pepper_path: &std::path::Path) -> Result<()> {
+    let path = pending_counter_file_path(pepper_path);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::Keychain(format!("delete pending counter file: {e}"))),
+    }
+}
+
+fn file_audit_head_read(pepper_path: &std::path::Path) -> Result<Option<AuditHead>> {
+    let path = audit_head_file_path(pepper_path);
+    let Some(bytes) = file_read_private_optional(&path, "audit head")? else {
+        return Ok(None);
+    };
+    decode_audit_head(&bytes).map(Some)
+}
+
+fn file_audit_head_write(pepper_path: &std::path::Path, head: AuditHead) -> Result<()> {
+    file_write_private(&audit_head_file_path(pepper_path), &encode_audit_head(head))
+}
+
+fn file_pending_audit_head_read(
+    pepper_path: &std::path::Path,
+) -> Result<Option<(AuditHead, AuditHead)>> {
+    let path = pending_audit_head_file_path(pepper_path);
+    let Some(bytes) = file_read_private_optional(&path, "pending audit head")? else {
+        return Ok(None);
+    };
+    decode_pending_audit_head(&bytes).map(Some)
+}
+
+fn file_pending_audit_head_write(
+    pepper_path: &std::path::Path,
+    committed: AuditHead,
+    pending: AuditHead,
+) -> Result<()> {
+    file_write_private(
+        &pending_audit_head_file_path(pepper_path),
+        &encode_pending_audit_head(committed, pending),
+    )
+}
+
+fn file_pending_audit_head_delete(pepper_path: &std::path::Path) -> Result<()> {
+    let path = pending_audit_head_file_path(pepper_path);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::Keychain(format!(
+            "delete pending audit head file: {e}"
+        ))),
+    }
+}
+
+fn file_read_private_optional(
+    path: &std::path::Path,
+    label: &'static str,
+) -> Result<Option<Vec<u8>>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta =
+            std::fs::metadata(path).map_err(|e| Error::Keychain(format!("stat {label}: {e}")))?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(Error::Keychain(format!(
+                "{label} file {} is world/group accessible (mode {:o}); refusing to load",
+                path.display(),
+                mode
+            )));
+        }
+    }
+    let bytes =
+        std::fs::read(path).map_err(|e| Error::Keychain(format!("read {label} file: {e}")))?;
+    Ok(Some(bytes))
+}
+
+fn file_write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
-    let path = counter_file_path(pepper_path);
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -372,13 +771,12 @@ fn file_counter_write(pepper_path: &std::path::Path, value: u64) -> Result<()> {
             f.set_permissions(perms)
                 .map_err(|e| Error::Keychain(format!("chmod counter tmp: {e}")))?;
         }
-        f.write_all(&encode_counter(value))
+        f.write_all(bytes)
             .map_err(|e| Error::Keychain(format!("write counter tmp: {e}")))?;
         f.sync_all()
             .map_err(|e| Error::Keychain(format!("sync counter tmp: {e}")))?;
     }
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| Error::Keychain(format!("rename counter tmp: {e}")))?;
+    std::fs::rename(&tmp, path).map_err(|e| Error::Keychain(format!("rename counter tmp: {e}")))?;
     Ok(())
 }
 
@@ -408,6 +806,124 @@ fn keychain_counter_write(value: u64) -> Result<()> {
         .map_err(|e| Error::Keychain(format!("set_generic_password (rollback counter): {e}")))
 }
 
+#[cfg(target_os = "macos")]
+fn keychain_pending_counter_read() -> Result<Option<(u64, u64)>> {
+    use security_framework::passwords::get_generic_password;
+    match get_generic_password(SERVICE, ROLLBACK_COUNTER_PENDING_ACCOUNT) {
+        Ok(bytes) => decode_pending_counter(&bytes).map(Some),
+        Err(e) => {
+            if e.code() == -25300 {
+                Ok(None)
+            } else {
+                Err(Error::Keychain(format!(
+                    "get_generic_password (rollback pending counter): {e}"
+                )))
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_pending_counter_write(committed: u64, pending: u64) -> Result<()> {
+    use security_framework::passwords::set_generic_password;
+    set_generic_password(
+        SERVICE,
+        ROLLBACK_COUNTER_PENDING_ACCOUNT,
+        &encode_pending_counter(committed, pending),
+    )
+    .map_err(|e| {
+        Error::Keychain(format!(
+            "set_generic_password (rollback pending counter): {e}"
+        ))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_pending_counter_delete() -> Result<()> {
+    use security_framework::passwords::delete_generic_password;
+    match delete_generic_password(SERVICE, ROLLBACK_COUNTER_PENDING_ACCOUNT) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if e.code() == -25300 {
+                Ok(())
+            } else {
+                Err(Error::Keychain(format!(
+                    "delete_generic_password (rollback pending counter): {e}"
+                )))
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_audit_head_read() -> Result<Option<AuditHead>> {
+    use security_framework::passwords::get_generic_password;
+    match get_generic_password(SERVICE, AUDIT_HEAD_ACCOUNT) {
+        Ok(bytes) => decode_audit_head(&bytes).map(Some),
+        Err(e) => {
+            if e.code() == -25300 {
+                Ok(None)
+            } else {
+                Err(Error::Keychain(format!(
+                    "get_generic_password (audit head): {e}"
+                )))
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_audit_head_write(head: AuditHead) -> Result<()> {
+    use security_framework::passwords::set_generic_password;
+    set_generic_password(SERVICE, AUDIT_HEAD_ACCOUNT, &encode_audit_head(head))
+        .map_err(|e| Error::Keychain(format!("set_generic_password (audit head): {e}")))
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_pending_audit_head_read() -> Result<Option<(AuditHead, AuditHead)>> {
+    use security_framework::passwords::get_generic_password;
+    match get_generic_password(SERVICE, AUDIT_HEAD_PENDING_ACCOUNT) {
+        Ok(bytes) => decode_pending_audit_head(&bytes).map(Some),
+        Err(e) => {
+            if e.code() == -25300 {
+                Ok(None)
+            } else {
+                Err(Error::Keychain(format!(
+                    "get_generic_password (pending audit head): {e}"
+                )))
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_pending_audit_head_write(committed: AuditHead, pending: AuditHead) -> Result<()> {
+    use security_framework::passwords::set_generic_password;
+    set_generic_password(
+        SERVICE,
+        AUDIT_HEAD_PENDING_ACCOUNT,
+        &encode_pending_audit_head(committed, pending),
+    )
+    .map_err(|e| Error::Keychain(format!("set_generic_password (pending audit head): {e}")))
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_pending_audit_head_delete() -> Result<()> {
+    use security_framework::passwords::delete_generic_password;
+    match delete_generic_password(SERVICE, AUDIT_HEAD_PENDING_ACCOUNT) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if e.code() == -25300 {
+                Ok(())
+            } else {
+                Err(Error::Keychain(format!(
+                    "delete_generic_password (pending audit head): {e}"
+                )))
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn keychain_counter_read() -> Result<Option<u64>> {
     linux_secret_service::counter_read()
@@ -416,6 +932,46 @@ fn keychain_counter_read() -> Result<Option<u64>> {
 #[cfg(target_os = "linux")]
 fn keychain_counter_write(value: u64) -> Result<()> {
     linux_secret_service::counter_write(value)
+}
+
+#[cfg(target_os = "linux")]
+fn keychain_pending_counter_read() -> Result<Option<(u64, u64)>> {
+    linux_secret_service::pending_counter_read()
+}
+
+#[cfg(target_os = "linux")]
+fn keychain_pending_counter_write(committed: u64, pending: u64) -> Result<()> {
+    linux_secret_service::pending_counter_write(committed, pending)
+}
+
+#[cfg(target_os = "linux")]
+fn keychain_pending_counter_delete() -> Result<()> {
+    linux_secret_service::pending_counter_delete()
+}
+
+#[cfg(target_os = "linux")]
+fn keychain_audit_head_read() -> Result<Option<AuditHead>> {
+    linux_secret_service::audit_head_read()
+}
+
+#[cfg(target_os = "linux")]
+fn keychain_audit_head_write(head: AuditHead) -> Result<()> {
+    linux_secret_service::audit_head_write(head)
+}
+
+#[cfg(target_os = "linux")]
+fn keychain_pending_audit_head_read() -> Result<Option<(AuditHead, AuditHead)>> {
+    linux_secret_service::pending_audit_head_read()
+}
+
+#[cfg(target_os = "linux")]
+fn keychain_pending_audit_head_write(committed: AuditHead, pending: AuditHead) -> Result<()> {
+    linux_secret_service::pending_audit_head_write(committed, pending)
+}
+
+#[cfg(target_os = "linux")]
+fn keychain_pending_audit_head_delete() -> Result<()> {
+    linux_secret_service::pending_audit_head_delete()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -432,16 +988,72 @@ fn keychain_counter_write(_value: u64) -> Result<()> {
     ))
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn keychain_pending_counter_read() -> Result<Option<(u64, u64)>> {
+    Err(Error::Keychain(
+        "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed rollback counter".to_string(),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn keychain_pending_counter_write(_committed: u64, _pending: u64) -> Result<()> {
+    Err(Error::Keychain(
+        "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed rollback counter".to_string(),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn keychain_pending_counter_delete() -> Result<()> {
+    Err(Error::Keychain(
+        "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed rollback counter".to_string(),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn keychain_audit_head_read() -> Result<Option<AuditHead>> {
+    Err(Error::Keychain(
+        "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed audit head".to_string(),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn keychain_audit_head_write(_head: AuditHead) -> Result<()> {
+    Err(Error::Keychain(
+        "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed audit head".to_string(),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn keychain_pending_audit_head_read() -> Result<Option<(AuditHead, AuditHead)>> {
+    Err(Error::Keychain(
+        "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed audit head".to_string(),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn keychain_pending_audit_head_write(_committed: AuditHead, _pending: AuditHead) -> Result<()> {
+    Err(Error::Keychain(
+        "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed audit head".to_string(),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn keychain_pending_audit_head_delete() -> Result<()> {
+    Err(Error::Keychain(
+        "OS keychain unsupported on this platform in v1.0; set CLOAK_PEPPER_FILE to use a file-backed audit head".to_string(),
+    ))
+}
+
 /// Delete the rollback-counter mirror item. Used by tests and `cloak destroy`.
 #[cfg(target_os = "macos")]
 pub fn delete_rollback_counter() -> Result<()> {
     use security_framework::passwords::delete_generic_password;
     match delete_generic_password(SERVICE, ROLLBACK_COUNTER_ACCOUNT) {
-        Ok(()) => Ok(()),
+        Ok(()) => keychain_pending_counter_delete(),
         // -25300 == errSecItemNotFound: nothing to delete is success.
         Err(e) => {
             if e.code() == -25300 {
-                Ok(())
+                keychain_pending_counter_delete()
             } else {
                 Err(Error::Keychain(format!(
                     "delete_generic_password (rollback counter): {e}"
@@ -454,7 +1066,8 @@ pub fn delete_rollback_counter() -> Result<()> {
 /// Delete the rollback-counter mirror via Secret Service.
 #[cfg(target_os = "linux")]
 pub fn delete_rollback_counter() -> Result<()> {
-    linux_secret_service::counter_delete()
+    linux_secret_service::counter_delete()?;
+    linux_secret_service::pending_counter_delete()
 }
 
 /// Stub for platforms without an OS keychain integration yet.
@@ -475,8 +1088,15 @@ pub fn delete_rollback_counter() -> Result<()> {
 /// `CLOAK_PEPPER_FILE` for the headless case.
 #[cfg(target_os = "linux")]
 mod linux_secret_service {
-    use super::{decode_counter, encode_counter};
-    use super::{ACCOUNT, PEPPER_LEN, ROLLBACK_COUNTER_ACCOUNT, SERVICE};
+    use super::{
+        decode_audit_head, decode_counter, decode_pending_audit_head, decode_pending_counter,
+        encode_audit_head, encode_counter, encode_pending_audit_head, encode_pending_counter,
+        AuditHead,
+    };
+    use super::{
+        ACCOUNT, AUDIT_HEAD_ACCOUNT, AUDIT_HEAD_PENDING_ACCOUNT, PEPPER_LEN,
+        ROLLBACK_COUNTER_ACCOUNT, ROLLBACK_COUNTER_PENDING_ACCOUNT, SERVICE,
+    };
     use crate::crypto::Secret;
     use crate::error::{Error, Result};
     use secret_service::blocking::{Collection, SecretService};
@@ -487,6 +1107,12 @@ mod linux_secret_service {
     const ITEM_LABEL: &str = "Cloak vault pepper";
     /// Item label for the rollback-counter mirror.
     const COUNTER_LABEL: &str = "Cloak vault rollback counter";
+    /// Item label for the pending rollback-counter mirror transition.
+    const PENDING_COUNTER_LABEL: &str = "Cloak vault rollback counter pending update";
+    /// Item label for the audit-head anchor.
+    const AUDIT_HEAD_LABEL: &str = "Cloak audit log head";
+    /// Item label for the pending audit-head update.
+    const PENDING_AUDIT_HEAD_LABEL: &str = "Cloak audit log head pending update";
     /// `Item::set_secret` content-type for raw bytes.
     const CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -609,6 +1235,27 @@ mod linux_secret_service {
         m
     }
 
+    fn pending_counter_attrs() -> HashMap<&'static str, &'static str> {
+        let mut m = HashMap::new();
+        m.insert("service", SERVICE);
+        m.insert("account", ROLLBACK_COUNTER_PENDING_ACCOUNT);
+        m
+    }
+
+    fn audit_head_attrs() -> HashMap<&'static str, &'static str> {
+        let mut m = HashMap::new();
+        m.insert("service", SERVICE);
+        m.insert("account", AUDIT_HEAD_ACCOUNT);
+        m
+    }
+
+    fn pending_audit_head_attrs() -> HashMap<&'static str, &'static str> {
+        let mut m = HashMap::new();
+        m.insert("service", SERVICE);
+        m.insert("account", AUDIT_HEAD_PENDING_ACCOUNT);
+        m
+    }
+
     pub(super) fn counter_read() -> Result<Option<u64>> {
         let ss = connect()?;
         let search = ss.search_items(counter_attrs()).map_err(dbus_unavailable)?;
@@ -646,6 +1293,138 @@ mod linux_secret_service {
     pub(super) fn counter_delete() -> Result<()> {
         let ss = connect()?;
         let search = ss.search_items(counter_attrs()).map_err(dbus_unavailable)?;
+        for item in search.unlocked.into_iter().chain(search.locked) {
+            let _ = item.unlock();
+            item.delete().map_err(dbus_unavailable)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn pending_counter_read() -> Result<Option<(u64, u64)>> {
+        let ss = connect()?;
+        let search = ss
+            .search_items(pending_counter_attrs())
+            .map_err(dbus_unavailable)?;
+        let mut hit = search.unlocked.into_iter().next();
+        if hit.is_none() {
+            if let Some(item) = search.locked.into_iter().next() {
+                item.unlock().map_err(dbus_unavailable)?;
+                hit = Some(item);
+            }
+        }
+        match hit {
+            Some(item) => {
+                let bytes = item.get_secret().map_err(dbus_unavailable)?;
+                decode_pending_counter(&bytes).map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(super) fn pending_counter_write(committed: u64, pending: u64) -> Result<()> {
+        let ss = connect()?;
+        let collection = unlocked_collection(&ss)?;
+        collection
+            .create_item(
+                PENDING_COUNTER_LABEL,
+                pending_counter_attrs(),
+                &encode_pending_counter(committed, pending),
+                /* replace = */ true,
+                CONTENT_TYPE,
+            )
+            .map_err(dbus_unavailable)?;
+        Ok(())
+    }
+
+    pub(super) fn pending_counter_delete() -> Result<()> {
+        let ss = connect()?;
+        let search = ss
+            .search_items(pending_counter_attrs())
+            .map_err(dbus_unavailable)?;
+        for item in search.unlocked.into_iter().chain(search.locked) {
+            let _ = item.unlock();
+            item.delete().map_err(dbus_unavailable)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn audit_head_read() -> Result<Option<AuditHead>> {
+        let ss = connect()?;
+        let search = ss
+            .search_items(audit_head_attrs())
+            .map_err(dbus_unavailable)?;
+        let mut hit = search.unlocked.into_iter().next();
+        if hit.is_none() {
+            if let Some(item) = search.locked.into_iter().next() {
+                item.unlock().map_err(dbus_unavailable)?;
+                hit = Some(item);
+            }
+        }
+        match hit {
+            Some(item) => {
+                let bytes = item.get_secret().map_err(dbus_unavailable)?;
+                decode_audit_head(&bytes).map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(super) fn audit_head_write(head: AuditHead) -> Result<()> {
+        let ss = connect()?;
+        let collection = unlocked_collection(&ss)?;
+        collection
+            .create_item(
+                AUDIT_HEAD_LABEL,
+                audit_head_attrs(),
+                &encode_audit_head(head),
+                /* replace = */ true,
+                CONTENT_TYPE,
+            )
+            .map_err(dbus_unavailable)?;
+        Ok(())
+    }
+
+    pub(super) fn pending_audit_head_read() -> Result<Option<(AuditHead, AuditHead)>> {
+        let ss = connect()?;
+        let search = ss
+            .search_items(pending_audit_head_attrs())
+            .map_err(dbus_unavailable)?;
+        let mut hit = search.unlocked.into_iter().next();
+        if hit.is_none() {
+            if let Some(item) = search.locked.into_iter().next() {
+                item.unlock().map_err(dbus_unavailable)?;
+                hit = Some(item);
+            }
+        }
+        match hit {
+            Some(item) => {
+                let bytes = item.get_secret().map_err(dbus_unavailable)?;
+                decode_pending_audit_head(&bytes).map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(super) fn pending_audit_head_write(committed: AuditHead, pending: AuditHead) -> Result<()> {
+        let ss = connect()?;
+        let collection = unlocked_collection(&ss)?;
+        collection
+            .create_item(
+                PENDING_AUDIT_HEAD_LABEL,
+                pending_audit_head_attrs(),
+                &encode_pending_audit_head(committed, pending),
+                /* replace = */ true,
+                CONTENT_TYPE,
+            )
+            .map_err(dbus_unavailable)?;
+        Ok(())
+    }
+
+    pub(super) fn pending_audit_head_delete() -> Result<()> {
+        let ss = connect()?;
+        let search = ss
+            .search_items(pending_audit_head_attrs())
+            .map_err(dbus_unavailable)?;
         for item in search.unlocked.into_iter().chain(search.locked) {
             let _ = item.unlock();
             item.delete().map_err(dbus_unavailable)?;

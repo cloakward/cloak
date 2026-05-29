@@ -1,8 +1,8 @@
-//! `cloak run [--only KEY1,KEY2] -- COMMAND` — run a child process with
+//! `cloak run (--only KEY1,KEY2 | --all) -- COMMAND` — run a child process with
 //! vault secrets injected as environment variables.
 //!
 //! ## Security boundary
-//! - Goes through the same biometric-gated unlock+show path as
+//! - Goes through the same user-presence-gated unlock+show path as
 //!   `cloak show`: unlock the vault locally, prompt Touch ID / polkit,
 //!   then decrypt per-record via the existing `Vault::show` API.
 //! - Secrets are passed to the child via `Command::env`. We never write
@@ -22,9 +22,19 @@ use cloak_core::biometric;
 
 use super::{open_vault, unlock::unlock_interactive, Context};
 
-pub fn run(ctx: &Context, only: Vec<String>, cmdline: Vec<OsString>) -> Result<ExitCode> {
+pub fn run(
+    ctx: &Context,
+    all: bool,
+    only: Vec<String>,
+    cmdline: Vec<OsString>,
+) -> Result<ExitCode> {
     if cmdline.is_empty() {
-        anyhow::bail!("usage: cloak run [--only K1,K2] -- COMMAND [ARG ...]");
+        anyhow::bail!("usage: cloak run (--only K1,K2 | --all) -- COMMAND [ARG ...]");
+    }
+    if !all && only.is_empty() {
+        anyhow::bail!(
+            "refusing to inject every secret implicitly; pass --only K1,K2 or --all explicitly"
+        );
     }
 
     let mut vault = open_vault(ctx)?;
@@ -46,7 +56,7 @@ pub fn run(ctx: &Context, only: Vec<String>, cmdline: Vec<OsString>) -> Result<E
         }
     }
 
-    let names: Vec<String> = if only.is_empty() {
+    let names: Vec<String> = if all {
         vault.list()?.into_iter().map(|m| m.name).collect()
     } else {
         only
@@ -57,12 +67,12 @@ pub fn run(ctx: &Context, only: Vec<String>, cmdline: Vec<OsString>) -> Result<E
         Vec::with_capacity(names.len());
     for n in &names {
         let s = vault.show(n)?;
-        audit_log::append(
+        audit_log::append_required(
             "cli.run",
             Some(n),
             cloak_core::audit::AuditResult::Ok,
             Some(format!("argv0={}", cmdline[0].to_string_lossy())),
-        );
+        )?;
         env_pairs.push((n.clone(), s));
     }
     drop(vault);

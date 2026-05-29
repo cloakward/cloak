@@ -12,7 +12,7 @@
 //! - **macOS** — Touch ID via the `LocalAuthentication` framework.
 //! - **Linux** — polkit's `org.freedesktop.PolicyKit1.Authority`
 //!   `CheckAuthorization` D-Bus method against the `dev.cloak.show-secret`
-//!   action (default policy `auth_self_keep`, see
+//!   action (default policy `auth_self`, see
 //!   `scripts/polkit/dev.cloak.policy`).
 //! - **Other** — a stub that returns `Ok(false)`; the daemon then
 //!   refuses the reveal.

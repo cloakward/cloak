@@ -54,6 +54,7 @@ async function main(): Promise<void> {
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
+      outputSchema: t.outputSchema,
     })),
   }));
 

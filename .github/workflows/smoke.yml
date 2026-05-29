@@ -9,6 +9,7 @@ on:
     branches: [main, beta]
   pull_request:
     branches: [main, beta]
+  workflow_call:
 
 concurrency:
   group: smoke-${{ github.workflow }}-${{ github.ref }}
@@ -35,28 +36,18 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install libsodium (macOS)
-        if: matrix.platform == 'macos'
-        run: brew install libsodium
-
-      - name: Install libsodium (Linux)
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsodium-dev pkg-config
+        uses: dtolnay/rust-toolchain@aad518f59d88bae90133242f9ddac7f8bbc5dddf
 
       - name: Install bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.2.9"
 
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
         with:
           key: smoke-${{ matrix.os }}
 

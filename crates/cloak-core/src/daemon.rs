@@ -19,7 +19,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -27,13 +27,13 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{Mutex, Notify};
 
-use crate::audit::{AuditLog, PeerSummary};
+use crate::audit::{AuditDraft, AuditLog, AuditResult, PeerSummary};
 use crate::crypto::Secret;
 use crate::egress::EgressClient;
 use crate::error::{Error, Result};
 use crate::handlers::HandlerCtx;
 use crate::ipc::{read_request_json, rpc_error, write_response_json, Request, Response};
-use crate::peer_auth::{self, PeerInfo, PeerPolicy};
+use crate::peer_auth::{self, PeerInfo, PeerKind, PeerPolicy};
 use crate::policy::PolicyEngine;
 use crate::session::{default_ttl, SessionRecord, SessionStore};
 #[cfg(any(test, feature = "test-util"))]
@@ -56,11 +56,12 @@ pub async fn run() -> Result<()> {
     let audit_path = default_audit_path()?;
     let policy_engine = PolicyEngine::from_path(&policy_path)?;
     let audit_log = AuditLog::open(&audit_path)?;
+    let peer_policy = PeerPolicy::installed_v01()?;
     let egress = EgressClient::new()?;
     let ctx = Arc::new(DaemonCtx {
         vault: Mutex::new(vault),
         sessions: SessionStore::new(),
-        policy: PeerPolicy::default_v01(),
+        policy: peer_policy,
         cli_basenames: vec!["cloak".to_string()],
         next_conn_id: AtomicU64::new(1),
         shutdown: Notify::new(),
@@ -149,8 +150,8 @@ struct DaemonCtx {
     egress: EgressClient,
 }
 
-/// Default policy file path: `~/.config/cloak/policy.toml`. Missing file
-/// yields a default-deny policy via `PolicyEngine::from_path`.
+/// Default policy file path from the platform config directory. Missing
+/// file yields a default-deny policy via `PolicyEngine::from_path`.
 fn default_policy_path() -> PathBuf {
     crate::policy::default_policy_path()
 }
@@ -238,77 +239,20 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     //    on macOS the kqueue watcher is registered by PID directly so
     //    we just take the standard `peer_info_from_unix` path.
     #[cfg(all(unix, not(target_os = "macos")))]
-    let (peer, peer_pidfd): (PeerInfo, Option<std::os::fd::OwnedFd>) = {
-        // Linux: try to capture a pidfd for the peer (race-free
-        // SO_PEERPIDFD on Linux 6.5+, falling back to pidfd_open by
-        // SO_PEERCRED-pid on older kernels). Both syscalls now produce
-        // O_NONBLOCK pidfds so AsyncFd registration is contract-clean.
-        //
-        // If pidfd capture fails for any reason, we MUST continue with
-        // pidfd=None — the rc1 disable was forced by the capture
-        // tripping a still-not-understood interaction with bun-built
-        // cloak-mcp peers on the GitHub Actions kernel that closed the
-        // peer socket pre-frame. Returning early closed the user-visible
-        // connection. We instead degrade to socket-FIN-driven session
-        // revocation (the rc3 status quo) and log debug.
-        let peer = match peer_auth::peer_info_from_unix(&stream) {
-            Ok(p) => p,
+    let (peer, peer_pidfd): (PeerInfo, std::os::fd::OwnedFd) = {
+        // Linux: capture a race-free pidfd and bind its inode into the
+        // session. If the kernel/runtime cannot provide SO_PEERPIDFD, fail
+        // closed instead of issuing a session with weaker PID-reuse semantics.
+        match peer_auth::peer_info_with_pidfd_linux(&stream) {
+            Ok((p, pidfd)) => (p, pidfd),
             Err(e) => {
-                tracing::warn!(error = %e, "peer_info_from_unix failed; closing connection");
+                tracing::warn!(
+                    error = %e,
+                    "pidfd peer identity capture failed; closing connection"
+                );
                 return Ok(());
             }
-        };
-        let pidfd = {
-            // Pidfd capture is allowlist-gated by basename. Two reasons:
-            //
-            // 1. Bun-built `cloak-mcp`: getsockopt(SO_PEERPIDFD) on a
-            //    bun-runtime peer on certain Linux kernels (observed
-            //    on GH Actions ubuntu-24.04) tears the peer socket
-            //    down before any frame is read. Bun owns its own
-            //    pidfds for subprocess management; the kernel-side
-            //    pidfd-inode sharing makes our additional capture
-            //    either collide (EEXIST on AsyncFd::new) or sever the
-            //    peer socket. Socket-FIN-driven revocation closes A8
-            //    for the common case anyway.
-            //
-            // 2. Cargo test binaries (`ipc_e2e-<hash>`, etc.): the
-            //    pidfd watcher task can outlive the test's tokio
-            //    runtime drop, blocking shutdown and hanging CI. The
-            //    integration tests don't need PID-recycle defense;
-            //    they need clean teardown.
-            //
-            // So: only capture pidfds for the production binaries
-            // where the watcher is actually load-bearing — `cloak`
-            // (CLI peer for `vault.show`, which the daemon now gates
-            // server-side via Touch ID / polkit) and `cloakd` (self-
-            // test). Everything else falls through to the socket-FIN
-            // revocation path (same surface as v0.1 / rc3).
-            let pidfd_allowed =
-                matches!(peer.basename().as_deref(), Some("cloak") | Some("cloakd"));
-            if !pidfd_allowed {
-                tracing::debug!(
-                    peer_pid = peer.pid,
-                    basename = peer.basename().unwrap_or_default(),
-                    "skipping pidfd capture for non-allowlisted peer; \
-                     relying on socket-FIN-driven revocation"
-                );
-                None
-            } else {
-                use std::os::fd::AsRawFd;
-                match peer_auth::linux::acquire_peer_pidfd(stream.as_raw_fd(), peer.pid) {
-                    Ok(p) => Some(p),
-                    Err(e) => {
-                        tracing::debug!(
-                            error = %e,
-                            peer_pid = peer.pid,
-                            "pidfd capture failed; falling back to socket-FIN-driven revocation"
-                        );
-                        None
-                    }
-                }
-            }
-        };
-        (peer, pidfd)
+        }
     };
     #[cfg(target_os = "macos")]
     let peer = match peer_auth::peer_info_from_unix(&stream) {
@@ -344,31 +288,76 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     //     instant the watcher fires. The task is aborted in the
     //     teardown path below if the read loop wins the race.
     let peer_exit = Arc::new(Notify::new());
+    let peer_exited = Arc::new(AtomicBool::new(false));
     #[cfg(target_os = "macos")]
-    let exit_watcher_task = spawn_peer_exit_watcher(&ctx, &peer, conn_id, peer_exit.clone());
-    // Linux: spawn a pidfd-based watcher when we successfully captured
-    // a pidfd (and the watcher's AsyncFd registration succeeds). If
-    // either capture or registration fails we simply drop the pidfd
-    // and rely on socket-FIN-driven session revocation, the same
-    // surface as v0.1 / rc3. NEVER close the connection from this
-    // path — the peer would lose service.
-    #[cfg(all(unix, not(target_os = "macos")))]
     let exit_watcher_task: Option<tokio::task::JoinHandle<()>> =
-        spawn_peer_exit_watcher(&ctx, &peer, peer_pidfd, conn_id, peer_exit.clone());
+        match spawn_peer_exit_watcher(&ctx, &peer, conn_id, peer_exit.clone(), peer_exited.clone())
+        {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                tracing::warn!(
+                    conn_id,
+                    peer_pid = peer.pid,
+                    error = %e,
+                    "kqueue watcher setup failed; closing connection before handshake"
+                );
+                return Ok(());
+            }
+        };
+    // Linux: spawn a pidfd-based watcher when we successfully captured
+    // a pidfd (and the watcher's AsyncFd registration succeeds). Capture
+    // itself is fail-closed above; watcher registration failure revokes
+    // eagerly inside `spawn_peer_exit_watcher`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let exit_watcher_task: Option<tokio::task::JoinHandle<()>> = match spawn_peer_exit_watcher(
+        &ctx,
+        &peer,
+        peer_pidfd,
+        conn_id,
+        peer_exit.clone(),
+        peer_exited.clone(),
+    ) {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            tracing::warn!(
+                conn_id,
+                peer_pid = peer.pid,
+                error = %e,
+                "pidfd watcher setup failed; closing connection before handshake"
+            );
+            return Ok(());
+        }
+    };
 
     // 2. Split the stream so we can read & write concurrently if we
     //    ever need to. v0.1 is request/response, so we just borrow.
     let (mut rd, mut wr) = stream.into_split();
 
     // 3. Connection loop. The peer-exit watcher revokes session tokens
-    //    immediately on peer death; the connection itself closes
-    //    naturally when the CLI's socket sees FIN. Forcing the read
-    //    loop to break on watcher-fire raced with in-flight responses
-    //    on slow handlers (e.g. vault.unlock's Argon2id KDF), so we
-    //    let the read return EOF do the teardown instead.
-    let _ = peer_exit; // keep the channel alive for the watcher signal path
+    //    immediately on peer death and also forces this loop closed.
+    //    An inherited socket fd must not be able to issue a fresh
+    //    handshake after the original peer process has exited.
     loop {
-        let req = match read_request_json(&mut rd).await {
+        if peer_exited.load(Ordering::SeqCst) {
+            tracing::debug!(conn_id, "peer-exit watcher fired; closing connection");
+            break;
+        }
+
+        let read_result = tokio::select! {
+            biased;
+            _ = peer_exit.notified() => {
+                tracing::debug!(conn_id, "peer-exit notification received; closing connection");
+                break;
+            }
+            r = read_request_json(&mut rd) => r,
+        };
+
+        if peer_exited.load(Ordering::SeqCst) {
+            tracing::debug!(conn_id, "peer exited during frame read; closing connection");
+            break;
+        }
+
+        let req = match read_result {
             Ok(r) => r,
             Err(Error::IpcFraming(m)) if m.contains("short read") => {
                 tracing::debug!(conn_id, "peer closed before sending a frame; short read");
@@ -386,6 +375,13 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
         };
 
         let resp = dispatch(&ctx, &peer, conn_id, req).await;
+        if peer_exited.load(Ordering::SeqCst) {
+            tracing::debug!(
+                conn_id,
+                "peer exited during request handling; suppressing response"
+            );
+            break;
+        }
         if write_response_json(&mut wr, &resp).await.is_err() {
             break;
         }
@@ -412,32 +408,24 @@ fn spawn_peer_exit_watcher(
     peer: &PeerInfo,
     conn_id: u64,
     peer_exit: Arc<Notify>,
-) -> Option<tokio::task::JoinHandle<()>> {
+    peer_exited: Arc<AtomicBool>,
+) -> Result<tokio::task::JoinHandle<()>> {
     let pid = peer.pid;
     let identity = peer.identity.clone();
     let watcher = match peer_auth::PeerExitWatcher::new(pid) {
         Ok(w) => w,
         Err(e) => {
-            // ESRCH at registration means the peer is already gone.
-            // Either way: refuse to issue any session for this conn.
             tracing::warn!(
                 conn_id,
                 peer_pid = pid,
                 error = %e,
-                "kqueue exit watcher could not register; revoking eagerly"
+                "kqueue exit watcher could not register"
             );
-            let sessions = ctx.sessions.clone_handle();
-            return Some(tokio::spawn(async move {
-                if let Some(id) = identity.as_ref() {
-                    sessions.revoke_by_identity(id).await;
-                }
-                sessions.revoke_by_conn(conn_id).await;
-                peer_exit.notify_waiters();
-            }));
+            return Err(e);
         }
     };
     let sessions = ctx.sessions.clone_handle();
-    Some(tokio::spawn(async move {
+    Ok(tokio::spawn(async move {
         match watcher.wait().await {
             Ok(()) => {
                 tracing::info!(
@@ -455,6 +443,7 @@ fn spawn_peer_exit_watcher(
                 );
             }
         }
+        peer_exited.store(true, Ordering::SeqCst);
         if let Some(id) = identity.as_ref() {
             sessions.revoke_by_identity(id).await;
         }
@@ -472,37 +461,27 @@ fn spawn_peer_exit_watcher(
 fn spawn_peer_exit_watcher(
     ctx: &Arc<DaemonCtx>,
     peer: &PeerInfo,
-    peer_pidfd: Option<std::os::fd::OwnedFd>,
+    peer_pidfd: std::os::fd::OwnedFd,
     conn_id: u64,
     peer_exit: Arc<Notify>,
-) -> Option<tokio::task::JoinHandle<()>> {
+    peer_exited: Arc<AtomicBool>,
+) -> Result<tokio::task::JoinHandle<()>> {
     let pid = peer.pid;
     let identity = peer.identity.clone();
-    let pidfd = peer_pidfd?;
-    let watcher = match peer_auth::linux::PidfdWatcher::new(pidfd, pid) {
+    let watcher = match peer_auth::linux::PidfdWatcher::new(peer_pidfd, pid) {
         Ok(w) => w,
         Err(e) => {
-            // pidfd registration with the tokio reactor failed. Don't
-            // revoke eagerly — the CLI process is alive (we just opened
-            // its pidfd), and any in-flight handshake/unlock would die
-            // before the first response. Log and skip the watcher; the
-            // session-token revoke-on-disconnect path still runs when
-            // the connection drops, so the worst-case window is bounded
-            // by socket FIN rather than process exit. Strictly weaker
-            // than the watcher-active case but still closes A8 for the
-            // common path (peer exit → socket FIN → revoke).
             tracing::warn!(
                 conn_id,
                 peer_pid = pid,
                 error = %e,
-                "pidfd watcher could not register with tokio reactor; \
-                 falling back to socket-FIN-driven revocation"
+                "pidfd watcher could not register with tokio reactor"
             );
-            return None;
+            return Err(e);
         }
     };
     let sessions = ctx.sessions.clone_handle();
-    Some(tokio::spawn(async move {
+    Ok(tokio::spawn(async move {
         match watcher.wait().await {
             Ok(()) => {
                 tracing::info!(
@@ -510,27 +489,22 @@ fn spawn_peer_exit_watcher(
                     peer_pid = pid,
                     "peer exited; revoking sessions for this connection"
                 );
-                if let Some(id) = identity.as_ref() {
-                    sessions.revoke_by_identity(id).await;
-                }
-                sessions.revoke_by_conn(conn_id).await;
-                peer_exit.notify_waiters();
             }
             Err(e) => {
-                // The watcher itself errored — we can't tell whether
-                // the peer actually exited. Don't revoke proactively;
-                // a false-positive revoke kills a live session. The
-                // socket-FIN-driven revoke_by_conn at serve_conn
-                // teardown still runs when the peer eventually
-                // disconnects.
                 tracing::warn!(
                     conn_id,
                     peer_pid = pid,
                     error = %e,
-                    "pidfd watcher errored; deferring revocation to socket-FIN path"
+                    "pidfd watcher errored; revoking sessions defensively"
                 );
             }
         }
+        peer_exited.store(true, Ordering::SeqCst);
+        if let Some(id) = identity.as_ref() {
+            sessions.revoke_by_identity(id).await;
+        }
+        sessions.revoke_by_conn(conn_id).await;
+        peer_exit.notify_waiters();
     }))
 }
 
@@ -599,7 +573,7 @@ async fn dispatch(ctx: &Arc<DaemonCtx>, peer: &PeerInfo, conn_id: u64, req: Requ
 
     // Handshake methods bypass the session-token check.
     if method == "cli.handshake" || method == "mcp.handshake" {
-        return match handle_handshake(ctx, peer, conn_id).await {
+        return match handle_handshake(ctx, peer, conn_id, &method).await {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, (&e).into()),
         };
@@ -652,9 +626,63 @@ impl From<Error> for DispatchError {
     }
 }
 
-async fn handle_handshake(ctx: &Arc<DaemonCtx>, peer: &PeerInfo, conn_id: u64) -> Result<Value> {
+async fn handle_handshake(
+    ctx: &Arc<DaemonCtx>,
+    peer: &PeerInfo,
+    conn_id: u64,
+    method: &str,
+) -> Result<Value> {
+    let basename = peer.basename();
+    let peer_kind = if basename
+        .as_ref()
+        .is_some_and(|b| ctx.cli_basenames.iter().any(|cli| cli == b))
+    {
+        PeerKind::Cli
+    } else if peer.kind() == PeerKind::Mcp
+        || basename.as_ref().is_some_and(|b| {
+            ctx.policy
+                .allowed_basenames
+                .iter()
+                .any(|allowed| allowed == b)
+        })
+    {
+        PeerKind::Mcp
+    } else {
+        PeerKind::Other
+    };
+    match (method, peer_kind) {
+        ("cli.handshake", PeerKind::Cli) | ("mcp.handshake", PeerKind::Mcp) => {}
+        _ => {
+            tracing::warn!(
+                peer_pid = peer.pid,
+                basename = ?peer.basename(),
+                method,
+                "peer kind does not match requested handshake"
+            );
+            return Err(Error::PeerNotTrusted);
+        }
+    }
+    if peer.identity.is_none() {
+        tracing::error!(
+            peer_pid = peer.pid,
+            basename = ?peer.basename(),
+            "peer identity unavailable; refusing to issue session"
+        );
+        return Err(Error::PeerNotTrusted);
+    }
     let tok = ctx.sessions.issue(peer, conn_id, default_ttl()).await?;
     Ok(json!({ "session_token": tok.0 }))
+}
+
+async fn audit_dispatch(
+    ctx: &Arc<DaemonCtx>,
+    draft: AuditDraft,
+) -> std::result::Result<(), DispatchError> {
+    let mut audit = ctx.audit_log.lock().await;
+    audit
+        .append(draft)
+        .map(|_| ())
+        .map_err(|_| DispatchError::Typed(Error::Other("audit append failed")))
 }
 
 async fn dispatch_method(
@@ -796,6 +824,7 @@ async fn dispatch_method(
         }
         "vault.show" => {
             let p: ShowParams = parse_params(params)?;
+            let summary = peer_summary_for(peer, session);
             // Server-side biometric / user-presence gate. The daemon
             // itself fires the Touch ID (macOS) / polkit (Linux) prompt
             // before any plaintext leaves the vault. No client-supplied
@@ -809,11 +838,54 @@ async fn dispatch_method(
                     .map_err(|_| DispatchError::Typed(Error::Other("biometric task panicked")))?
                     .map_err(|_| DispatchError::Typed(Error::BiometricFailed))?;
             if !confirmed {
+                audit_dispatch(
+                    ctx,
+                    AuditDraft {
+                        peer: summary,
+                        tool: "vault.show".to_string(),
+                        secret: Some(p.name),
+                        target: None,
+                        result: AuditResult::Denied,
+                        note: Some("user-presence denied".to_string()),
+                    },
+                )
+                .await?;
                 return Err(DispatchError::Typed(Error::BiometricFailed));
             }
-            let v = ctx.vault.lock().await;
-            require_unlocked(&v)?;
-            let s = v.show(&p.name)?;
+            let s = {
+                let v = ctx.vault.lock().await;
+                require_unlocked(&v)?;
+                match v.show(&p.name) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        audit_dispatch(
+                            ctx,
+                            AuditDraft {
+                                peer: summary,
+                                tool: "vault.show".to_string(),
+                                secret: Some(p.name),
+                                target: None,
+                                result: AuditResult::Error,
+                                note: Some("vault.show failed".to_string()),
+                            },
+                        )
+                        .await?;
+                        return Err(DispatchError::Typed(e));
+                    }
+                }
+            };
+            audit_dispatch(
+                ctx,
+                AuditDraft {
+                    peer: summary,
+                    tool: "vault.show".to_string(),
+                    secret: Some(p.name),
+                    target: None,
+                    result: AuditResult::Ok,
+                    note: Some("plaintext reveal".to_string()),
+                },
+            )
+            .await?;
             Ok(json!({ "value": s.expose_secret() }))
         }
 

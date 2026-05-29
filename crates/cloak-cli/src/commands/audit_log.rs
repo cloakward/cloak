@@ -35,21 +35,32 @@ pub fn cli_peer() -> PeerSummary {
 }
 
 /// Append an entry. Best-effort: failures are surfaced as a tracing
-/// warning but never block the command (we'd rather complete the user's
-/// action than fail it because the audit dir is read-only).
+/// warning but never block metadata-only commands.
 pub fn append(tool: &str, secret: Option<&str>, result: AuditResult, note: Option<String>) {
+    if let Err(e) = append_required(tool, secret, result, note) {
+        tracing::warn!(error = %e, "audit: append failed");
+    }
+}
+
+/// Append an entry and fail if it cannot be persisted. Plaintext-bearing and
+/// state-mutating operations use this before the risky side effect so audit
+/// logging is fail-closed for those paths.
+pub fn append_required(
+    tool: &str,
+    secret: Option<&str>,
+    result: AuditResult,
+    note: Option<String>,
+) -> Result<()> {
     let path = match default_audit_path() {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(error = %e, "audit: skip (no path)");
-            return;
+            anyhow::bail!("audit path unavailable: {e}");
         }
     };
     let mut log = match AuditLog::open(&path) {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!(error = %e, "audit: open failed");
-            return;
+            anyhow::bail!("audit open failed: {e}");
         }
     };
     let draft = AuditDraft {
@@ -60,7 +71,28 @@ pub fn append(tool: &str, secret: Option<&str>, result: AuditResult, note: Optio
         result,
         note,
     };
-    if let Err(e) = log.append(draft) {
-        tracing::warn!(error = %e, "audit: append failed");
+    log.append(draft)?;
+    Ok(())
+}
+
+pub fn run_verify() -> Result<()> {
+    let path = default_audit_path()?;
+    let log = AuditLog::open(&path)?;
+    let count = log.verify()?;
+    println!("audit log ok: {count} entries");
+    println!("path: {}", path.display());
+    Ok(())
+}
+
+pub fn run_adopt_head(yes: bool) -> Result<()> {
+    if !yes {
+        anyhow::bail!(
+            "refusing to adopt audit head without --yes; review the existing audit log first"
+        );
     }
+    let path = default_audit_path()?;
+    let head = AuditLog::adopt_existing_head(&path)?;
+    println!("audit head anchor adopted: {} entries", head.seq);
+    println!("path: {}", path.display());
+    Ok(())
 }

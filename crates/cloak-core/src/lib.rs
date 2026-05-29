@@ -18,6 +18,9 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+#[cfg(all(feature = "test-util", not(test), not(debug_assertions)))]
+compile_error!("cloak-core feature `test-util` must not be enabled in release builds");
+
 pub mod audit;
 pub mod biometric;
 pub mod crypto;

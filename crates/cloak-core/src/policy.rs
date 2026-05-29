@@ -20,9 +20,11 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 
-/// Default policy file path: `~/.config/cloak/policy.toml` (XDG config
-/// dir on Linux, `~/Library/Application Support` on macOS, etc.). Falls
-/// back to `/tmp/cloak-policy.toml` only if no config dir is detectable.
+/// Default policy file path: the platform config directory
+/// (`~/.config/cloak/policy.toml` on Linux,
+/// `~/Library/Application Support/cloak/policy.toml` on macOS, etc.).
+/// Falls back to `/tmp/cloak-policy.toml` only if no config dir is
+/// detectable.
 ///
 /// Both `cloakd` (loading the policy at startup) and `cloak setup` /
 /// `cloak doctor` (writing / inspecting it) resolve to the same path.
@@ -223,6 +225,18 @@ impl PolicyEngine {
 
         // 2. From the matched secret rule, look at tool-specific override.
         if let Some((idx, rule)) = secret_match {
+            if let Some(required_kind) = rule.kind.as_deref() {
+                if ctx.secret_kind != Some(required_kind) {
+                    return Decision {
+                        action: Action::Deny,
+                        reason: format!(
+                            "secret kind mismatch: expected {required_kind}, got {}",
+                            ctx.secret_kind.unwrap_or("<unknown>")
+                        ),
+                        matched_rule: Some(format!("[secrets.{}]", rule.name)),
+                    };
+                }
+            }
             if let Some(tr) = pick_tool_rule(&rule.tools, ctx.tool) {
                 if let Some(d) = decide_from_tool_rule(
                     tr,
@@ -281,22 +295,25 @@ fn decide_from_tool_rule(
     ctx: &EvalContext<'_>,
     rule_path: &str,
 ) -> Option<Decision> {
-    // `allowed_hosts` only applies to proxy_authenticated_http_request.
-    if ctx.tool == "proxy_authenticated_http_request" {
-        if let Some(hosts) = &rule.allowed_hosts {
-            let host = ctx.target_host.unwrap_or("");
-            let ok = hosts.iter().any(|pat| glob_match(pat, host));
-            if !ok {
-                return Some(Decision {
-                    action: Action::Deny,
-                    reason: format!(
-                        "host {} not in allowed_hosts ({} entries)",
-                        host,
-                        hosts.len()
-                    ),
-                    matched_rule: Some(rule_path.to_string()),
-                });
-            }
+    if let Some(hosts) = &rule.allowed_hosts {
+        let Some(host) = ctx.target_host else {
+            return Some(Decision {
+                action: Action::Deny,
+                reason: "allowed_hosts requires a target host".to_string(),
+                matched_rule: Some(rule_path.to_string()),
+            });
+        };
+        let ok = hosts.iter().any(|pat| glob_match(pat, host));
+        if !ok {
+            return Some(Decision {
+                action: Action::Deny,
+                reason: format!(
+                    "host {} not in allowed_hosts ({} entries)",
+                    host,
+                    hosts.len()
+                ),
+                matched_rule: Some(rule_path.to_string()),
+            });
         }
     }
 
@@ -330,7 +347,7 @@ fn decide_from_tool_rule(
         None => {
             // If allowed_hosts matched (or the rule has only an
             // allowed_hosts list with a hit), treat that as an Allow.
-            if ctx.tool == "proxy_authenticated_http_request" && rule.allowed_hosts.is_some() {
+            if rule.allowed_hosts.is_some() {
                 return Some(Decision {
                     action: Action::Allow,
                     reason: "host matched allowed_hosts".to_string(),
@@ -467,6 +484,21 @@ mod tests {
             tool,
             secret_name: secret,
             secret_kind: None,
+            target_host: Some(host),
+            peer_basename: "test",
+        }
+    }
+
+    fn ctx_host_kind<'a>(
+        tool: &'a str,
+        secret: Option<&'a str>,
+        host: &'a str,
+        kind: &'a str,
+    ) -> EvalContext<'a> {
+        EvalContext {
+            tool,
+            secret_name: secret,
+            secret_kind: Some(kind),
             target_host: Some(host),
             peer_basename: "test",
         }
@@ -918,10 +950,11 @@ mod tests {
     #[test]
     fn example_file_github_token_to_github_allowed() {
         let mut e = default_engine();
-        let d = e.evaluate(&ctx_host(
+        let d = e.evaluate(&ctx_host_kind(
             "proxy_authenticated_http_request",
             Some("GITHUB_TOKEN"),
             "api.github.com",
+            "api_key",
         ));
         assert_eq!(d.action, Action::Allow);
     }
@@ -929,10 +962,11 @@ mod tests {
     #[test]
     fn example_file_github_token_to_other_denied() {
         let mut e = default_engine();
-        let d = e.evaluate(&ctx_host(
+        let d = e.evaluate(&ctx_host_kind(
             "proxy_authenticated_http_request",
             Some("GITHUB_TOKEN"),
             "evil.com",
+            "api_key",
         ));
         assert_eq!(d.action, Action::Deny);
     }
@@ -940,19 +974,20 @@ mod tests {
     #[test]
     fn example_file_aws_glob_to_amazonaws_allowed() {
         let mut e = default_engine();
-        let d = e.evaluate(&ctx_host(
+        let d = e.evaluate(&ctx_host_kind(
             "proxy_authenticated_http_request",
             Some("AWS_DEPLOY_KEY"),
             "s3.us-east-1.amazonaws.com",
+            "api_key",
         ));
         assert_eq!(d.action, Action::Allow);
     }
 
     #[test]
-    fn example_file_mint_requires_confirmation() {
+    fn example_file_mint_is_denied_by_default() {
         let mut e = default_engine();
         let d = e.evaluate(&ctx("mint_short_lived_token", Some("OPENAI_API_KEY")));
-        assert_eq!(d.action, Action::RequireConfirmation);
+        assert_eq!(d.action, Action::Deny);
     }
 
     #[test]
@@ -1001,5 +1036,53 @@ mod tests {
             peer_basename: "test",
         };
         assert_eq!(e.evaluate(&c).action, Action::Deny);
+    }
+
+    #[test]
+    fn sign_request_allowed_hosts_are_enforced() {
+        let toml = r#"
+            [default]
+            action = "deny"
+            [[secrets]]
+            name = "AWS_KEY"
+            [secrets.tools.sign_request]
+            allowed_hosts = ["api.example.com"]
+        "#;
+        let mut e = PolicyEngine::from_str(toml).unwrap();
+        assert_eq!(
+            e.evaluate(&ctx_host(
+                "sign_request",
+                Some("AWS_KEY"),
+                "api.example.com"
+            ))
+            .action,
+            Action::Allow
+        );
+        assert_eq!(
+            e.evaluate(&ctx_host("sign_request", Some("AWS_KEY"), "evil.example"))
+                .action,
+            Action::Deny
+        );
+    }
+
+    #[test]
+    fn secret_kind_mismatch_denies_secret_rule() {
+        let toml = r#"
+            [default]
+            action = "deny"
+            [[secrets]]
+            name = "TOKEN"
+            kind = "api_key"
+            [secrets.tools.proxy_authenticated_http_request]
+            allowed_hosts = ["api.example.com"]
+        "#;
+        let mut e = PolicyEngine::from_str(toml).unwrap();
+        let d = e.evaluate(&ctx_host_kind(
+            "proxy_authenticated_http_request",
+            Some("TOKEN"),
+            "api.example.com",
+            "ssh_key",
+        ));
+        assert_eq!(d.action, Action::Deny);
     }
 }

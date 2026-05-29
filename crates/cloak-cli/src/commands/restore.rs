@@ -54,12 +54,12 @@ pub fn run(ctx: &Context) -> Result<()> {
     let mnemonic = match RecoveryMnemonic::parse(&raw) {
         Ok(m) => m,
         Err(_) => {
-            audit_log::append(
+            audit_log::append_required(
                 "cli.restore",
                 None,
                 AuditResult::Error,
                 Some("invalid mnemonic supplied".into()),
-            );
+            )?;
             return Err(Error::InvalidMnemonic.into());
         }
     };
@@ -69,19 +69,42 @@ pub fn run(ctx: &Context) -> Result<()> {
     // user typing a fresh passphrase twice and then learning they
     // mistyped a word.
     if let Err(e) = vault.verify_mnemonic(&mnemonic) {
-        audit_log::append(
+        audit_log::append_required(
             "cli.restore",
             None,
             AuditResult::Error,
             Some("mnemonic did not match stored recovery wrap".into()),
-        );
+        )?;
         return Err(e.into());
     }
 
     println!("Mnemonic accepted. Choose a NEW passphrase for the vault.");
     let new_pass = prompt_passphrase_twice()?;
 
-    let params = vault.restore_with_mnemonic(&mnemonic, &new_pass)?;
+    audit_log::append_required(
+        "cli.restore",
+        None,
+        AuditResult::Started,
+        Some("master re-wrap started".into()),
+    )?;
+    let params = match vault.restore_with_mnemonic(&mnemonic, &new_pass) {
+        Ok(p) => p,
+        Err(e) => {
+            audit_log::append_required(
+                "cli.restore",
+                None,
+                AuditResult::Error,
+                Some("master re-wrap failed".into()),
+            )?;
+            return Err(e.into());
+        }
+    };
+    audit_log::append_required(
+        "cli.restore",
+        None,
+        AuditResult::Ok,
+        Some("master re-wrapped under fresh passphrase".into()),
+    )?;
     println!("Vault restored.");
     println!(
         "  kdf: argon2id (m={} KiB, t={}, p={})",
@@ -89,12 +112,6 @@ pub fn run(ctx: &Context) -> Result<()> {
     );
     println!();
     println!("Your old passphrase is now invalid. Use the new one for `cloak unlock`.");
-    audit_log::append(
-        "cli.restore",
-        None,
-        AuditResult::Ok,
-        Some("master re-wrapped under fresh passphrase".into()),
-    );
     Ok(())
 }
 

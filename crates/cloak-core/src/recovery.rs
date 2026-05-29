@@ -19,7 +19,7 @@
 //!   master key (a fresh AEAD ciphertext + nonce) lives in the `meta`
 //!   table.
 //! - The mnemonic itself is shown to the user exactly once at vault
-//!   creation, and on demand via `cloak backup mnemonic` (Touch ID gated,
+//!   creation, and on demand via `cloak backup mnemonic` (user-presence gated,
 //!   audit-logged). It is never persisted.
 //! - We do **not** roll our own KDF. The seed comes from `bip39::Mnemonic::to_seed`
 //!   which is the standard PBKDF2-HMAC-SHA512 construction.

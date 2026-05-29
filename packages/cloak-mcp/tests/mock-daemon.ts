@@ -7,7 +7,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unlinkSync } from "node:fs";
 
-export type Handler = (params: unknown) => unknown | Promise<unknown>;
+export interface MockRequest {
+  id: string;
+  method: string;
+  params: unknown;
+  session_token?: string;
+}
+
+export type Handler = (params: unknown, req: MockRequest) => unknown | Promise<unknown>;
 export interface MockOptions {
   // Override what is sent back. If returned value is { __error: {code,message} },
   // the mock will respond with an error frame.
@@ -47,7 +54,7 @@ export async function startMockDaemon(opts: MockOptions): Promise<MockServer> {
         if (buf.length < 4 + len) return;
         const body = buf.subarray(4, 4 + len).toString("utf8");
         buf = buf.subarray(4 + len);
-        let req: { id: string; method: string; params: unknown };
+        let req: MockRequest;
         try {
           req = JSON.parse(body);
         } catch {
@@ -62,7 +69,7 @@ export async function startMockDaemon(opts: MockOptions): Promise<MockServer> {
           };
         } else {
           try {
-            const out = await handler(req.params);
+            const out = await handler(req.params, req);
             if (
               out &&
               typeof out === "object" &&

@@ -290,6 +290,7 @@ fn test_only_passphrase_env_requires_unsafe_guard() {
         .arg("--no-biometric")
         .env("CLOAK_PASSPHRASE", TEST_PASSPHRASE)
         .env("CLOAK_PEPPER_FILE", &pepper)
+        .env("CLOAK_ALLOW_MNEMONIC_STDOUT", "1")
         .env("RUST_LOG", "off")
         .arg("init")
         .assert()
@@ -498,6 +499,134 @@ fn backup_verify_rejects_wrong_mnemonic() {
 }
 
 #[test]
+fn backup_verify_requires_passphrase_before_mnemonic_check() {
+    let dir = TempDir::new().unwrap();
+    let (mut init, _) = cloak(&dir);
+    let out = init.arg("init").output().expect("init runs");
+    assert!(out.status.success());
+    let mnemonic = parse_mnemonic_from_init(&String::from_utf8_lossy(&out.stdout));
+
+    let path = dir.path().join("vault.cloak");
+    let pepper = dir.path().join("pepper");
+    let mut verify = Command::cargo_bin("cloak").unwrap();
+    verify
+        .arg("--vault")
+        .arg(&path)
+        .arg("--no-biometric")
+        .env(TEST_MODE_ENV, "1")
+        .env("CLOAK_PASSPHRASE", "totally-wrong-passphrase")
+        .env("CLOAK_MNEMONIC", &mnemonic)
+        .env("CLOAK_PEPPER_FILE", &pepper)
+        .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
+        .env("RUST_LOG", "off")
+        .arg("backup")
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid passphrase"));
+}
+
+#[test]
+fn setup_writes_init_audit_entries() {
+    use std::fs;
+
+    let dir = TempDir::new().unwrap();
+    let data_root = dir.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+    let path = dir.path().join("vault.cloak");
+    let pepper = dir.path().join("pepper");
+
+    let mut setup = Command::cargo_bin("cloak").unwrap();
+    setup
+        .arg("--vault")
+        .arg(&path)
+        .env(TEST_MODE_ENV, "1")
+        .env("CLOAK_PASSPHRASE", TEST_PASSPHRASE)
+        .env("CLOAK_PEPPER_FILE", &pepper)
+        .env("CLOAK_DISABLE_ROLLBACK_MIRROR", "1")
+        .env("CLOAK_ALLOW_MNEMONIC_STDOUT", "1")
+        .env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
+        .env("RUST_LOG", "off")
+        .arg("setup")
+        .arg("--skip-daemon")
+        .arg("--skip-clients")
+        .arg("--skip-env")
+        .assert()
+        .success();
+
+    let candidates = [
+        data_root.join("cloak/audit.jsonl"),
+        dir.path()
+            .join("Library/Application Support/cloak/audit.jsonl"),
+    ];
+    let body = candidates
+        .iter()
+        .find_map(|p| fs::read_to_string(p).ok())
+        .expect("setup audit file written under the test root");
+    assert!(
+        body.lines().any(|line| {
+            line.contains(r#""tool":"cli.init""#) && line.contains(r#""result":"started""#)
+        }),
+        "setup should audit initialization start: {body}"
+    );
+    assert!(
+        body.lines().any(|line| {
+            line.contains(r#""tool":"cli.init""#) && line.contains(r#""result":"ok""#)
+        }),
+        "setup should audit initialization success: {body}"
+    );
+}
+
+#[test]
+fn audit_adopt_head_recovers_legacy_nonempty_log() {
+    let dir = TempDir::new().unwrap();
+    let data_root = dir.path().join("data");
+    std::fs::create_dir_all(&data_root).unwrap();
+
+    let (mut init, _) = cloak(&dir);
+    init.env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let (mut verify_before, _) = cloak(&dir);
+    verify_before
+        .env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
+        .env("CLOAK_ENABLE_AUDIT_HEAD", "1")
+        .arg("audit")
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("audit head anchor mismatch"));
+
+    let (mut adopt, _) = cloak(&dir);
+    adopt
+        .env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
+        .env("CLOAK_ENABLE_AUDIT_HEAD", "1")
+        .arg("audit")
+        .arg("adopt-head")
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("audit head anchor adopted"));
+
+    let (mut verify_after, _) = cloak(&dir);
+    verify_after
+        .env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
+        .env("CLOAK_ENABLE_AUDIT_HEAD", "1")
+        .arg("audit")
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("audit log ok"));
+}
+
+#[test]
 fn restore_recovers_after_passphrase_loss() {
     let dir = TempDir::new().unwrap();
 
@@ -635,4 +764,21 @@ fn restore_writes_audit_entry() {
         body.contains("cli.restore"),
         "audit log should record the restore: {body}"
     );
+}
+
+#[test]
+fn run_requires_explicit_secret_selection() {
+    let dir = TempDir::new().unwrap();
+    let (mut init, _) = cloak(&dir);
+    init.arg("init").assert().success();
+
+    let (mut run, _) = cloak(&dir);
+    run.arg("run")
+        .arg("--")
+        .arg("/usr/bin/env")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to inject every secret implicitly",
+        ));
 }

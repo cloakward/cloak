@@ -26,6 +26,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use cloak_core::keychain::{mirror_counter, mirror_counter_pending};
 use cloak_core::store::{MetaRow, SqliteStore};
 use cloak_core::vault::Vault;
 use cloak_core::Error;
@@ -96,6 +97,14 @@ fn read_counter_file(pepper_path: &Path) -> Option<u64> {
     Some(u64::from_be_bytes(a))
 }
 
+fn pending_counter_file_exists(pepper_path: &Path) -> bool {
+    pepper_path
+        .parent()
+        .unwrap()
+        .join("rollback-counter-pending")
+        .exists()
+}
+
 #[test]
 fn missing_mirror_seeds_from_file_on_first_open() {
     let _g = lock_env();
@@ -114,6 +123,128 @@ fn missing_mirror_seeds_from_file_on_first_open() {
         read_counter_file(&pepper),
         Some(7),
         "mirror should have been seeded from the vault file counter"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_mirror_seed_failure_is_fail_closed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _g = lock_env();
+    let dir = tempfile::tempdir().unwrap();
+    let counter_dir = dir.path().join("counter-dir");
+    std::fs::create_dir(&counter_dir).unwrap();
+    let pepper = counter_dir.join("pepper");
+    let vault_path = dir.path().join("vault.cloak");
+    set_pepper_file(&pepper);
+
+    seed_vault(&vault_path, 7);
+
+    std::fs::set_permissions(&counter_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let opened = Vault::open_or_create(&vault_path);
+    std::fs::set_permissions(&counter_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    match opened {
+        Ok(_) => panic!("missing mirror seed failure must fail closed"),
+        Err(Error::Keychain(msg)) => assert!(
+            msg.contains("counter tmp") || msg.contains("counter dir"),
+            "unexpected keychain error: {msg}"
+        ),
+        Err(e) => panic!("expected Keychain error, got {e:?}"),
+    }
+    assert_eq!(
+        read_counter_file(&pepper),
+        None,
+        "failed seed must not leave a committed mirror"
+    );
+}
+
+#[test]
+fn pending_marker_recovers_when_sqlite_commit_completed() {
+    let _g = lock_env();
+    let dir = tempfile::tempdir().unwrap();
+    let pepper = dir.path().join("pepper");
+    let vault_path = dir.path().join("vault.cloak");
+    set_pepper_file(&pepper);
+
+    // Mirror is committed at 3, then a write starts for 3 -> 4 and the
+    // database commit completes before the process exits.
+    seed_vault(&vault_path, 3);
+    {
+        let _v = Vault::open_or_create(&vault_path).expect("seed");
+    }
+    mirror_counter_pending(3, 4).expect("write pending marker");
+    seed_vault(&vault_path, 4);
+
+    let _v = Vault::open_or_create(&vault_path).expect("pending completed write should recover");
+
+    assert_eq!(read_counter_file(&pepper), Some(4));
+    assert!(
+        !pending_counter_file_exists(&pepper),
+        "pending marker should be cleared after repair"
+    );
+}
+
+#[test]
+fn pending_marker_rejects_old_side_fail_closed() {
+    let _g = lock_env();
+    let dir = tempfile::tempdir().unwrap();
+    let pepper = dir.path().join("pepper");
+    let vault_path = dir.path().join("vault.cloak");
+    set_pepper_file(&pepper);
+
+    // Mirror is committed at 3, then a write starts for 3 -> 4 but the
+    // database is later observed at 3. That could be a crash before commit,
+    // but it is indistinguishable from an attacker restoring the old valid
+    // vault after a committed write whose mirror finalization failed. Fail
+    // closed.
+    seed_vault(&vault_path, 3);
+    {
+        let _v = Vault::open_or_create(&vault_path).expect("seed");
+    }
+    mirror_counter_pending(3, 4).expect("write pending marker");
+
+    match Vault::open_or_create(&vault_path) {
+        Ok(_) => panic!("pending old side must be rejected fail-closed"),
+        Err(Error::VaultRollbackDetected) => {}
+        Err(e) => panic!("expected VaultRollbackDetected, got {e:?}"),
+    }
+    assert_eq!(read_counter_file(&pepper), Some(3));
+    assert!(
+        pending_counter_file_exists(&pepper),
+        "pending marker should remain for forensic/debug visibility"
+    );
+}
+
+#[test]
+fn stale_pending_marker_after_finalization_cannot_downgrade_mirror() {
+    let _g = lock_env();
+    let dir = tempfile::tempdir().unwrap();
+    let pepper = dir.path().join("pepper");
+    let vault_path = dir.path().join("vault.cloak");
+    set_pepper_file(&pepper);
+
+    seed_vault(&vault_path, 3);
+    {
+        let _v = Vault::open_or_create(&vault_path).expect("seed");
+    }
+    mirror_counter_pending(3, 4).expect("write pending marker");
+    mirror_counter(4).expect("finalize mirror");
+
+    // The pending marker remains stale after finalization. A rollback to
+    // the old side of that stale transition must still be rejected because
+    // the committed mirror is already at 4.
+    seed_vault(&vault_path, 3);
+    match Vault::open_or_create(&vault_path) {
+        Ok(_) => panic!("stale pending marker must not allow mirror downgrade"),
+        Err(Error::VaultRollbackDetected) => {}
+        Err(e) => panic!("expected VaultRollbackDetected, got {e:?}"),
+    }
+    assert_eq!(read_counter_file(&pepper), Some(4));
+    assert!(
+        pending_counter_file_exists(&pepper),
+        "test setup should leave the stale pending marker in place"
     );
 }
 

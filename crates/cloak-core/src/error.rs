@@ -102,6 +102,10 @@ pub enum Error {
     #[error("audit chain broken at line {0}")]
     AuditChainBroken(u64),
 
+    /// Audit log head does not match the keychain-backed anchor.
+    #[error("audit head anchor mismatch")]
+    AuditHeadMismatch,
+
     /// Generic constraint violation; carries a static message (never secret).
     #[error("{0}")]
     Other(&'static str),
