@@ -26,7 +26,9 @@ expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/release-install.ym
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+# `releases/tags/<tag>` 404s for DRAFT releases (publish-release verifies the
+# marker while the release is still a draft); list and filter instead.
+release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq ".[] | select(.tag_name==\"${TAG}\")")"
 release_id="$(jq -r '.id' <<<"$release_json")"
 if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
   echo "::error::could not resolve release id for ${TAG}"

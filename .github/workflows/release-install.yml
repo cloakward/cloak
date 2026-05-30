@@ -137,7 +137,9 @@ jobs:
           version="${TAG#v}"
           tmp="$(mktemp -d)"
           trap 'rm -rf "$tmp"' EXIT
-          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          # `releases/tags/<tag>` 404s for DRAFT releases; list and filter
+          # instead (same REST shape; requires the job's contents:write).
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq ".[] | select(.tag_name==\"${TAG}\")")"
           {
             for target in \
               aarch64-apple-darwin \
@@ -177,7 +179,9 @@ jobs:
           set -euo pipefail
           mkdir -p evidence
           tag_sha="$(git rev-parse HEAD)"
-          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          # `releases/tags/<tag>` 404s for DRAFT releases; list and filter
+          # instead (same REST shape; requires the job's contents:write).
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq ".[] | select(.tag_name==\"${TAG}\")")"
           release_id="$(jq -r '.id' <<<"$release_json")"
           if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
             echo "::error::could not resolve release id for ${TAG}"
@@ -416,7 +420,9 @@ jobs:
           mkdir -p marker
           tag_sha="$(git rev-list -n 1 "$TAG")"
           test -n "$tag_sha" || { echo "::error::could not resolve ${TAG}"; exit 1; }
-          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          # `releases/tags/<tag>` 404s for DRAFT releases; list and filter
+          # instead (same REST shape; requires the job's contents:write).
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq ".[] | select(.tag_name==\"${TAG}\")")"
           release_id="$(jq -r '.id' <<<"$release_json")"
           if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
             echo "::error::could not resolve release id for ${TAG}"
