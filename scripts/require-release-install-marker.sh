@@ -99,7 +99,7 @@ while IFS= read -r run_id; do
     [ -n "$artifact_id" ] || continue
 
     gh api \
-      -H "Accept: application/zip" \
+      -H "Accept: application/vnd.github+json" \
       "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
       > "$tmp/marker.zip"
     if ! unzip -p "$tmp/marker.zip" "release-install-${TAG}.json" > "$tmp/marker.json"; then
