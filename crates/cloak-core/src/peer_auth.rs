@@ -229,24 +229,59 @@ impl PeerInfo {
 /// mismatch when `require_same_uid` is set.
 pub fn check(peer: &PeerInfo, policy: &PeerPolicy, our_uid: u32) -> Result<()> {
     if policy.require_same_uid && peer.uid != our_uid {
+        tracing::debug!(peer_uid = peer.uid, our_uid, "peer rejected: uid mismatch");
         return Err(Error::PeerNotTrusted);
     }
-    let basename = peer.basename().ok_or(Error::PeerNotTrusted)?;
+    let Some(basename) = peer.basename() else {
+        tracing::debug!(
+            binary_path = ?peer.binary_path,
+            "peer rejected: missing executable basename"
+        );
+        return Err(Error::PeerNotTrusted);
+    };
     if !policy.allowed_basenames.iter().any(|b| b == &basename) {
+        tracing::debug!(
+            basename,
+            allowed_basenames = ?policy.allowed_basenames,
+            "peer rejected: basename is not allowlisted"
+        );
         return Err(Error::PeerNotTrusted);
     }
     if !policy.allowed_binaries.is_empty() {
-        let hash = peer.code_sig_hash.ok_or(Error::PeerNotTrusted)?;
+        let Some(hash) = peer.code_sig_hash else {
+            tracing::debug!(
+                basename,
+                binary_path = ?peer.binary_path,
+                "peer rejected: executable hash unavailable"
+            );
+            return Err(Error::PeerNotTrusted);
+        };
         let trusted = policy
             .allowed_binaries
             .iter()
             .any(|b| trusted_binary_matches(peer, &basename, hash, b));
         if !trusted {
+            tracing::debug!(
+                basename,
+                binary_path = ?peer.binary_path,
+                peer_sha256 = %hex::encode(hash),
+                trusted_binary_count = policy.allowed_binaries.len(),
+                "peer rejected: executable hash or code-directory hash is not trusted"
+            );
             return Err(Error::PeerNotTrusted);
         }
     }
-    let path = peer.binary_path.as_ref().ok_or(Error::PeerNotTrusted)?;
-    if !trusted_peer_path(path, our_uid) {
+    let Some(path) = peer.binary_path.as_ref() else {
+        tracing::debug!(basename, "peer rejected: executable path unavailable");
+        return Err(Error::PeerNotTrusted);
+    };
+    if let Err(reason) = trusted_peer_path(path, our_uid) {
+        tracing::debug!(
+            basename,
+            binary_path = %path.display(),
+            reason,
+            "peer rejected: executable path is not trusted"
+        );
         return Err(Error::PeerNotTrusted);
     }
     Ok(())
@@ -271,47 +306,68 @@ fn trusted_binary_matches(
 }
 
 #[cfg(unix)]
-fn trusted_peer_path(path: &std::path::Path, our_uid: u32) -> bool {
+fn trusted_peer_path(path: &std::path::Path, our_uid: u32) -> std::result::Result<(), String> {
     use std::os::unix::fs::MetadataExt;
 
     let Ok(meta) = std::fs::metadata(path) else {
-        return false;
+        return Err(format!("could not stat executable {}", path.display()));
     };
     if !meta.is_file() {
-        return false;
+        return Err(format!(
+            "executable is not a regular file: {}",
+            path.display()
+        ));
     }
     if meta.uid() != 0 && meta.uid() != our_uid {
-        return false;
+        return Err(format!(
+            "executable owner uid {} is neither root nor daemon uid {}: {}",
+            meta.uid(),
+            our_uid,
+            path.display()
+        ));
     }
     if meta.mode() & 0o022 != 0 {
-        return false;
+        return Err(format!(
+            "executable is group/world writable (mode {:o}): {}",
+            meta.mode() & 0o7777,
+            path.display()
+        ));
     }
 
     let mut dir = match path.parent() {
         Some(dir) => dir,
-        None => return false,
+        None => return Err(format!("executable has no parent path: {}", path.display())),
     };
     loop {
         let Ok(meta) = std::fs::metadata(dir) else {
-            return false;
+            return Err(format!("could not stat parent directory {}", dir.display()));
         };
         if meta.uid() != 0 && meta.uid() != our_uid {
-            return false;
+            return Err(format!(
+                "parent directory owner uid {} is neither root nor daemon uid {}: {}",
+                meta.uid(),
+                our_uid,
+                dir.display()
+            ));
         }
         if meta.mode() & 0o002 != 0 {
-            return false;
+            return Err(format!(
+                "parent directory is world-writable (mode {:o}): {}",
+                meta.mode() & 0o7777,
+                dir.display()
+            ));
         }
         match dir.parent() {
             Some(parent) if parent != dir => dir = parent,
             _ => break,
         }
     }
-    true
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn trusted_peer_path(_path: &std::path::Path, _our_uid: u32) -> bool {
-    true
+fn trusted_peer_path(_path: &std::path::Path, _our_uid: u32) -> std::result::Result<(), String> {
+    Ok(())
 }
 
 // =========================================================================
