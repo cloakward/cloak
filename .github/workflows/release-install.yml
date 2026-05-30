@@ -333,12 +333,36 @@ jobs:
         if: matrix.platform == 'macos'
         env:
           BIN_DIR: ${{ steps.release.outputs.bin_dir }}
+          TAG: ${{ inputs.ref }}
         shell: bash
         run: |
           set -euo pipefail
           for bin in "$BIN_DIR"/cloak "$BIN_DIR"/cloakd "$BIN_DIR"/cloak-mcp; do
             test -x "$bin"
             codesign --verify --strict --verbose=2 "$bin"
+          done
+
+          expected="cloak-mcp ${TAG#v}"
+          actual="$("$BIN_DIR/cloak-mcp" --version)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::cloak-mcp --version returned '${actual}', expected '${expected}'"
+            exit 1
+          fi
+
+          mcp_entitlements="${RUNNER_TEMP}/cloak-mcp.entitlements.plist"
+          codesign -d --entitlements :- "$BIN_DIR/cloak-mcp" > "$mcp_entitlements"
+          if ! /usr/libexec/PlistBuddy -c "Print :com.apple.security.cs.allow-jit" "$mcp_entitlements" | grep -qx true; then
+            echo "::error::signed cloak-mcp is missing com.apple.security.cs.allow-jit"
+            exit 1
+          fi
+
+          for bin in "$BIN_DIR"/cloak "$BIN_DIR"/cloakd; do
+            entitlements="${RUNNER_TEMP}/$(basename "$bin").entitlements.plist"
+            codesign -d --entitlements :- "$bin" > "$entitlements" 2>/dev/null || true
+            if [ -s "$entitlements" ] && /usr/libexec/PlistBuddy -c "Print :com.apple.security.cs.allow-jit" "$entitlements" >/dev/null 2>&1; then
+              echo "::error::$(basename "$bin") unexpectedly has the cloak-mcp JIT entitlement"
+              exit 1
+            fi
           done
 
       - name: Verify Claude Desktop DXT package

@@ -260,8 +260,9 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-cloak
 
-      - name: Commit formula and open PR
+      - name: Commit formula, open PR, and request merge
         if: steps.cred.outputs.skip == 'false'
+        id: tap_pr
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ steps.tag.outputs.version }}
@@ -303,15 +304,71 @@ jobs:
           fi
 
           git commit -m "cloak ${VERSION}"
+          head_sha="$(git rev-parse HEAD)"
           # `--force-with-lease` is safe here: the branch is bot-owned
           # and is recreated from origin/main on every run, so any
           # remote state for `bump/cloak-${VERSION}` is by definition
           # stale and should be replaced.
           git push --set-upstream origin "$BRANCH" --force-with-lease
 
-          gh pr create \
-            --repo cloakward/homebrew-cloak \
-            --base main \
-            --head "$BRANCH" \
-            --title "cloak ${VERSION}" \
-            --body "Automated formula bump for [cloak ${TAG}](https://github.com/${{ github.repository }}/releases/tag/${TAG})."
+          if pr_json="$(gh pr view "$BRANCH" --repo cloakward/homebrew-cloak --json number,url 2>/dev/null)"; then
+            pr_number="$(jq -r '.number' <<<"$pr_json")"
+            pr_url="$(jq -r '.url' <<<"$pr_json")"
+            echo "Reusing existing Homebrew bump PR: ${pr_url}"
+          else
+            pr_url="$(gh pr create \
+              --repo cloakward/homebrew-cloak \
+              --base main \
+              --head "$BRANCH" \
+              --title "cloak ${VERSION}" \
+              --body "Automated formula bump for [cloak ${TAG}](https://github.com/${{ github.repository }}/releases/tag/${TAG}).")"
+            pr_number="${pr_url##*/}"
+            echo "Created Homebrew bump PR: ${pr_url}"
+          fi
+
+          echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          echo "pr_url=${pr_url}" >> "$GITHUB_OUTPUT"
+
+          if gh pr merge "$pr_number" \
+              --repo cloakward/homebrew-cloak \
+              --squash \
+              --delete-branch \
+              --subject "cloak ${VERSION}" \
+              --match-head-commit "$head_sha"; then
+            echo "Homebrew bump PR merge request accepted for ${pr_url}."
+          else
+            echo "::warning::Immediate Homebrew PR merge failed; attempting to enable auto-merge for ${pr_url}."
+            if gh pr merge "$pr_number" \
+                --repo cloakward/homebrew-cloak \
+                --auto \
+                --squash \
+                --delete-branch \
+                --subject "cloak ${VERSION}" \
+                --match-head-commit "$head_sha"; then
+              echo "Enabled auto-merge for Homebrew bump PR ${pr_url}."
+            else
+              echo "::error::Unable to merge or enable auto-merge for Homebrew bump PR ${pr_url}; stable publish must fail until tap main serves cloak ${VERSION}."
+              exit 1
+            fi
+          fi
+
+      - name: Verify Homebrew tap main serves release
+        if: steps.cred.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          tmp_formula="$(mktemp)"
+          for attempt in $(seq 1 30); do
+            gh api "repos/cloakward/homebrew-cloak/contents/Formula/cloak.rb?ref=main" --jq .content | base64 -d > "$tmp_formula"
+            if diff -u tap/Formula/cloak.rb "$tmp_formula"; then
+              echo "Homebrew tap main serves cloak ${VERSION}."
+              exit 0
+            fi
+            echo "Homebrew tap main does not serve the rendered ${VERSION} formula yet (attempt ${attempt}/30); retrying..."
+            sleep 10
+          done
+
+          echo "::error::Homebrew tap main still does not serve the rendered cloak ${VERSION} formula; stable publish must not treat Homebrew as live."
+          exit 1

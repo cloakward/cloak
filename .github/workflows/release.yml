@@ -364,11 +364,12 @@ jobs:
           echo "Signing identity: ${IDENTITY}"
 
           # Sign each binary with hardened-runtime + secure timestamp.
-          # `--options runtime` is required for notarization.
+          # `--options runtime` is required for notarization. The Bun-compiled
+          # MCP shim alone needs the JavaScriptCore JIT entitlement; keep that
+          # entitlement off cloak/cloakd because they do not execute JS.
           for bin in \
             "target/${target}/release/cloak" \
             "target/${target}/release/cloakd" \
-            "packages/cloak-mcp/dist/cloak-mcp" \
           ; do
             if [ -f "$bin" ]; then
               echo "codesigning ${bin}..."
@@ -377,6 +378,16 @@ jobs:
               codesign --verify --strict --verbose=2 "$bin"
             fi
           done
+
+          mcp_bin="packages/cloak-mcp/dist/cloak-mcp"
+          if [ -f "$mcp_bin" ]; then
+            echo "codesigning ${mcp_bin} with Bun JIT entitlement..."
+            codesign --force --options runtime --timestamp \
+              --entitlements packaging/macos/cloak-mcp.entitlements.plist \
+              --sign "$IDENTITY" "$mcp_bin"
+            codesign --verify --strict --verbose=2 "$mcp_bin"
+            codesign -d --entitlements :- "$mcp_bin"
+          fi
 
           # Persist for downstream steps (notarize, cleanup).
           echo "keychain_path=${KEYCHAIN_PATH}" >> "$GITHUB_OUTPUT"

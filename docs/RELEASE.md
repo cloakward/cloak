@@ -89,7 +89,11 @@
    Stable Homebrew publishes fail if `HOMEBREW_TAP_TOKEN` is missing, and
    Homebrew/Docker both fail unless they can download and validate a
    matching `release-install-$TAG` marker for the same tag commit SHA and
-   current GitHub Release asset binding.
+   current GitHub Release asset binding. The Homebrew workflow opens or
+   reuses a tap PR, requests a squash merge only for the exact formula commit
+   it pushed, falls back to GitHub auto-merge when direct merge is blocked by
+   tap branch protection, and then fails unless `cloakward/homebrew-cloak`
+   `main` serves the exact rendered formula for the release.
    npm publishing is paused until the npm
    package ships audited native `cloak-mcp` binaries per supported platform.
 8. **Docker.** `docker-push.yml` builds a multi-arch (`linux/amd64`,
@@ -138,7 +142,11 @@ The pipeline, per macOS row:
 1. Decodes the Developer ID Application `.p12` from
    `secrets.APPLE_CERT_P12_BASE64` into a throwaway keychain.
 2. `codesign --force --options runtime --timestamp --sign "Developer ID
-   Application: <NAME> (<TEAM_ID>)"` over each Mach-O binary.
+   Application: <NAME> (<TEAM_ID>)"` over each Mach-O binary. The
+   Bun-compiled `cloak-mcp` shim is signed with the narrow
+   `com.apple.security.cs.allow-jit` entitlement from
+   `packaging/macos/cloak-mcp.entitlements.plist`; `cloak` and `cloakd`
+   are signed without that entitlement.
 3. Zips the signed binaries and submits the zip via
    `xcrun notarytool submit --wait` using an App Store Connect API key
    (`secrets.APPLE_API_KEY_BASE64` / `APPLE_API_KEY_ID` /
@@ -208,8 +216,8 @@ Some inputs are intentionally still moving or externally resolved:
 - Docker image builds use a pinned Dockerfile frontend digest, pinned
   base-image digests, and a pinned Debian snapshot timestamp
   (`DEBIAN_SNAPSHOT` in `Dockerfile`) for builder packages (`pkg-config`,
-  `ca-certificates`, `curl`, `build-essential`, `clang`). Bump those pins only
-  in a reviewed change and rebuild from a new tag.
+  `ca-certificates`, `curl`, `build-essential`). Bump those pins only in a
+  reviewed change and rebuild from a new tag.
 - `libsodium-sys-stable/fetch-latest` is disabled for shipped Unix builds;
   release, macOS/Linux CI, smoke, and Docker builds run
   `scripts/prepare-libsodium-dist.sh` and build from the versioned

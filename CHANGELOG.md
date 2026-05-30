@@ -4,6 +4,13 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-05-30
+
+### Fixed
+- Signed the Bun-compiled macOS `cloak-mcp` release binary with the narrow JIT entitlement it needs under hardened runtime, and added release-install checks that verify the entitlement is present only on `cloak-mcp`.
+- Fixed Docker release builds by removing the unnecessary `clang` builder package that conflicted with the pinned Debian snapshot and Rust base image package set.
+- Made the Homebrew bump workflow merge the stable formula update and verify tap `main` serves the new version before reporting success.
+
 ## [1.0.2] - 2026-05-30
 
 ### Added

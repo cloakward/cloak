@@ -57,8 +57,7 @@ RUN set -eux; \
       pkg-config \
       ca-certificates \
       curl \
-      build-essential \
-      clang; \
+      build-essential; \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
