@@ -16,6 +16,13 @@ jobs:
   release-install:
     name: release install (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # `contents: write` is required to read the DRAFT release: draft releases
+    # are only visible to tokens with write access, so `gh release download`
+    # and `gh api releases/tags` 404 under `contents: read`. The marker-gated
+    # flow verifies the draft before publish, so this job must see it.
+    permissions:
+      actions: read
+      contents: write
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -383,6 +390,11 @@ jobs:
     name: mark release install verified
     needs: release-install
     runs-on: ubuntu-24.04
+    # `contents: write` so the marker step can query the DRAFT release
+    # (`gh api releases/tags`), which is invisible to a read-only token.
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
