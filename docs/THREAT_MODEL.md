@@ -1,4 +1,4 @@
-# Cloak Threat Model (v1.0.2-rc1)
+# Cloak Threat Model (v1.0.2)
 
 > This document describes what Cloak defends against, what it does not,
 > and the trust assumptions underpinning each defense. It enumerates the

@@ -4,7 +4,7 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
-## [1.0.2-rc1] - 2026-05-29
+## [1.0.2] - 2026-05-30
 
 ### Added
 - Added `cloak audit verify`, `cloak daemon restart`, and the `cloak unlock` alias for the existing daemon unlock flow.
