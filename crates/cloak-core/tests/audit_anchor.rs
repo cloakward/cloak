@@ -124,6 +124,80 @@ fn missing_anchor_with_nonempty_log_is_fail_closed() {
 }
 
 #[test]
+fn established_profile_full_erasure_fails_closed() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let pepper = dir.path().join("pepper");
+    let _env = anchor_env(&pepper);
+
+    let audit_path = dir.path().join("audit.jsonl");
+    // Establish a real chain + external anchor.
+    let mut log = AuditLog::open(&audit_path).unwrap();
+    log.append(draft("first")).unwrap();
+    drop(log);
+
+    // Attacker erases BOTH the log file and the external anchor.
+    std::fs::remove_file(&audit_path).unwrap();
+    std::fs::remove_file(dir.path().join("audit-head")).unwrap();
+
+    // Established-profile open must fail closed (no silent re-genesis).
+    match AuditLog::open_for_profile(&audit_path, true) {
+        Err(Error::Keychain(msg)) => {
+            assert!(msg.contains("adopt-head"), "unexpected message: {msg}")
+        }
+        Err(other) => panic!("expected fail-closed Keychain error, got {other:?}"),
+        Ok(_) => panic!("expected fail-closed Keychain error, got Ok"),
+    }
+
+    // The explicit, operator-gated recovery re-establishes the anchor, after
+    // which the daemon-style open succeeds again.
+    AuditLog::adopt_existing_head(&audit_path).unwrap();
+    AuditLog::open_for_profile(&audit_path, true).unwrap();
+}
+
+#[test]
+fn verify_open_does_not_seed_erased_chain() {
+    // The `cloak audit verify` open path must NOT re-seed an erased chain,
+    // otherwise an unauthenticated verify would launder a same-UID erasure.
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let pepper = dir.path().join("pepper");
+    let _env = anchor_env(&pepper);
+
+    let audit_path = dir.path().join("audit.jsonl");
+    let mut log = AuditLog::open(&audit_path).unwrap();
+    log.append(draft("first")).unwrap();
+    drop(log);
+
+    std::fs::remove_file(&audit_path).unwrap();
+    std::fs::remove_file(dir.path().join("audit-head")).unwrap();
+
+    match AuditLog::open_no_seed(&audit_path) {
+        Err(Error::Keychain(msg)) => {
+            assert!(msg.contains("adopt-head"), "unexpected message: {msg}")
+        }
+        Err(other) => panic!("expected fail-closed Keychain error, got {other:?}"),
+        Ok(_) => panic!("verify open must not seed an erased chain"),
+    }
+    assert!(
+        read_audit_head_anchor().expect("read anchor").is_none(),
+        "verify open must not have re-created the anchor"
+    );
+}
+
+#[test]
+fn fresh_profile_still_seeds_silently() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let pepper = dir.path().join("pepper");
+    let _env = anchor_env(&pepper);
+
+    let audit_path = dir.path().join("audit.jsonl");
+    // A brand-new (un-established) profile seeds genesis with no friction.
+    AuditLog::open_for_profile(&audit_path, false).unwrap();
+}
+
+#[test]
 fn explicit_adopt_existing_head_recovers_legacy_nonempty_log() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let dir = tempfile::tempdir().unwrap();

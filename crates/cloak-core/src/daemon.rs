@@ -55,7 +55,9 @@ pub async fn run() -> Result<()> {
     let policy_path = default_policy_path();
     let audit_path = default_audit_path()?;
     let policy_engine = PolicyEngine::from_path(&policy_path)?;
-    let audit_log = AuditLog::open(&audit_path)?;
+    // Established vaults fail closed if the audit log AND its external anchor
+    // are both gone (erasure), instead of silently re-genesising the chain.
+    let audit_log = AuditLog::open_for_profile(&audit_path, vault.is_initialized()?)?;
     let peer_policy = PeerPolicy::installed_v01()?;
     let egress = EgressClient::new()?;
     let ctx = Arc::new(DaemonCtx {

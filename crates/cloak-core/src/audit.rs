@@ -113,13 +113,45 @@ pub struct AuditLog {
     path: PathBuf,
     last_seq: u64,
     last_hash: String,
+    /// Whether a missing external anchor over an empty/absent log may be
+    /// silently seeded. True for fresh profiles and CLI/test opens; false
+    /// when the daemon opens the log for an already-initialized vault, so an
+    /// erased audit chain (log + anchor both gone) fails closed instead of
+    /// re-genesising silently.
+    seed_when_empty: bool,
 }
 
 impl AuditLog {
     /// Open or create an audit log at `path`. Reads the tail to recover the
     /// most recent `(seq, computed_hash)` so subsequent appends form a
-    /// consistent chain.
+    /// consistent chain. A missing external anchor over an empty log is
+    /// seeded (genesis), which is correct for fresh installs and for CLI/test
+    /// callers that have no notion of an "established profile".
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_inner(path, true)
+    }
+
+    /// Open for a vault profile. When `profile_established` is true (the vault
+    /// already has a master key), a **missing** external anchor over an
+    /// empty/absent log is NOT silently re-seeded — that combination is the
+    /// audit-erasure signature (both `audit.jsonl` and the keychain anchor
+    /// gone), so the daemon fails closed and the operator must consciously run
+    /// `cloak audit adopt-head --yes` after reviewing. A fresh profile still
+    /// seeds genesis normally.
+    pub fn open_for_profile(path: &Path, profile_established: bool) -> Result<Self> {
+        Self::open_inner(path, !profile_established)
+    }
+
+    /// Open for read-only inspection (`cloak audit verify`) — **never** seeds a
+    /// missing anchor. Running verify on an erased chain (empty log + no
+    /// anchor) must report the problem, not silently re-establish the anchor:
+    /// otherwise an unauthenticated `cloak audit verify` would launder a
+    /// same-UID audit-log erasure and re-enable a clean daemon start.
+    pub fn open_no_seed(path: &Path) -> Result<Self> {
+        Self::open_inner(path, false)
+    }
+
+    fn open_inner(path: &Path, seed_when_empty: bool) -> Result<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
@@ -129,11 +161,12 @@ impl AuditLog {
         let _ = open_appendable(path)?;
 
         let (last_seq, last_hash) = recover_tail(path)?;
-        validate_or_seed_audit_head(head_from_parts(last_seq, &last_hash)?, true)?;
+        validate_or_seed_audit_head(head_from_parts(last_seq, &last_hash)?, seed_when_empty)?;
         Ok(Self {
             path: path.to_path_buf(),
             last_seq,
             last_hash,
+            seed_when_empty,
         })
     }
 
@@ -150,7 +183,7 @@ impl AuditLog {
         // truncation, tail edits, and whole-chain rewrites.
         let (last_seq, last_hash) = read_tail_from_open(&mut file)?;
         let old_head = head_from_parts(last_seq, &last_hash)?;
-        validate_or_seed_audit_head(old_head, true)?;
+        validate_or_seed_audit_head(old_head, self.seed_when_empty)?;
         self.last_seq = last_seq;
         self.last_hash = if last_seq == 0 {
             GENESIS_PREV.to_string()
@@ -521,6 +554,21 @@ fn validate_or_seed_audit_head(file_head: AuditHead, allow_seed: bool) -> Result
         None if allow_seed && file_head.seq == 0 => {
             crate::keychain::write_audit_head_anchor(file_head)?;
             Ok(())
+        }
+        None if file_head.seq == 0 => {
+            // Empty/absent log AND no external anchor, but seeding is not
+            // permitted here (established vault, or a read/verify path). This
+            // is the audit-erasure signature: both the log and the anchor are
+            // gone. Fail closed with guidance rather than silently re-genesis.
+            tracing::error!(
+                "audit head anchor missing with an empty log; possible audit-log erasure"
+            );
+            Err(Error::Keychain(
+                "audit head anchor is missing and the audit log is empty for an \
+                 established profile (possible erasure); review and run \
+                 `cloak audit adopt-head --yes` to re-establish the chain"
+                    .to_string(),
+            ))
         }
         None => Err(Error::AuditHeadMismatch),
     }

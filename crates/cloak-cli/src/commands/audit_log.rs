@@ -51,13 +51,40 @@ pub fn append_required(
     result: AuditResult,
     note: Option<String>,
 ) -> Result<()> {
+    append_required_inner(tool, secret, result, note, false)
+}
+
+/// Append during first-time vault creation, where no audit anchor exists yet.
+/// Established-profile commands must use `append_required`, which never seeds
+/// an empty/missing chain and therefore cannot launder audit erasure.
+pub fn append_required_for_initialization(
+    tool: &str,
+    secret: Option<&str>,
+    result: AuditResult,
+    note: Option<String>,
+) -> Result<()> {
+    append_required_inner(tool, secret, result, note, true)
+}
+
+fn append_required_inner(
+    tool: &str,
+    secret: Option<&str>,
+    result: AuditResult,
+    note: Option<String>,
+    seed_when_empty: bool,
+) -> Result<()> {
     let path = match default_audit_path() {
         Ok(p) => p,
         Err(e) => {
             anyhow::bail!("audit path unavailable: {e}");
         }
     };
-    let mut log = match AuditLog::open(&path) {
+    let opened = if seed_when_empty {
+        AuditLog::open(&path)
+    } else {
+        AuditLog::open_no_seed(&path)
+    };
+    let mut log = match opened {
         Ok(l) => l,
         Err(e) => {
             anyhow::bail!("audit open failed: {e}");
@@ -77,7 +104,9 @@ pub fn append_required(
 
 pub fn run_verify() -> Result<()> {
     let path = default_audit_path()?;
-    let log = AuditLog::open(&path)?;
+    // Inspection must not seed: verifying an erased chain has to surface the
+    // missing anchor, not silently re-create it (which would launder erasure).
+    let log = AuditLog::open_no_seed(&path)?;
     let count = log.verify()?;
     println!("audit log ok: {count} entries");
     println!("path: {}", path.display());

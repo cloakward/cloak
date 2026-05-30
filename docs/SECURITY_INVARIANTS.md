@@ -39,7 +39,12 @@ limited to explicit tool calls: `proxy_authenticated_http_request` goes through
 `crates/cloak-core/src/egress.rs` (reqwest + rustls + system root store,
 redirects disabled, 30s timeout), while `mint_short_lived_token` uses the AWS
 Smithy STS client in `crates/cloak-core/src/handlers.rs` with a daemon-side
-30-second timeout. Host allowlists apply to proxy requests; STS minting is
+30-second timeout. `egress.rs` additionally refuses any non-global destination
+address (loopback/private/link-local/metadata/ULA) for both IP-literal hosts
+and hostnames — the hostname filter runs in the DNS resolver reqwest connects
+through, so DNS-rebinding cannot slip a private address past the host allowlist
+(tested in `crates/cloak-core/src/egress.rs::tests`). Host allowlists apply to
+proxy requests; STS minting is
 gated by tool/secret policy instead.
 
 - **Enforced:** `packages/cloak-mcp/scripts/check-no-http.mjs:14-24` rejects

@@ -378,8 +378,18 @@ fn peer_info_from_raw_fd(fd: std::os::fd::RawFd) -> Result<PeerInfo> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn peer_info_from_raw_fd(fd: std::os::fd::RawFd) -> Result<PeerInfo> {
     let cred = linux::get_peer_cred(fd)?;
-    let binary_path = std::fs::read_link(format!("/proc/{}/exe", cred.pid)).ok();
-    let code_sig_hash = binary_path.as_ref().and_then(|p| hash_file(p).ok());
+    let exe_link = format!("/proc/{}/exe", cred.pid);
+    // `binary_path` (the readlink target) is kept only for basename matching
+    // and audit. The trust HASH is taken from the `/proc/<pid>/exe` magic
+    // symlink itself: the kernel resolves it to the actual executed inode, so
+    // reading it returns the real running bytes even if the same-UID attacker
+    // renames/replaces/deletes the file at that path afterwards. Re-reading
+    // the resolved `binary_path` by name (the previous behaviour) was a TOCTOU
+    // that let an attacker restore trusted bytes at the path after launching a
+    // different executable. The residual exec-after-connect race is inherent
+    // to the same-UID threat model — see docs/THREAT_MODEL.md.
+    let binary_path = std::fs::read_link(&exe_link).ok();
+    let code_sig_hash = hash_file(std::path::Path::new(&exe_link)).ok();
     Ok(PeerInfo {
         pid: cred.pid,
         uid: cred.uid,

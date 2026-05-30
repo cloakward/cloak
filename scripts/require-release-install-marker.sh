@@ -44,6 +44,21 @@ gh api \
   "repos/${GITHUB_REPOSITORY}/releases/assets/${sha_asset_id}" \
   > "$tmp/current-sha256sums.txt"
 sha256sums_sha256="$(sha256sum "$tmp/current-sha256sums.txt" | awk '{print $1}')"
+
+# The SLSA provenance file is the one asset NOT covered by sha256sums.txt
+# (it cannot attest itself). Bind it by content hash so a same-size forgery
+# of multiple.intoto.jsonl cannot pass while the install marker still matches.
+prov_asset_id="$(jq -r '.assets[] | select(.name == "multiple.intoto.jsonl") | .id' <<<"$release_json" | head -n1)"
+if [ -z "$prov_asset_id" ] || [ "$prov_asset_id" = "null" ]; then
+  echo "::error::release ${TAG} is missing multiple.intoto.jsonl"
+  exit 1
+fi
+gh api \
+  -H "Accept: application/octet-stream" \
+  "repos/${GITHUB_REPOSITORY}/releases/assets/${prov_asset_id}" \
+  > "$tmp/current-multiple.intoto.jsonl"
+provenance_sha256="$(sha256sum "$tmp/current-multiple.intoto.jsonl" | awk '{print $1}')"
+
 assets="$(jq -c '[.assets[] | {name, id:(.id|tostring), size:(.size|tostring)}] | sort_by(.name)' <<<"$release_json")"
 version="${TAG#v}"
 {
@@ -97,8 +112,9 @@ while IFS= read -r run_id; do
       --arg workflow_ref "$expected_workflow_ref" \
       --arg release_id "$release_id" \
       --arg sha256sums_sha256 "$sha256sums_sha256" \
+      --arg provenance_sha256 "$provenance_sha256" \
       --argjson assets "$assets" \
-      '.tag == $tag and .tag_sha == $tag_sha and .repository == $repository and .workflow_ref == $workflow_ref and .release_id == $release_id and .sha256sums_sha256 == $sha256sums_sha256 and .assets == $assets' \
+      '.tag == $tag and .tag_sha == $tag_sha and .repository == $repository and .workflow_ref == $workflow_ref and .release_id == $release_id and .sha256sums_sha256 == $sha256sums_sha256 and .provenance_sha256 == $provenance_sha256 and .assets == $assets' \
       "$tmp/marker.json" >/dev/null
     then
       echo "Found verified release-install marker ${marker} on run ${run_id}"

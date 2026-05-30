@@ -180,7 +180,7 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
         prompt_strong_passphrase(theme)?
     };
 
-    audit_log::append_required(
+    audit_log::append_required_for_initialization(
         "cli.init",
         None,
         AuditResult::Started,
@@ -189,7 +189,7 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
     let result = match vault.initialize(&pass) {
         Ok(r) => r,
         Err(e) => {
-            audit_log::append_required(
+            audit_log::append_required_for_initialization(
                 "cli.init",
                 None,
                 AuditResult::Error,
@@ -211,7 +211,7 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
     let printed = match super::recovery_display::print_mnemonic_warning(&result.mnemonic) {
         Ok(printed) => printed,
         Err(e) => {
-            let _ = audit_log::append_required(
+            let _ = audit_log::append_required_for_initialization(
                 "cli.init",
                 None,
                 AuditResult::Error,
@@ -220,7 +220,7 @@ fn init_vault(ctx: &Context, theme: &ColorfulTheme, opts: &SetupOptions) -> Resu
             return Err(e);
         }
     };
-    audit_log::append_required(
+    audit_log::append_required_for_initialization(
         "cli.init",
         None,
         AuditResult::Ok,

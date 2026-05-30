@@ -451,6 +451,18 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/releases/assets/${sha_asset_id}" \
             > marker/sha256sums.txt
           sha256sums_sha256="$(sha256sum marker/sha256sums.txt | awk '{print $1}')"
+          # Bind the SLSA provenance file by content hash (it is the one asset
+          # not covered by sha256sums.txt, since it cannot attest itself).
+          prov_asset_id="$(jq -r '.assets[] | select(.name == "multiple.intoto.jsonl") | .id' <<<"$release_json" | head -n1)"
+          if [ -z "$prov_asset_id" ] || [ "$prov_asset_id" = "null" ]; then
+            echo "::error::release ${TAG} is missing multiple.intoto.jsonl"
+            exit 1
+          fi
+          gh api \
+            -H "Accept: application/octet-stream" \
+            "repos/${GITHUB_REPOSITORY}/releases/assets/${prov_asset_id}" \
+            > marker/multiple.intoto.jsonl
+          provenance_sha256="$(sha256sum marker/multiple.intoto.jsonl | awk '{print $1}')"
           assets="$(jq -c '[.assets[] | {name, id:(.id|tostring), size:(.size|tostring)}] | sort_by(.name)' <<<"$release_json")"
           expected_targets=(
             aarch64-apple-darwin
@@ -488,11 +500,12 @@ jobs:
             --arg repository "$GITHUB_REPOSITORY" \
             --arg release_id "$release_id" \
             --arg sha256sums_sha256 "$sha256sums_sha256" \
+            --arg provenance_sha256 "$provenance_sha256" \
             --argjson assets "$assets" \
             --arg run_id "$GITHUB_RUN_ID" \
             --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
             --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
-            '{tag:$tag, tag_sha:$tag_sha, repository:$repository, release_id:$release_id, sha256sums_sha256:$sha256sums_sha256, assets:$assets, run_id:$run_id, run_attempt:$run_attempt, workflow_ref:$workflow_ref, verified_at: (now | todateiso8601)}' \
+            '{tag:$tag, tag_sha:$tag_sha, repository:$repository, release_id:$release_id, sha256sums_sha256:$sha256sums_sha256, provenance_sha256:$provenance_sha256, assets:$assets, run_id:$run_id, run_attempt:$run_attempt, workflow_ref:$workflow_ref, verified_at: (now | todateiso8601)}' \
             > "marker/release-install-${TAG}.json"
 
       - name: Upload verification marker

@@ -82,19 +82,23 @@ credentials from the kernel and gates them through `peer_auth::check()`.
   `csops(CS_OPS_CDHASH)` for the running process CodeDirectory hash. The
   daemon checks both the on-disk SHA-256 and CodeDirectory hash against the
   installed trusted binaries.
-- **Linux** (`crates/cloak-core/src/peer_auth.rs:142-154`): `SO_PEERCRED` for
-  PID/UID/GID, `SO_PEERPIDFD` for non-recycling pidfd identity, and
-  `/proc/<pid>/exe` for the binary path. The daemon checks the on-disk SHA-256
-  against the installed trusted binaries.
-- **The default allowlist** (`crates/cloak-core/src/peer_auth.rs:50-63`) is
+- **Linux** (`crates/cloak-core/src/peer_auth.rs`): `SO_PEERCRED` for
+  PID/UID/GID, `SO_PEERPIDFD` for non-recycling pidfd identity, and the
+  `/proc/<pid>/exe` magic symlink for the binary. The trust hash is taken from
+  the `/proc/<pid>/exe` symlink itself (which the kernel pins to the actual
+  executed inode), **not** by re-reading the resolved path by name — so a
+  same-UID attacker cannot restore trusted bytes at the path after launching a
+  different executable. Linux has no running-process code-directory equivalent,
+  so the residual exec-after-connect race is inherent to the same-UID model.
+- **The default allowlist** (`crates/cloak-core/src/peer_auth.rs`) is
   the installed `cloak` and `cloak-mcp` sibling binaries. `cloakd` is never
   accepted as a client peer. Same UID is required.
 
 The binary hash check is a startup pin over installed files, not a global
-code-signature authority. It rejects renamed binaries and post-start swaps;
-on macOS the running-process CDHash also rejects path restoration after a
-malicious launch. Production installs still need a trusted install path or
-verified Homebrew/tarball installation before `cloakd` starts.
+code-signature authority. It rejects renamed binaries and on-disk path
+restoration (Linux hashes the pinned `/proc/<pid>/exe` inode; macOS adds the
+running-process CDHash). Production installs still need a trusted install path
+or verified Homebrew/tarball installation before `cloakd` starts.
 
 The accept-loop wires this to dispatch at
 `crates/cloak-core/src/daemon.rs:235-292`: peer-auth runs, the connection
@@ -232,7 +236,13 @@ imports zero HTTP clients — `packages/cloak-mcp/scripts/check-no-http.mjs`
 
 `tool.proxy_http` uses `crates/cloak-core/src/egress.rs` with reqwest, rustls,
 the system root store, redirects disabled, and a 30-second total timeout.
-`tool.mint_token` uses the AWS Smithy STS client in
+`egress.rs` also carries an SSRF backstop: it refuses to connect to any
+non-global IP address (loopback, private, link-local incl. the cloud-metadata
+`169.254.169.254`, ULA, etc.) for both IP-literal hosts and hostnames. The
+hostname check runs in a custom DNS resolver whose vetted addresses are exactly
+the ones reqwest connects to, so DNS-rebinding on an allowlisted name cannot
+reach a private address. This is independent of, and in addition to, the
+`allowed_hosts` policy glob. `tool.mint_token` uses the AWS Smithy STS client in
 `crates/cloak-core/src/handlers.rs`, also bounded by a daemon-side 30-second
 timeout. Host allowlists apply to proxy requests; STS minting is gated by
 tool/secret policy instead of an arbitrary destination allowlist.

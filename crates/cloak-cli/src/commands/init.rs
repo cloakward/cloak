@@ -33,7 +33,7 @@ pub fn run(ctx: &Context) -> Result<u8> {
     println!("creating new vault at {}", ctx.vault_path.display());
     let passphrase = prompt_strong_passphrase_twice()?;
 
-    audit_log::append_required(
+    audit_log::append_required_for_initialization(
         "cli.init",
         None,
         AuditResult::Started,
@@ -42,7 +42,7 @@ pub fn run(ctx: &Context) -> Result<u8> {
     let result = match vault.initialize(&passphrase) {
         Ok(r) => r,
         Err(e) => {
-            audit_log::append_required(
+            audit_log::append_required_for_initialization(
                 "cli.init",
                 None,
                 AuditResult::Error,
@@ -66,7 +66,7 @@ pub fn run(ctx: &Context) -> Result<u8> {
     let printed = match print_mnemonic_warning(&result.mnemonic) {
         Ok(printed) => printed,
         Err(e) => {
-            let _ = audit_log::append_required(
+            let _ = audit_log::append_required_for_initialization(
                 "cli.init",
                 None,
                 AuditResult::Error,
@@ -77,7 +77,7 @@ pub fn run(ctx: &Context) -> Result<u8> {
             ));
         }
     };
-    audit_log::append_required(
+    audit_log::append_required_for_initialization(
         "cli.init",
         None,
         AuditResult::Ok,

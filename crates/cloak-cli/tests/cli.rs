@@ -635,6 +635,53 @@ fn audit_adopt_head_recovers_legacy_nonempty_log() {
 }
 
 #[test]
+fn unauthenticated_audit_append_does_not_seed_erased_chain() {
+    let dir = TempDir::new().unwrap();
+    let data_root = dir.path().join("data");
+    std::fs::create_dir_all(&data_root).unwrap();
+
+    let (mut init, _) = cloak(&dir);
+    init.env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
+        .env("CLOAK_ENABLE_AUDIT_HEAD", "1")
+        .arg("init")
+        .assert()
+        .success();
+
+    let audit_candidates = [
+        data_root.join("cloak/audit.jsonl"),
+        dir.path()
+            .join("Library/Application Support/cloak/audit.jsonl"),
+    ];
+    let audit_path = audit_candidates
+        .iter()
+        .find(|p| p.exists())
+        .expect("init should create an audit log");
+    std::fs::remove_file(audit_path).unwrap();
+    let audit_head = dir.path().join("audit-head");
+    std::fs::remove_file(&audit_head).unwrap();
+
+    // `backup verify` appends its "started" audit entry before passphrase
+    // unlock/user-presence. It must fail closed instead of re-seeding a
+    // missing anchor over an erased log.
+    let (mut backup_verify, _) = cloak(&dir);
+    backup_verify
+        .env("XDG_DATA_HOME", &data_root)
+        .env("HOME", dir.path())
+        .env("CLOAK_ENABLE_AUDIT_HEAD", "1")
+        .arg("backup")
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("adopt-head"));
+
+    assert!(
+        !audit_head.exists(),
+        "unauthenticated audit append must not re-create the anchor"
+    );
+}
+
+#[test]
 fn rollback_adopt_state_recovers_legacy_counter_mirror() {
     let dir = TempDir::new().unwrap();
     let (mut init, _) = cloak(&dir);
