@@ -30,15 +30,20 @@
 //!   means the referenced task has exited, which closes the
 //!   PID-recycle window the same way the macOS kqueue arm does.
 //!
-//! The file hash catches ordinary on-disk binary swaps; the macOS
-//! CodeDirectory hash binds the already-running peer process to the
-//! trusted signed/ad-hoc-signed binary and prevents path replacement
-//! between launch and handshake.
+//! The file hash catches ordinary on-disk binary swaps. On Linux we hash
+//! the kernel-pinned `/proc/<pid>/exe` bytes when procfs permits it; some
+//! hardened runners deny reading a same-UID sibling process's executable,
+//! so we fall back to hashing the resolved executable path after the same
+//! ownership/mode checks. The macOS CodeDirectory hash binds the
+//! already-running peer process to the trusted signed/ad-hoc-signed binary
+//! and prevents path replacement between launch and handshake.
 //!
 //! All `unsafe` blocks here call libc / Mach directly. Each is
 //! documented with a `// SAFETY:` comment, per the convention in
 //! `crypto.rs`.
 
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::path::Path;
 use std::path::PathBuf;
 
 use crate::crypto::hash;
@@ -379,17 +384,14 @@ fn peer_info_from_raw_fd(fd: std::os::fd::RawFd) -> Result<PeerInfo> {
 fn peer_info_from_raw_fd(fd: std::os::fd::RawFd) -> Result<PeerInfo> {
     let cred = linux::get_peer_cred(fd)?;
     let exe_link = format!("/proc/{}/exe", cred.pid);
-    // `binary_path` (the readlink target) is kept only for basename matching
-    // and audit. The trust HASH is taken from the `/proc/<pid>/exe` magic
-    // symlink itself: the kernel resolves it to the actual executed inode, so
-    // reading it returns the real running bytes even if the same-UID attacker
-    // renames/replaces/deletes the file at that path afterwards. Re-reading
-    // the resolved `binary_path` by name (the previous behaviour) was a TOCTOU
-    // that let an attacker restore trusted bytes at the path after launching a
-    // different executable. The residual exec-after-connect race is inherent
-    // to the same-UID threat model — see docs/THREAT_MODEL.md.
+    // `binary_path` (the readlink target) is kept for basename matching,
+    // audit, and as a compatibility fallback when procfs denies reading the
+    // sibling process image directly. Prefer `/proc/<pid>/exe`: the kernel
+    // resolves it to the actual executed inode, so reading it returns the
+    // running bytes even if the same-UID attacker renames/replaces/deletes the
+    // file at that path afterwards.
     let binary_path = std::fs::read_link(&exe_link).ok();
-    let code_sig_hash = hash_file(std::path::Path::new(&exe_link)).ok();
+    let code_sig_hash = linux_peer_exe_hash(Path::new(&exe_link), binary_path.as_deref());
     Ok(PeerInfo {
         pid: cred.pid,
         uid: cred.uid,
@@ -433,6 +435,41 @@ pub fn peer_info_with_pidfd_linux(
 fn hash_file(path: &std::path::Path) -> Result<[u8; 32]> {
     let bytes = std::fs::read(path)?;
     Ok(hash::sha256(&bytes))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_peer_exe_hash(exe_link: &Path, binary_path: Option<&Path>) -> Option<[u8; 32]> {
+    match hash_file(exe_link) {
+        Ok(hash) => Some(hash),
+        Err(proc_err) => {
+            // Prefer the kernel-pinned executable view. Some Linux procfs/Yama
+            // configurations allow readlink(2) of /proc/<pid>/exe but deny
+            // opening the sibling process image for reading; rejecting there
+            // would break legitimate release binaries on those hosts. Falling
+            // back to the resolved path preserves the startup sibling hash pin
+            // plus the ownership/mode checks in `trusted_peer_path`.
+            let fallback = binary_path.and_then(|path| match hash_file(path) {
+                Ok(hash) => Some(hash),
+                Err(path_err) => {
+                    tracing::debug!(
+                        proc_error = %proc_err,
+                        path_error = %path_err,
+                        path = ?path,
+                        "failed to hash Linux peer executable"
+                    );
+                    None
+                }
+            });
+            if fallback.is_some() {
+                tracing::debug!(
+                    proc_error = %proc_err,
+                    path = ?binary_path,
+                    "falling back to resolved Linux peer executable path hash"
+                );
+            }
+            fallback
+        }
+    }
 }
 
 // -------------------------------------------------------------------------

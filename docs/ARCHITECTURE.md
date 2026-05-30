@@ -85,19 +85,22 @@ credentials from the kernel and gates them through `peer_auth::check()`.
 - **Linux** (`crates/cloak-core/src/peer_auth.rs`): `SO_PEERCRED` for
   PID/UID/GID, `SO_PEERPIDFD` for non-recycling pidfd identity, and the
   `/proc/<pid>/exe` magic symlink for the binary. The trust hash is taken from
-  the `/proc/<pid>/exe` symlink itself (which the kernel pins to the actual
-  executed inode), **not** by re-reading the resolved path by name — so a
-  same-UID attacker cannot restore trusted bytes at the path after launching a
-  different executable. Linux has no running-process code-directory equivalent,
-  so the residual exec-after-connect race is inherent to the same-UID model.
+  the `/proc/<pid>/exe` symlink itself when procfs permits reading it (the
+  kernel pins that view to the actual executed inode), so path restoration after
+  launch does not change the bytes being hashed. Some hardened Linux
+  configurations allow resolving `/proc/<pid>/exe` but deny opening a sibling
+  process image for reading; on those hosts Cloak falls back to hashing the
+  resolved executable path after the same ownership/mode checks. Linux has no
+  running-process code-directory equivalent, so the residual exec-after-connect
+  race is inherent to the same-UID model.
 - **The default allowlist** (`crates/cloak-core/src/peer_auth.rs`) is
   the installed `cloak` and `cloak-mcp` sibling binaries. `cloakd` is never
   accepted as a client peer. Same UID is required.
 
 The binary hash check is a startup pin over installed files, not a global
-code-signature authority. It rejects renamed binaries and on-disk path
-restoration (Linux hashes the pinned `/proc/<pid>/exe` inode; macOS adds the
-running-process CDHash). Production installs still need a trusted install path
+code-signature authority. It rejects renamed binaries and, where procfs allows
+it, Linux hashes the pinned `/proc/<pid>/exe` inode; macOS adds the
+running-process CDHash. Production installs still need a trusted install path
 or verified Homebrew/tarball installation before `cloakd` starts.
 
 The accept-loop wires this to dispatch at

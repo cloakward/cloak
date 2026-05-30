@@ -60,6 +60,9 @@ A connection from an unknown binary (basename not on the allowlist), an
 unknown UID, with no resolvable on-disk path, with a mismatched installed
 binary hash, or on macOS with a mismatched running-process CodeDirectory hash
 is closed before the daemon writes anything to it. No session token is minted.
+On Linux the hash prefers the kernel-pinned `/proc/<pid>/exe` bytes and falls
+back to the resolved executable path only when procfs denies opening the
+sibling process image.
 
 - **Enforced:** `crates/cloak-core/src/daemon.rs:235-252` (peer-auth happens
   immediately after `accept`, before any `read_request_json`) calling

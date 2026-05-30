@@ -97,7 +97,7 @@ daemon-held unlock state:
 ## Auth & sessions
 
 1. The daemon accepts the connection and reads kernel peer credentials (UID, PID, audit token on macOS).
-2. The daemon resolves the peer binary path, hashes its on-disk image, and checks the hash against trusted `cloak` / `cloak-mcp` binaries installed next to `cloakd`. On macOS it also compares the running process CodeDirectory hash reported by the kernel. Unknown or hash-mismatched peer → connection closed with `peer-not-trusted` *before* any session token is issued.
+2. The daemon resolves the peer binary path, hashes its executable image, and checks the hash against trusted `cloak` / `cloak-mcp` binaries installed next to `cloakd`. On Linux it prefers the kernel-pinned `/proc/<pid>/exe` bytes and falls back to the resolved executable path only when procfs denies opening the sibling process image. On macOS it also compares the running process CodeDirectory hash reported by the kernel. Unknown or hash-mismatched peer → connection closed with `peer-not-trusted` *before* any session token is issued.
 3. The peer calls `*.handshake`. `cli.handshake` is accepted only from `cloak`; `mcp.handshake` is accepted only from `cloak-mcp`. The daemon issues a session token bound to `(peer_pid, peer_identity, code_sig_hash, conn_id, expires_at=now+30min)`.
 4. Subsequent requests carry `session_token`. The daemon validates token + connection identity. If the peer process exits, the token is invalidated (kqueue `EVFILT_PROC` on macOS, PIDFD close on Linux).
 
