@@ -198,7 +198,12 @@ Some inputs are intentionally still moving or externally resolved:
 - GitHub Actions in release, install-test, Docker, Homebrew, npm cleanup,
   CI, smoke, and security workflows are pinned to immutable commit SHAs.
   When bumping an action, resolve the tag to a new commit SHA in the same
-  change and review the upstream release notes.
+  change and review the upstream release notes. **One documented exception:**
+  the `slsa-framework/slsa-github-generator` reusable workflow is referenced
+  by its `v2.0.0` semver tag, not a SHA — the generator derives and
+  self-verifies its builder version from the tag ref, and referencing it by
+  commit digest makes its `final` job fail. (The `slsa-verifier` *installer*
+  action is a normal action and stays SHA-pinned.)
 - The Rust toolchain follows `rust-toolchain.toml` (currently `1.94.1`).
 - Docker image builds use a pinned Dockerfile frontend digest, pinned
   base-image digests, and a pinned Debian snapshot timestamp

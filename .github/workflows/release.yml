@@ -798,8 +798,12 @@ jobs:
 
   # -------------------------------------------------------------------
   # 5. SLSA L3 provenance via the official reusable workflow.
-  # Pinned to the v2.0.0 release tag (semver). The generator expects
-  # the base64-encoded sha256-list output from the sign job.
+  # MUST be referenced by the `v2.0.0` semver tag, NOT a commit SHA: the
+  # slsa-github-generator derives its builder version from the tag ref and
+  # self-verifies it; referencing by digest makes the generator's `final`
+  # job fail. This is the documented, supported usage and the one action we
+  # deliberately do not pin by SHA (the tag commit is 5a775b3…). The
+  # generator expects the base64-encoded sha256-list output from the sign job.
   # -------------------------------------------------------------------
   provenance:
     name: slsa provenance (L3)
@@ -808,7 +812,7 @@ jobs:
       id-token: write
       contents: write
       actions: read
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@5a775b367a56d5bd118a224a811bba288150a563
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
     with:
       base64-subjects: ${{ needs.sign.outputs.hashes }}
       provenance-name: multiple.intoto.jsonl
