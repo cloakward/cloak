@@ -303,14 +303,28 @@ jobs:
           # runners (notably Linux arm64) place RUNNER_TEMP under a path with
           # looser permissions than a real install prefix, so copy the extracted
           # release payload into a runner-owned prefix before the smoke test.
-          secure_parent="${HOME}/.local/share/cloak-release-install"
-          secure_stage="${secure_parent}/${stage}"
-          rm -rf "$secure_stage"
-          mkdir -p "$secure_stage"
-          chmod 755 "$HOME/.local" "$HOME/.local/share" "$secure_parent" 2>/dev/null || true
-          cp -R "${RUNNER_TEMP}/release/${stage}/." "$secure_stage/"
-          find "$secure_stage" -type d -exec chmod 755 {} +
-          find "$secure_stage/bin" -type f -exec chmod 755 {} +
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            # Linux peer-auth checks every path component back to `/`.
+            # Hosted ARM runners can have writable home/temp ancestry, so
+            # emulate a real root-owned install prefix for the smoke test.
+            secure_parent="/opt/cloak-release-install"
+            secure_stage="${secure_parent}/${stage}"
+            sudo rm -rf "$secure_stage"
+            sudo mkdir -p "$secure_stage"
+            sudo cp -R "${RUNNER_TEMP}/release/${stage}/." "$secure_stage/"
+            sudo chown -R root:root "$secure_stage"
+            sudo find "$secure_stage" -type d -exec chmod 755 {} +
+            sudo find "$secure_stage/bin" -type f -exec chmod 755 {} +
+          else
+            secure_parent="${HOME}/.local/share/cloak-release-install"
+            secure_stage="${secure_parent}/${stage}"
+            rm -rf "$secure_stage"
+            mkdir -p "$secure_stage"
+            chmod 755 "$HOME/.local" "$HOME/.local/share" "$secure_parent" 2>/dev/null || true
+            cp -R "${RUNNER_TEMP}/release/${stage}/." "$secure_stage/"
+            find "$secure_stage" -type d -exec chmod 755 {} +
+            find "$secure_stage/bin" -type f -exec chmod 755 {} +
+          fi
           echo "bin_dir=${secure_stage}/bin" >> "$GITHUB_OUTPUT"
 
       - name: Verify macOS code signatures
@@ -396,6 +410,15 @@ jobs:
               fi
             fi
           done
+
+      - name: Show Linux install path trust ancestry
+        if: matrix.platform == 'linux'
+        env:
+          BIN_DIR: ${{ steps.release.outputs.bin_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          namei -l "$BIN_DIR/cloak" || true
 
       - name: Run release artifact smoke test
         env:
