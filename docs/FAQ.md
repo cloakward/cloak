@@ -1,10 +1,45 @@
 # FAQ
 
-### Why does macOS say "Varun Menon will be running in your background"?
+### Does the model ever see my raw API key?
 
-macOS is showing the Developer ID certificate subject, not a separate Cloak display name. Current signed downloads use an individual Apple Developer ID, so Gatekeeper or Background Items may show "Varun Menon". A product/company signer name requires an Apple organization account with a registered legal entity. Until Cloak has that account, the personal name on signed/notarized macOS downloads is expected.
+Not through Cloak's MCP tools. The MCP surface has no raw stored-secret reveal
+tool. The model can ask Cloak to list secret names, fetch metadata, sign a
+request, proxy an allowlisted HTTP call, mint a scoped temporary credential, or
+query audit entries.
 
-If you'd rather not see my name, build from source. Self-built binaries are ad-hoc-signed and have no developer identity attached.
+Be precise about the boundary: a minted short-lived token is still a credential
+returned to the MCP client by design, and proxied upstream responses are
+returned to the model. Cloak keeps raw stored secret values out of tool output;
+it does not make every downstream API response harmless.
+
+### What does Cloak send over the network?
+
+Cloak itself has no hosted service and no telemetry. `cloakd` makes outbound
+network calls only when your agent invokes a networked tool:
+
+- `proxy_authenticated_http_request` calls an allowlisted host from your policy
+  file.
+- `mint_short_lived_token` currently calls AWS STS for the requested/default
+  region.
+
+The MCP shim imports no HTTP client; network egress is daemon-owned.
+
+### How is this different from environment variables?
+
+Environment variables give every child process the raw secret value. Cloak
+keeps the value in an encrypted vault and gives agents action-shaped tools
+instead: sign this request, call this allowlisted host, mint this scoped
+derivative. The model gets the result of the action, not the stored value.
+
+### What if the prompt is malicious?
+
+Prompt injection can still make the model issue tool calls. Cloak's defense is
+that the available tool calls are narrower than raw secret access: there is no
+MCP `read_secret`, host allowlists gate authenticated proxying, egress rejects
+private/link-local/metadata destinations, and privileged calls are audited.
+
+That does not make the model trustworthy. Use tight policies and only allow
+hosts whose responses you trust.
 
 ### Why is `cloak add` not showing what I type?
 
@@ -39,11 +74,17 @@ Out of the box: Claude Desktop, Claude Code, Cursor, Windsurf, Continue.dev, Zed
 
 If your client supports MCP and isn't on the list, point it at the `cloak-mcp` binary as a stdio MCP server. The protocol is standard.
 
+### Why does macOS say "Varun Menon will be running in your background"?
+
+macOS is showing the Developer ID certificate subject, not a separate Cloak display name. Current signed downloads use an individual Apple Developer ID, so Gatekeeper or Background Items may show "Varun Menon". A product/company signer name requires an Apple organization account with a registered legal entity. Until Cloak has that account, the personal name on signed/notarized macOS downloads is expected.
+
+If you'd rather not see my name, build from source. Self-built binaries are ad-hoc-signed and have no developer identity attached.
+
 ### What's the difference between `cloak` and `cloakd`?
 
 `cloakd` is the daemon. It owns the vault, holds the master key in memory after you unlock, and performs every privileged action. It listens on a Unix domain socket.
 
-`cloak` is the CLI. It talks to `cloakd` over the socket for daemon-managed operations, and reads the vault file directly for things like `cloak add`. It's the only path that ever reveals plaintext to the user, gated behind Touch ID or polkit.
+`cloak` is the CLI. It talks to `cloakd` over the socket for daemon-managed operations, and reads the vault file directly for things like `cloak add`. It is the intended path for interactive plaintext reveal (`cloak show`), which is gated by Touch ID or polkit by default. Other explicit user actions, such as `cloak run` or `cloak show --allow-redirect`, can deliberately pass secret material to a child process or pipeline.
 
 `cloak-mcp` is a separate Bun-compiled binary your AI agent talks to. It translates MCP tool calls into IPC requests against `cloakd`. It imports zero HTTP clients; the daemon owns all outbound network.
 

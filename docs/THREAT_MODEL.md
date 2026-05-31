@@ -5,6 +5,25 @@
 > primary attacker capabilities; an exhaustive defense-strength matrix
 > with 15+ enumerated capabilities remains a v1.x deliverable.
 
+## Plain English Summary
+
+- Cloak is built for a single-user laptop or workstation with a real OS
+  keychain and kernel-enforced peer credentials.
+- It keeps raw stored secret values out of model-visible MCP tool output.
+- It does not prevent every credential-like value from reaching the model:
+  scoped minted tokens and proxied upstream responses can be returned by
+  design.
+- It defends against prompt injection asking for stored secrets, vault-file
+  theft where the thief lacks both the local pepper and the recovery seed,
+  rollback/tamper attempts, and untrusted local binaries connecting to
+  `cloakd`.
+- It does not defend against root/kernel compromise, a malicious same-user app
+  that can read process memory or keychain-accessible items, or a user who
+  deliberately pipes secrets elsewhere.
+- Containers are supported for the daemon image, but they have a weaker threat
+  model than the laptop install path.
+- Cloak has not had a third-party security audit.
+
 ## Assets, by sensitivity
 
 | Tier | Asset | Where it lives |
@@ -22,7 +41,7 @@
 |---|---|---|
 | **A1 — Compromised LLM / prompt injection** | Issues arbitrary tool calls; reads any output the model receives | (a) MCP surface has no raw stored-secret reveal tool. (b) `proxy_http` enforces `allowed_hosts` *and* an egress SSRF backstop that refuses any non-global destination IP (loopback/private/link-local/metadata `169.254.169.254`/ULA), validated at the resolver reqwest connects through, so DNS-rebinding on an allowlisted name cannot reach internal services. (c) Audit log records every privileged call. (d) `mint_short_lived_token` returns a derived credential, not the parent secret, but that derived credential is still visible to the model until it expires. |
 | **A2 — Untrusted local process (same UID)** | Connects to the daemon socket, reads files in `~/Library` | Same-UID requirement (kernel-level peer-cred check) + installed-binary identity: production `cloakd` pins trusted peers to SHA-256 hashes of the `cloak` and `cloak-mcp` binaries installed next to the daemon at daemon startup, rejects `cloakd` as a client peer, and on macOS also verifies the running process CodeDirectory hash reported by `csops(CS_OPS_CDHASH)`. Handshake role is bound to peer kind (`cli.handshake` only from `cloak`, `mcp.handshake` only from `cloak-mcp`). This rejects arbitrary renamed binaries and post-start binary/path swaps, but assumes the install directory was not already attacker-modified before `cloakd` started. Use Homebrew, verified release tarballs, or an admin-managed install path for production. |
-| **A3 — Vault-file thief (different UID, file-only access)** | Steals `vault.cloak` from a backup or shared filesystem | (a) Argon2id keyed mode: passphrase is HMAC'd with a pepper from the OS keychain *before* KDF. Without the pepper, brute-force is infeasible even with weak passphrases. (b) AEAD tag on every record + master-key wrap. |
+| **A3 — Vault-file thief (different UID, file-only access)** | Steals `vault.cloak` from a backup or shared filesystem | (a) Normal unlock requires both the passphrase and a pepper from the OS keychain: the passphrase is HMAC'd with the pepper *before* KDF. Without the pepper, brute-force of the passphrase wrap is infeasible even with weak passphrases. (b) Recovery unlock requires the 24-word recovery seed instead; storing the seed next to the vault backup defeats this protection. (c) AEAD tag on every record + master-key wrap. |
 | **A4 — Network attacker (TLS)** | MITM on the daemon's outbound HTTP | (a) reqwest + rustls + system root store; no http://; no redirects to disallowed hosts. (b) Certificate pinning is **not** in v1.0 and is documented as a residual risk. |
 | **A5 — Memory dump of `cloakd`** | Postmortem core, swap, hibernate | (a) `Secret<T>` zeroize-on-drop on every secret-typed value. (b) Master key kept only while the daemon vault is unlocked; stopping the daemon (`cloak daemon stop` or `cloak panic`) drops that in-memory state. (c) Swap-disable is **not** done in v1.0; users on shared servers should disable swap or use full-disk encryption. |
 | **A6 — Tamper with vault file at rest** | Flip bytes in salt, ciphertext, header | AEAD tag detects any byte flip; typed `Error::Aead` (no panic). |
@@ -53,7 +72,7 @@ Cloak's primary threat model is a **single-user laptop** with a real OS keychain
 ### What still holds
 
 - **No raw stored-secret reveal over the wire to the model.** The same six-tool MCP surface; the same user-presence-gated `vault.show` path; the same `Secret<T>` zeroize-on-drop discipline. Derived tokens and proxied upstream responses remain visible to the MCP client as described above.
-- **Vault file confidentiality at rest.** AEAD per record + master-key wrap + Argon2id KDF are all unchanged. A stolen `vault.cloak` file is still useless to anyone who lacks the pepper.
+- **Vault file confidentiality at rest.** AEAD per record + master-key wrap + Argon2id KDF are all unchanged. A stolen `vault.cloak` file is still useless to anyone who lacks both the pepper for passphrase unlock and the 24-word recovery seed for recovery unlock.
 - **Audit log integrity.** Hash-chained JSONL works the same in a container; mount it on a persistent volume and `cloak audit verify` (CLI on the host) detects tampering.
 - **Container provenance is separate from tarball provenance.** The container image is built by `docker-push.yml` after a GitHub Release is published. `docker/build-push-action` attaches BuildKit provenance/SBOM metadata, and the workflow cosign-signs the immutable multi-arch manifest digest. This is separate from the tarball SLSA envelope generated by `release.yml`.
 
@@ -95,7 +114,7 @@ Cloak's primary threat model is a **single-user laptop** with a real OS keychain
 2. The OS keychain / Secret Service protects the pepper from vault-file-only attackers and returns existing items or typed errors correctly. It is not a custom per-process ACL boundary in v1.0.
 3. libsodium's primitives are correct (XChaCha20-Poly1305-IETF, Argon2id, randombytes_buf).
 4. SQLite WAL + fsync gives durable, atomic single-file writes.
-5. The user's passphrase entropy + the pepper jointly resist offline cracking; the pepper alone makes the file useless to a thief who lacks the keychain item.
+5. The user's passphrase entropy + the pepper jointly resist offline cracking of the normal wrap. The recovery seed is an independent unlock path; storing it with the vault file defeats the vault-file-theft protection.
 
 ## BIP-39 recovery seed
 
@@ -117,14 +136,14 @@ leaving the recovery wrap intact so the same words keep working. `cloak
 backup verify` confirms a candidate seed round-trips the recovery wrap
 without performing a restore.
 
-**Threat implications.** A vault-file thief now also needs to be a
-mnemonic-paper thief to bypass the passphrase. Users who write the seed
-down on paper and store it offline keep the same `A3` posture as before:
-file-only access still requires either the passphrase **or** the seed,
-both of which live outside the file. Users who store the seed alongside
-the vault file in the same backup degrade `A3`: if the backup leaks, so
-does access. The recovery seed is documented as "treat like the
-passphrase" wherever it is mentioned in user-facing output.
+**Threat implications.** A vault-file thief now has two possible offline
+targets: the normal passphrase wrap, which still requires the local pepper,
+or the recovery wrap, which requires the 24-word seed. Users who write the
+seed down on paper and store it offline keep the `A3` posture: file-only
+access still lacks both unlock inputs. Users who store the seed alongside the
+vault file in the same backup degrade `A3`: if the backup leaks, so does
+access. The recovery seed is documented as "treat like the passphrase"
+wherever it is mentioned in user-facing output.
 
 The recovery path is **CLI-only** — there is no IPC method or MCP tool
 that can read or use the recovery wrap. The same-UID `A2` attacker who
