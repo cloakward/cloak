@@ -4,6 +4,16 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-05-31
+
+### Fixed
+- Fixed Docker/GHCR manifest signing by making digest parsing fail with
+  explicit diagnostics and passing the GitHub package token directly to
+  `cosign` instead of relying on the Docker credential store. Docker now
+  signs a temporary candidate manifest digest before moving public
+  `:version`, `:major.minor`, and `:latest` tags, so a signing failure
+  cannot leave advertised tags unsigned.
+
 ## [1.0.4] - 2026-05-30
 
 ### Fixed

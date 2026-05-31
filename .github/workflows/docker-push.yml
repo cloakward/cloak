@@ -210,33 +210,32 @@ jobs:
           else
             echo "Skipping stable channel tags :${MAJOR_MINOR} and :latest (tag is a pre-release)."
           fi
+          candidate_tag="${base}:release-${VERSION}-candidate-${GITHUB_RUN_ID}"
           {
-            # Emit space-joined list for the buildx imagetools call below.
-            echo "list=${tags[*]}"
+            # Emit space-joined public tag list for promotion after signing.
+            echo "public_list=${tags[*]}"
+            # Publish a non-advertised candidate manifest first. Public tags
+            # are only moved after the candidate digest is signed and verified.
+            echo "candidate=${candidate_tag}"
             # Per-arch immutable source images that the manifest will reference.
             echo "src_amd64=${base}@${digest_amd64}"
             echo "src_arm64=${base}@${digest_arm64}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create multi-arch manifest
+      - name: Create candidate multi-arch manifest
         run: |
           set -euo pipefail
-          tag_args=""
-          for t in ${{ steps.tags.outputs.list }}; do
-            tag_args="${tag_args} --tag ${t}"
-          done
-          # shellcheck disable=SC2086
-          docker buildx imagetools create ${tag_args} \
+          docker buildx imagetools create \
+            --tag "${{ steps.tags.outputs.candidate }}" \
             "${{ steps.tags.outputs.src_amd64 }}" \
             "${{ steps.tags.outputs.src_arm64 }}"
 
-      - name: Verify manifest is multi-arch
+      - name: Verify candidate manifest is multi-arch
         env:
-          VERSION: ${{ needs.build.outputs.version }}
+          CANDIDATE_TAG: ${{ steps.tags.outputs.candidate }}
         run: |
           set -euo pipefail
-          base="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          docker buildx imagetools inspect "${base}:${VERSION}"
+          docker buildx imagetools inspect "$CANDIDATE_TAG"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
@@ -246,36 +245,72 @@ jobs:
       - name: Sign and verify multi-arch manifest
         env:
           VERSION: ${{ needs.build.outputs.version }}
+          CANDIDATE_TAG: ${{ steps.tags.outputs.candidate }}
+          PUBLIC_TAGS: ${{ steps.tags.outputs.public_list }}
           COSIGN_EXPERIMENTAL: "1"
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           EXPECTED_ISSUER: "https://token.actions.githubusercontent.com"
           EXPECTED_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/docker-push.yml@refs/tags/${{ inputs.ref }}"
         run: |
           set -euo pipefail
           base="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           resolve_digest() {
-            docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" { print $2; exit }'
+            local ref="$1"
+            local output digest
+            if ! output="$(docker buildx imagetools inspect "$ref")"; then
+              echo "::error::failed to inspect ${ref}"
+              return 1
+            fi
+            digest="$(printf '%s\n' "$output" | awk '$1 == "Digest:" { print $2; exit }')"
+            if [ -z "$digest" ] || [ "$digest" = "<no value>" ]; then
+              echo "::error::could not parse manifest digest for ${ref}"
+              printf '%s\n' "$output"
+              return 1
+            fi
+            printf '%s\n' "$digest"
           }
 
-          digest="$(resolve_digest "${base}:${VERSION}")"
-          if [ -z "$digest" ] || [ "$digest" = "<no value>" ]; then
-            echo "::error::could not resolve manifest digest for ${base}:${VERSION}"
+          cosign version
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::GitHub OIDC token is unavailable; id-token: write is required for keyless signing."
             exit 1
           fi
 
+          digest="$(resolve_digest "$CANDIDATE_TAG")"
           manifest_ref="${base}@${digest}"
-          cosign sign --yes "$manifest_ref"
+          echo "Signing ${manifest_ref}"
+          cosign sign --yes --verbose \
+            --oidc-provider github-actions \
+            --registry-username "$REGISTRY_USERNAME" \
+            --registry-password "$REGISTRY_PASSWORD" \
+            "$manifest_ref"
           cosign verify \
+            --registry-username "$REGISTRY_USERNAME" \
+            --registry-password "$REGISTRY_PASSWORD" \
             --certificate-oidc-issuer "$EXPECTED_ISSUER" \
             --certificate-identity "$EXPECTED_IDENTITY" \
             "$manifest_ref"
 
-          for tag in ${{ steps.tags.outputs.list }}; do
+          tag_args=()
+          for tag in $PUBLIC_TAGS; do
+            tag_args+=(--tag "$tag")
+          done
+          # Carbon-copy the already-signed index digest onto the public tags.
+          # Without --prefer-index=false, a single-source create may synthesize
+          # a new index digest; the tag-parity check below would reject that,
+          # but preserving the signed digest is the intended path.
+          docker buildx imagetools create --prefer-index=false "${tag_args[@]}" "$manifest_ref"
+
+          for tag in $PUBLIC_TAGS; do
             tag_digest="$(resolve_digest "$tag")"
             if [ "$tag_digest" != "$digest" ]; then
               echo "::error::${tag} resolves to ${tag_digest}, expected signed digest ${digest}"
               exit 1
             fi
             cosign verify \
+              --registry-username "$REGISTRY_USERNAME" \
+              --registry-password "$REGISTRY_PASSWORD" \
               --certificate-oidc-issuer "$EXPECTED_ISSUER" \
               --certificate-identity "$EXPECTED_IDENTITY" \
               "$tag"
