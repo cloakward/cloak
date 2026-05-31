@@ -252,7 +252,11 @@ jobs:
         run: |
           set -euo pipefail
           base="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          digest="$(docker buildx imagetools inspect "${base}:${VERSION}" --format '{{.Digest}}')"
+          resolve_digest() {
+            docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" { print $2; exit }'
+          }
+
+          digest="$(resolve_digest "${base}:${VERSION}")"
           if [ -z "$digest" ] || [ "$digest" = "<no value>" ]; then
             echo "::error::could not resolve manifest digest for ${base}:${VERSION}"
             exit 1
@@ -266,7 +270,7 @@ jobs:
             "$manifest_ref"
 
           for tag in ${{ steps.tags.outputs.list }}; do
-            tag_digest="$(docker buildx imagetools inspect "$tag" --format '{{.Digest}}')"
+            tag_digest="$(resolve_digest "$tag")"
             if [ "$tag_digest" != "$digest" ]; then
               echo "::error::${tag} resolves to ${tag_digest}, expected signed digest ${digest}"
               exit 1

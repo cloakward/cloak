@@ -4,6 +4,13 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-05-30
+
+### Fixed
+- Fixed Docker/GHCR manifest signing verification on current `docker buildx`
+  by resolving the pushed manifest digest from the stable `imagetools inspect`
+  output before signing and tag-parity checks.
+
 ## [1.0.3] - 2026-05-30
 
 ### Fixed
