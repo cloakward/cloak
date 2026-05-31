@@ -66,7 +66,7 @@ Read the full [threat model](docs/THREAT_MODEL.md) and [security invariants](doc
 
 ## Verification
 
-Stable release artifacts are published with checksums, cosign signatures/certificates, and SLSA provenance. macOS binaries are Developer ID signed and Apple notarized. Docker images are signed through the release workflow.
+Stable release artifacts are published with checksums, cosign signatures/certificates, and SLSA provenance. macOS binaries are Developer ID signed and Apple notarized. Current stable Docker channels are signed through the release workflow.
 
 Verification commands and release-gate details live in [docs/RELEASE.md](docs/RELEASE.md).
 
