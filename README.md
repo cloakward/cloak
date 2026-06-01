@@ -1,7 +1,7 @@
 <h1 align="center">Cloak</h1>
 
 <p align="center">
-  <strong>Let AI agents use your APIs without handing them your stored secret values.</strong>
+  <strong>Your AI agent uses your API keys — without ever seeing them.</strong>
 </p>
 
 <p align="center">
@@ -10,65 +10,58 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0"></a>
 </p>
 
-Cloak is a local secrets daemon for AI agents. Instead of pasting API keys into a prompt, you store them in an encrypted local vault. Your agent asks Cloak to perform narrow actions - sign a request, call an allowlisted API host, or mint a short-lived token - and Cloak attaches the credential server-side.
-
-Agents get useful results. Raw stored secrets stay out of model-visible MCP tool output.
+Pasting an API key into a chat hands it to the model, its logs, and its provider. Cloak keeps your keys in an encrypted vault on your machine and lets your agent *use* them through narrow actions — sign a request, call an allowlisted API, mint a short-lived token. The agent gets the result; the raw stored key stays out of the chat and model context.
 
 ## Install
 
-On macOS arm64/x64 and Linux x64 glibc:
+macOS (arm64/x64) and Linux (x64 glibc):
 
 ```sh
 brew install cloakward/cloak/cloak
 cloak setup
+```
+
+`cloak setup` creates the vault, starts the daemon, and registers your AI clients — Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue.dev, Codex.
+
+Then add a secret and unlock:
+
+```sh
 cloak add OPENAI_API_KEY
 cloak unlock
 ```
 
-`cloak setup` creates the vault, installs/starts the daemon, and helps register supported MCP clients such as Claude Desktop, Claude Code, Cursor, Windsurf, Continue.dev, Zed, and Codex.
+To let an agent call an API, you allowlist the host first. The [quickstart](docs/QUICKSTART.md) covers that, plus other platforms, Docker, and the Claude Desktop `.dxt`.
 
-For Linux x64 musl, Linux arm64, Docker/GHCR, verified tarballs, source builds, and Claude Desktop `.dxt` setup, see the [quickstart](docs/QUICKSTART.md). Windows installers are not part of the current release yet.
-
-## What It Looks Like
+## What it looks like
 
 > **You:** What PRs am I being asked to review?
 >
-> **Claude:** Let me check.
+> **Claude:** *Calls `proxy_authenticated_http_request` on `api.github.com` — Cloak attaches your `GITHUB_TOKEN` server-side and returns the result.*
 >
-> _Calls `proxy_authenticated_http_request` against `api.github.com/search/issues?q=is:pr+review-requested:@me+state:open`. Cloak attaches `GITHUB_TOKEN` server-side. The model does not receive the stored token value._
->
-> **Claude:** You have 3 open review requests:
-> - **acmecorp/api#412** - feat: cache layer for `/v1/users` (priya, 2d)
-> - **acmecorp/worker#198** - fix: race in graceful shutdown (alex, 5h)
-> - **acmecorp/sdk-js#67** - docs: clarify rate-limit headers (jay, 1d)
+> You have 3 open review requests:
+> - **acmecorp/api#412** — feat: cache layer for `/v1/users`
+> - **acmecorp/worker#198** — fix: race in graceful shutdown
+> - **acmecorp/sdk-js#67** — docs: clarify rate-limit headers
 
-The action is policy-checked, executed by the local daemon, and written to a hash-chained audit log. The stored token never enters the model context.
+The call is policy-checked, run by the local daemon, and written to a hash-chained audit log. Your `GITHUB_TOKEN` never reaches the model.
 
 ## Why Cloak
 
-- **Local first.** The vault and daemon run on your machine. No hosted vault, no signup, no telemetry.
-- **No raw-secret reveal tool for MCP.** Agents get action-shaped tools, not `read_secret`.
-- **Policy before use.** API proxying is allowlisted by secret and host before Cloak reads the vault.
-- **User-present reveal by default.** `cloak show` is a deliberate CLI action with a local prompt unless the user explicitly chooses a headless bypass.
-- **Recovery seed.** Vault creation prints a 24-word recovery seed once. Write it down.
-- **Verifiable releases.** Current stable releases are built by CI, macOS Developer ID signed and notarized, cosign-signed, and SLSA L3 attested.
-- **Open source.** Apache-2.0.
+- **Local first.** Vault and daemon run on your machine. No hosted service, no signup, no telemetry.
+- **No `read_secret` tool.** Agents get action-shaped tools, never the raw value.
+- **Allowlisted by default.** API proxying is denied until you permit a specific secret and host.
+- **Presence-gated reveal.** `cloak show` is a deliberate Touch ID / polkit prompt by default.
+- **Verifiable releases.** Signed, macOS-notarized, and SLSA L3-attested — verification steps in [RELEASE.md](docs/RELEASE.md).
 
-## Be Precise About The Security Model
+## What it protects — and what it doesn't
 
-Cloak is designed to keep raw stored secret values out of model-visible MCP tool output. That is narrower than "the model never sees any credential material":
+Cloak stops your agent from *exfiltrating or storing* your long-lived keys. It does not make the agent trustworthy with the access those keys grant:
 
-- `mint_short_lived_token` intentionally returns a scoped temporary credential to the MCP client.
-- `proxy_authenticated_http_request` returns the upstream response body. Cloak strips the auth header it attached and applies best-effort exact-secret redaction, but it cannot prove a remote API will never echo transformed credentials or unrelated sensitive data.
-- A root/kernel-level local attacker, a compromised build machine, or a user who deliberately pipes secrets into another tool is outside Cloak's protection boundary.
+- `mint_short_lived_token` returns a scoped token to the agent on purpose.
+- `proxy_authenticated_http_request` returns the upstream response to the agent.
+- Root, a compromised build host, or a user who pipes secrets elsewhere are out of scope.
 
-Read the full [threat model](docs/THREAT_MODEL.md) and [security invariants](docs/SECURITY_INVARIANTS.md) before relying on Cloak for sensitive workflows.
-
-## Verification
-
-Stable release artifacts are published with checksums, cosign signatures/certificates, and SLSA provenance. macOS binaries are Developer ID signed and Apple notarized. Current stable Docker channels are signed through the release workflow.
-
-Verification commands and release-gate details live in [docs/RELEASE.md](docs/RELEASE.md).
+Full detail: [threat model](docs/THREAT_MODEL.md) and [security invariants](docs/SECURITY_INVARIANTS.md).
 
 ## Documentation
 
@@ -78,7 +71,7 @@ Verification commands and release-gate details live in [docs/RELEASE.md](docs/RE
 - [Security invariants](docs/SECURITY_INVARIANTS.md)
 - [MCP tool spec](docs/spec/mcp-tools.md)
 - [FAQ](docs/FAQ.md)
-- [Privacy disclosure](docs/PRIVACY.md)
+- [Privacy](docs/PRIVACY.md)
 
 ## License
 
