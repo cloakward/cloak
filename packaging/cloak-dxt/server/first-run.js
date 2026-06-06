@@ -26,13 +26,13 @@ const path = require("node:path");
 const INSTALL_URL = "https://github.com/cloakward/cloak#install";
 const CLOAK_EXE = process.platform === "win32" ? "cloak.exe" : "cloak";
 const TRUSTED_CLOAK_PATHS = [
+  process.env.CLOAK_CLI,
+  ...(process.env.CLOAK_DXT_CLOAK_PATHS || "").split(path.delimiter),
   "/opt/homebrew/bin/cloak",
   "/usr/local/bin/cloak",
   "/usr/bin/cloak",
   "/bin/cloak",
   "/opt/cloak/bin/cloak",
-  process.env.CLOAK_CLI,
-  ...(process.env.CLOAK_DXT_CLOAK_PATHS || "").split(path.delimiter),
 ].filter(Boolean);
 
 function isExecutableFile(file) {

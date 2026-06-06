@@ -81,13 +81,13 @@ function trustedCloakCandidates(
 
   const candidates = [
     ...siblingCandidates,
+    env["CLOAK_CLI"],
+    ...(env["CLOAK_DXT_CLOAK_PATHS"] || "").split(path.delimiter),
     "/opt/homebrew/bin/cloak",
     "/usr/local/bin/cloak",
     "/usr/bin/cloak",
     "/bin/cloak",
     "/opt/cloak/bin/cloak",
-    env["CLOAK_CLI"],
-    ...(env["CLOAK_DXT_CLOAK_PATHS"] || "").split(path.delimiter),
   ].filter((value): value is string => Boolean(value));
 
   return candidates.filter((value, index, all) => all.indexOf(value) === index);
