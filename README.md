@@ -1,7 +1,7 @@
 <h1 align="center">Cloak</h1>
 
 <p align="center">
-  <strong>Your AI agent uses your API keys — without ever seeing them.</strong>
+  <strong>A local vault that lets AI agents use your API keys without seeing the stored key.</strong>
 </p>
 
 <p align="center">
@@ -10,7 +10,27 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0"></a>
 </p>
 
-Pasting an API key into a chat hands it to the model, its logs, and its provider. Cloak keeps your keys in an encrypted vault on your machine and lets your agent *use* them through narrow actions — sign a request, call an allowlisted API, mint a short-lived token. The agent gets the result; the raw stored key stays out of the chat and model context.
+Give an AI agent an API key and you've handed it to the model, its logs, and whoever runs the model. If the agent gets prompt-injected, the key walks out with it.
+
+Cloak keeps your keys in an encrypted vault on your machine. The agent never receives the stored key. It asks Cloak to do the thing the key is for, and gets back only the result.
+
+- **No `read_secret` tool.** The model can list metadata, sign, proxy, and mint. It cannot read a stored value.
+- **Local only.** No account, no cloud, no telemetry.
+- **Allowlisted by default.** An agent reaches a host only if you approved it for that key.
+- **Signed builds.** macOS-notarized, cosign-signed, SLSA L3 provenance.
+
+## Example
+
+> **You:** What PRs am I being asked to review?
+>
+> **Claude:** *(calls `proxy_authenticated_http_request` on `api.github.com`; Cloak attaches your `GITHUB_TOKEN` and runs the request)*
+>
+> You have 3 open review requests:
+> - **acmecorp/api#412** &nbsp;cache layer for `/v1/users`
+> - **acmecorp/worker#198** &nbsp;race in graceful shutdown
+> - **acmecorp/sdk-js#67** &nbsp;clarify rate-limit headers
+
+Claude got the answer. It never got the token.
 
 ## Install
 
@@ -21,57 +41,45 @@ brew install cloakward/cloak/cloak
 cloak setup
 ```
 
-`cloak setup` creates the vault, starts the daemon, and registers your AI clients — Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue.dev, Codex.
+`cloak setup` creates the vault, starts the daemon, and connects your AI clients: Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue.dev, and Codex.
 
-Then add a secret and unlock:
+Add your first key:
 
 ```sh
 cloak add OPENAI_API_KEY
 cloak unlock
 ```
 
-To let an agent call an API, you allowlist the host first. The [quickstart](docs/QUICKSTART.md) covers that, plus other platforms, Docker, and the Claude Desktop `.dxt`.
+Before an agent can call an API, you allowlist the host for that key. The [quickstart](docs/QUICKSTART.md) covers that, plus Linux, Docker, and the Claude Desktop extension.
 
-## What it looks like
+## How it works
 
-> **You:** What PRs am I being asked to review?
->
-> **Claude:** *Calls `proxy_authenticated_http_request` on `api.github.com` — Cloak attaches your `GITHUB_TOKEN` server-side and returns the result.*
->
-> You have 3 open review requests:
-> - **acmecorp/api#412** — feat: cache layer for `/v1/users`
-> - **acmecorp/worker#198** — fix: race in graceful shutdown
-> - **acmecorp/sdk-js#67** — docs: clarify rate-limit headers
+Cloak is three pieces:
 
-The call is policy-checked, run by the local daemon, and written to a hash-chained audit log. Your `GITHUB_TOKEN` never reaches the model.
+- **`cloak`**: the CLI you use to add and manage secrets.
+- **`cloakd`**: a local daemon that holds the keys and does the privileged work.
+- **`cloak-mcp`**: the MCP server your AI client connects to.
 
-## Why Cloak
+Your agent calls a tool on `cloak-mcp`. `cloakd` checks your policy, attaches the secret, makes the request, and returns the result. The key never leaves `cloakd`.
 
-- **Local first.** Vault and daemon run on your machine. No hosted service, no signup, no telemetry.
-- **No `read_secret` tool.** Agents get action-shaped tools, never the raw value.
-- **Allowlisted by default.** API proxying is denied until you permit a specific secret and host.
-- **Presence-gated reveal.** `cloak show` is a deliberate Touch ID / polkit prompt by default.
-- **Verifiable releases.** Signed, macOS-notarized, and SLSA L3-attested — verification steps in [RELEASE.md](docs/RELEASE.md).
+## What it protects, and what it doesn't
 
-## What it protects — and what it doesn't
+Cloak stops your long-lived key from leaking. It does not make a hijacked agent safe to ignore:
 
-Cloak stops your agent from *exfiltrating or storing* your long-lived keys. It does not make the agent trustworthy with the access those keys grant:
+- `mint_short_lived_token` hands the agent a scoped, expiring token on purpose.
+- `proxy_authenticated_http_request` returns the API's response to the agent.
+- An agent can still misuse the access you granted on an allowlisted host.
 
-- `mint_short_lived_token` returns a scoped token to the agent on purpose.
-- `proxy_authenticated_http_request` returns the upstream response to the agent.
-- Root, a compromised build host, or a user who pipes secrets elsewhere are out of scope.
-
-Full detail: [threat model](docs/THREAT_MODEL.md) and [security invariants](docs/SECURITY_INVARIANTS.md).
+Cloak is built for a single-user machine. Root, a compromised build host, or a user who pipes their own secrets out are out of scope. The full [threat model](docs/THREAT_MODEL.md) spells out the rest.
 
 ## Documentation
 
 - [Quickstart](docs/QUICKSTART.md)
-- [Architecture](docs/ARCHITECTURE.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [Security invariants](docs/SECURITY_INVARIANTS.md)
-- [MCP tool spec](docs/spec/mcp-tools.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [MCP tools](docs/spec/mcp-tools.md)
 - [FAQ](docs/FAQ.md)
-- [Privacy](docs/PRIVACY.md)
 
 ## License
 
