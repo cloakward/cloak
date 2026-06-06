@@ -17,7 +17,7 @@ Cloak keeps your keys in an encrypted vault on your machine. The agent never rec
 - **No `read_secret` tool.** The model can list metadata, sign, proxy, and mint. It cannot read a stored value.
 - **Local only.** No account, no cloud, no telemetry.
 - **Allowlisted by default.** An agent reaches a host only if you approved it for that key.
-- **Signed builds.** macOS-notarized, cosign-signed, SLSA L3 provenance.
+- **Signed releases.** Stable artifacts are macOS-notarized, cosign-signed, and SLSA L3-attested.
 
 ## Example
 
@@ -30,7 +30,7 @@ Cloak keeps your keys in an encrypted vault on your machine. The agent never rec
 > - **acmecorp/worker#198** &nbsp;race in graceful shutdown
 > - **acmecorp/sdk-js#67** &nbsp;clarify rate-limit headers
 
-Claude got the answer. It never got the token.
+Claude got the answer. It never got the stored token.
 
 ## Install
 
@@ -60,7 +60,7 @@ Cloak is three pieces:
 - **`cloakd`**: a local daemon that holds the keys and does the privileged work.
 - **`cloak-mcp`**: the MCP server your AI client connects to.
 
-Your agent calls a tool on `cloak-mcp`. `cloakd` checks your policy, attaches the secret, makes the request, and returns the result. The key never leaves `cloakd`.
+Your agent calls a tool on `cloak-mcp`. `cloakd` checks your policy, attaches the secret only for the allowed upstream request, and returns the result. The stored key never reaches the agent or model.
 
 ## What it protects, and what it doesn't
 

@@ -14,7 +14,7 @@ If we cannot meet these timelines we will tell you in writing and explain why.
 ## In scope
 - Cryptographic flaws in vault construction, KDF, AEAD usage.
 - Peer-authentication bypasses (impersonation, PID recycle, code-sig spoofing).
-- Plaintext secret material reaching the model surface (any MCP tool returning a raw key).
+- Raw stored secret values or parent keys reaching the model surface.
 - Audit log tampering not detected by the hash-chain verifier.
 - Privilege escalation between peers (CLI vs. MCP shim).
 

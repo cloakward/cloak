@@ -29,7 +29,7 @@ flowchart LR
   CD -- "MCP / stdio" --> MCP
   MCP -- "length-prefixed JSON over UDS" --> DAEMON
   CLI -- "length-prefixed JSON over UDS" --> DAEMON
-  CLI -. "library-direct (v0.1)" .-> VAULT
+  CLI -. "library-direct (legacy vault ops)" .-> VAULT
   DAEMON -- "proxy: reqwest + rustls<br/>STS: AWS Smithy client" --> Internet[(remote APIs<br/>policy-controlled)]
   DAEMON --> VAULT
 ```
@@ -49,11 +49,12 @@ two protocols.
 | Claude Desktop / Claude Code | external | **untrusted** (model output) | MCP |
 | `cloak-mcp` shim | Bun, TS, single binary | **policy-bridge** (no raw stored secrets, no HTTP) | MCP ↔ Cloak IPC |
 | `cloakd` daemon | Rust, Tokio, libsodium | **trusted** (owns the vault) | Cloak IPC, outbound HTTPS |
-| `cloak` CLI | Rust, clap | **trusted** (user-driven) | Cloak IPC, library-direct vault for `init`/`add`/`set`/`rm`/`show` in v0.1 |
+| `cloak` CLI | Rust, clap | **trusted** (user-driven) | Cloak IPC, library-direct vault access for local setup and user-present vault operations |
 
-The CLI is dual-mode in v0.1: it speaks the same IPC for `daemon-unlock` and
-status-style queries, but for vault-mutating operations it opens the
-SQLite file directly. v1.x absorbs the rest of the CLI onto IPC.
+The CLI is dual-mode: daemon/session operations use the same IPC path as
+`cloak-mcp`, while local setup and user-present vault operations open the
+SQLite file directly. Moving all CLI operations onto IPC is a future hardening
+step, not a shipped guarantee.
 
 ## The IPC contract
 
