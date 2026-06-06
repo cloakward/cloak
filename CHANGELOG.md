@@ -4,6 +4,16 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-06-06
+
+### Fixed
+- Bumped `hono` to `4.12.21` to clear the current OSV advisories in the
+  `cloak-mcp` lockfile.
+- Made DXT first-run setup honor an explicit trusted `CLOAK_CLI` path before
+  falling back to global install paths.
+- Reworked the README into a shorter launch-oriented guide with tighter
+  wording around stored-key exposure.
+
 ## [1.0.5] - 2026-05-31
 
 ### Fixed

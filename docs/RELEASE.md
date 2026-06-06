@@ -269,10 +269,10 @@ brew install cosign slsa-verifier
 
 ## Verify cosign signature
 
-Pick a tag, e.g. `v1.0.5`, and a target, e.g. `aarch64-apple-darwin`:
+Pick a tag, e.g. `v1.0.6`, and a target, e.g. `aarch64-apple-darwin`:
 
 ```sh
-TAG=v1.0.5
+TAG=v1.0.6
 TARGET=aarch64-apple-darwin
 gh release download "$TAG" --pattern "cloak-${TAG#v}-${TARGET}.tar.gz*"
 gh release download "$TAG" --pattern 'sha256sums.txt*'
