@@ -25,7 +25,8 @@ cp scripts/policy.example.toml "$DEMO_DIR/.config/cloak/policy.toml"
 export HOME="$DEMO_DIR"
 export CLOAK_PEPPER_FILE="$DEMO_DIR/.cloak-pepper"
 export PATH="$REPO_ROOT/target/release:$PATH"
-export PS1='$ '
+# Colorful prompt for the recording (bright pink ❯).
+export PS1='\[\e[1;38;5;212m\]❯\[\e[0m\] '
 
 # Vault passphrase the tape types at the prompt. Must match docs/demo.tape.
 PASSPHRASE="demo-passphrase-not-secret"
