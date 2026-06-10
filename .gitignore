@@ -15,6 +15,9 @@ dist/
 *.cloak-bundle
 audit.jsonl
 .cloak-state/
+# Plaintext dotenv files — the very thing Cloak exists to replace.
+.env
+.env.*
 
 # OS / IDE
 .DS_Store

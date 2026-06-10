@@ -1,53 +1,53 @@
 # docs/demo.tape
-# Render with: vhs docs/demo.tape
-# Outputs docs/cloak-demo.gif when maintainers want to regenerate a README demo.
+# Render with: scripts/render-demo.sh  (spins up a throwaway vault first).
+# Outputs docs/cloak-demo.gif.
 
 Output docs/cloak-demo.gif
 
-Set FontSize 14
-Set Width 1200
-Set Height 700
+Set FontSize 16
+Set Width 1080
+Set Height 360
 Set Theme "Aardvark Blue"
-Set TypingSpeed 55ms
-Set Padding 20
+Set TypingSpeed 28ms
+Set Padding 22
 
-# 1. the bad way
-Type "# the way you've been doing it"
-Sleep 1.5s
+Sleep 500ms
+
+# --- the usual way ---
+Type "# the usual way: paste your key into .env"
 Enter
-Type "echo OPENAI_API_KEY=REDACTED_DEMO_OPENAI_KEY >> .env"
+Sleep 500ms
+Type `echo "OPENAI_API_KEY=sk-proj-Hk9f...real" >> .env`
 Enter
-Sleep 1.5s
-Type "# claude code helpfully reads .env into context. now the model has it."
-Sleep 3s
+Sleep 600ms
+Type "# your agent reads .env. the model now has your key."
 Enter
+Sleep 1600ms
 
 Type "clear"
 Enter
-Sleep 0.5s
+Sleep 300ms
 
-# 2. the cloak way
-Type "# the cloak way"
+# --- the cloak way ---
+Type "# with cloak: the key lives in an encrypted vault"
 Enter
-Sleep 1s
+Sleep 500ms
 Type "cloak add OPENAI_API_KEY"
 Enter
-Sleep 1.2s
-Type "REDACTED_DEMO_OPENAI_KEY"
+Sleep 900ms
+Type "demo-passphrase-not-secret"
 Enter
-Sleep 2s
+Sleep 400ms
+Type "sk-proj-Hk9f...real"
+Enter
+Sleep 1100ms
 
 Type "cloak list"
 Enter
-Sleep 2.5s
+Sleep 1500ms
 
-Type "cloak status"
+Type "# the agent calls the API through cloak. it gets the answer,"
 Enter
-Sleep 3s
-
-# 3. the payoff
+Type "# never the stored key. every call is logged."
 Enter
-Type "# now claude calls sign_request, never sees the key."
-Enter
-Type "# audit log is hash-chained. model decrypted nothing."
-Sleep 4s
+Sleep 2400ms

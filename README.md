@@ -10,6 +10,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0"></a>
 </p>
 
+<p align="center">
+  <img src="docs/cloak-demo.gif" alt="Store an API key in Cloak's encrypted vault, then let an agent use it without the model ever seeing the key" width="820">
+</p>
+
 Give an AI agent an API key and you've handed it to the model, its logs, and whoever runs the model. If the agent gets prompt-injected, the key walks out with it.
 
 Cloak keeps your keys in an encrypted vault on your machine. The agent never receives the stored key. It asks Cloak to do the thing the key is for, and gets back only the result.
