@@ -1538,3 +1538,137 @@ async fn no_leak_invariant_for_aws_handlers() {
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     set_test_sts_factory(None);
 }
+
+/// Invariant: a stored secret value must never appear in an *error*
+/// response surfaced to a peer — not in the message, code, or any field of
+/// the serialized wire response. Happy-path leakage is covered by the
+/// mint/sign tests above; this exercises the failure paths, including one
+/// (`sign_request` with a bad scheme) that errors *after* the secret has
+/// been loaded into daemon memory.
+#[tokio::test]
+async fn errors_never_leak_stored_secret_value() {
+    const NAME: &str = "SENTINEL_KEY";
+    const SECRET: &str = "sk-SENTINEL-DO-NOT-LEAK-9f3a2b1c";
+
+    // Allow sign_request on the secret so we can reach a *post-load* error
+    // (bad scheme) where the plaintext is in memory when the error is built.
+    let policy = r#"
+        [default]
+        action = "deny"
+        [[secrets]]
+        name = "SENTINEL_KEY"
+        [secrets.tools.sign_request]
+        allow = true
+    "#;
+
+    let (_pol, basename) = open_policy();
+    let Some((socket, _dir, audit_path, shutdown, handle)) = spawn_daemon(basename, policy).await
+    else {
+        return;
+    };
+
+    let Some((mut stream, token)) = connect_init_unlock_seed(&socket, &[(NAME, SECRET)]).await
+    else {
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        return;
+    };
+
+    // Collect error responses from several failure paths.
+    let mut error_responses: Vec<Response> = Vec::new();
+
+    // 1. Duplicate add → `secret-exists` (echoes the name, never the value).
+    error_responses.push(
+        rpc(
+            &mut stream,
+            Request {
+                id: "dup".into(),
+                method: "vault.add".into(),
+                params: json!({"name": NAME, "kind": "api_key", "tags": [], "value": SECRET}),
+                session_token: Some(token.clone()),
+            },
+        )
+        .await,
+    );
+
+    // 2. sign_request with an unsupported scheme → errors *after* the
+    //    secret is loaded into memory.
+    error_responses.push(
+        rpc(
+            &mut stream,
+            Request {
+                id: "badscheme".into(),
+                method: "tool.sign_request".into(),
+                params: json!({
+                    "secret_name": NAME,
+                    "scheme": "totally-bogus-scheme",
+                    "method": "GET",
+                    "url": "https://example.com/x",
+                }),
+                session_token: Some(token.clone()),
+            },
+        )
+        .await,
+    );
+
+    // 3. proxy_http against a host that is not allow-listed → `policy-denied`.
+    error_responses.push(
+        rpc(
+            &mut stream,
+            Request {
+                id: "proxydeny".into(),
+                method: "tool.proxy_http".into(),
+                params: json!({
+                    "secret_name": NAME,
+                    "method": "GET",
+                    "url": "https://not-allowed.example.com/",
+                }),
+                session_token: Some(token.clone()),
+            },
+        )
+        .await,
+    );
+
+    // 4. Malformed params for sign_request → `invalid-params`.
+    error_responses.push(
+        rpc(
+            &mut stream,
+            Request {
+                id: "malformed".into(),
+                method: "tool.sign_request".into(),
+                params: json!({"secret_name": NAME}),
+                session_token: Some(token.clone()),
+            },
+        )
+        .await,
+    );
+
+    for resp in &error_responses {
+        assert!(
+            resp.error.is_some(),
+            "expected an error response, got: {resp:?}"
+        );
+        // The wire form (JSON) is what actually reaches the peer.
+        let serialized = serde_json::to_string(resp).expect("serialize response");
+        assert!(
+            !serialized.contains(SECRET),
+            "error response leaked the stored secret value: {serialized}"
+        );
+        // And the Debug form, in case anything logs the response struct.
+        assert!(
+            !format!("{resp:?}").contains(SECRET),
+            "error response Debug leaked the stored secret value"
+        );
+    }
+
+    // The audit log written during these failures must not contain it either.
+    let raw_audit = std::fs::read_to_string(&audit_path).unwrap_or_default();
+    assert!(
+        !raw_audit.contains(SECRET),
+        "audit log leaked the stored secret value"
+    );
+
+    drop(stream);
+    shutdown.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}

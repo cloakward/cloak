@@ -13,6 +13,11 @@ concurrency:
   group: security-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege at the workflow level; the cargo-deny/audit job needs
+# only read access. (The osv job re-declares the same read-only scope.)
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"

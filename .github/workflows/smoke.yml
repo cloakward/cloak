@@ -15,6 +15,11 @@ concurrency:
   group: smoke-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: the smoke test only builds and exercises the binaries.
+# Read access to the checked-out code is all it needs.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"

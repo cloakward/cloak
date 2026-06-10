@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-# Download the exact libsodium stable source archive expected by
-# libsodium-sys-stable and verify it before Cargo sees it.
+# Download and pin the exact libsodium stable source archive expected by
+# libsodium-sys-stable. Two independent checks gate the bytes that build:
+#
+#   1. This script verifies the SHA-256 of both the archive and its
+#      minisign signature against the values pinned below, refusing to
+#      proceed on any mismatch (defeats a moved/MITM'd upstream alias).
+#   2. libsodium-sys-stable's build script then verifies the minisign
+#      signature (LATEST.tar.gz.minisig) over the archive against
+#      libsodium's embedded release public key — it carries the
+#      `minisign-verify` build dependency for exactly this, and runs the
+#      check unconditionally in the SODIUM_DIST_DIR path before extracting
+#      and compiling.
 #
 # libsodium-sys-stable looks for files named LATEST.tar.gz and
 # LATEST.tar.gz.minisig inside SODIUM_DIST_DIR. The upstream LATEST URL is a

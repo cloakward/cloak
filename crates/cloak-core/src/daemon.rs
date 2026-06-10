@@ -21,24 +21,39 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::audit::{AuditDraft, AuditLog, AuditResult, PeerSummary};
 use crate::crypto::Secret;
 use crate::egress::EgressClient;
 use crate::error::{Error, Result};
 use crate::handlers::HandlerCtx;
-use crate::ipc::{read_request_json, rpc_error, write_response_json, Request, Response};
+use crate::ipc::{read_request_json_timed, rpc_error, write_response_json, Request, Response};
 use crate::peer_auth::{self, PeerInfo, PeerKind, PeerPolicy};
 use crate::policy::PolicyEngine;
 use crate::session::{default_ttl, SessionRecord, SessionStore};
 #[cfg(any(test, feature = "test-util"))]
 use crate::vault::SecretKind;
 use crate::vault::Vault;
+
+/// Maximum number of peer connections served at once. A same-UID peer is
+/// already a strong adversary, but bounding concurrency stops a buggy or
+/// hostile local process from exhausting daemon tasks/memory by opening
+/// connections without limit. Excess connections are closed immediately;
+/// legitimate clients (one CLI invocation, a handful of MCP servers) stay
+/// well under this.
+const MAX_CONCURRENT_CONNS: usize = 64;
+
+/// Once a peer announces a request-frame body length it must deliver the
+/// bytes within this window, or the connection is dropped. Bounds
+/// slow-loris / partial-frame holds; the wait for the *next* request is
+/// unbounded so persistent connections idle between calls are untouched.
+const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 // =========================================================================
 // Public entry point
@@ -70,6 +85,7 @@ pub async fn run() -> Result<()> {
         policy_engine: Mutex::new(policy_engine),
         audit_log: Mutex::new(audit_log),
         egress,
+        conn_limit: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNS)),
     });
 
     let shutdown_ctx = ctx.clone();
@@ -150,6 +166,11 @@ struct DaemonCtx {
     audit_log: Mutex<AuditLog>,
     /// Shared outbound HTTP client (built once at startup).
     egress: EgressClient,
+    /// Caps the number of peer connections served concurrently. A permit
+    /// is held for each connection's lifetime; when none are free, new
+    /// connections are closed immediately rather than spawning unbounded
+    /// tasks.
+    conn_limit: Arc<Semaphore>,
 }
 
 /// Default policy file path from the platform config directory. Missing
@@ -214,8 +235,23 @@ async fn accept_loop(
             res = listener.accept() => {
                 match res {
                     Ok((stream, _addr)) => {
+                        // Bound concurrent connections. A held permit is
+                        // moved into the connection task and released when
+                        // it ends; if none are free we close immediately
+                        // rather than spawn an unbounded task.
+                        let permit = match ctx.conn_limit.clone().try_acquire_owned() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "connection limit reached ({MAX_CONCURRENT_CONNS}); rejecting peer"
+                                );
+                                drop(stream);
+                                continue;
+                            }
+                        };
                         let ctx2 = ctx.clone();
                         tokio::spawn(async move {
+                            let _permit = permit;
                             if let Err(e) = serve_conn(stream, ctx2, our_uid).await {
                                 tracing::debug!(error = %e, "connection exited with error");
                             }
@@ -351,7 +387,7 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
                 tracing::debug!(conn_id, "peer-exit notification received; closing connection");
                 break;
             }
-            r = read_request_json(&mut rd) => r,
+            r = read_request_json_timed(&mut rd, REQUEST_BODY_TIMEOUT) => r,
         };
 
         if peer_exited.load(Ordering::SeqCst) {
@@ -1064,6 +1100,7 @@ pub async fn run_with(
         policy_engine: Mutex::new(policy_engine),
         audit_log: Mutex::new(audit_log),
         egress,
+        conn_limit: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNS)),
     });
 
     let bridge_ctx = ctx.clone();

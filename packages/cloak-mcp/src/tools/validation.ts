@@ -226,6 +226,18 @@ function validateScopeValue(
   }
 }
 
+/**
+ * Best-effort scrub of credential-shaped substrings (key:value / key=value
+ * pairs with credential-like keys, Authorization/Bearer/Basic headers, and
+ * JWTs) from a string before it is surfaced to the model.
+ *
+ * This is defense-in-depth, NOT a guarantee. It matches *shapes*, not
+ * entropy: a raw secret embedded free-form in prose (e.g. "the key sk_live_…
+ * was rejected") would pass through unchanged. The actual guarantee that a
+ * stored secret never reaches the model lives in the daemon, which never
+ * places secret values into error messages or tool results. Treat this as a
+ * second net for daemon/error text, not the primary boundary.
+ */
 export function redactText(text: string): string {
   return text
     .replace(

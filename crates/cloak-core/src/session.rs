@@ -21,6 +21,7 @@ use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::crypto::aead;
 use crate::error::{Error, Result};
@@ -31,9 +32,17 @@ pub fn default_ttl() -> Duration {
     Duration::minutes(30)
 }
 
-/// Opaque, random session token.
-#[derive(Debug, Clone)]
+/// Opaque, random session token. Held only in daemon memory for the life
+/// of a session; zeroized on drop and redacted from `Debug` so a token can
+/// never be reconstructed from a log line or an error dump.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SessionToken(pub String);
+
+impl std::fmt::Debug for SessionToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionToken(***)")
+    }
+}
 
 impl SessionToken {
     /// Generate a fresh token (32 random bytes, base64url encoded).
