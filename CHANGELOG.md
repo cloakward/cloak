@@ -4,6 +4,35 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-06-10
+
+### Security
+- Bounded the number of concurrently-served daemon connections and added a
+  request-body read timeout, so a local process cannot exhaust daemon
+  tasks or memory with slow or partial requests. Idle persistent
+  connections are unaffected.
+- Zeroize decrypted plaintext on the non-UTF-8 reject path, and zeroize
+  session tokens on drop (they are also now redacted from debug output).
+
+### Changed
+- Expanded the `cloak-mcp` no-network static gate to cover additional
+  network modules (`http2`/`dns`/`dgram`/`tls`/`ws`), indirect/aliased
+  `fetch`, `WebSocket`/`EventSource`, and spawns of network CLIs; it is
+  documented as a regression guard rather than a sandbox.
+- Added least-privilege `contents: read` permissions to the CI, smoke, and
+  security workflows.
+
+### Fixed
+- README: the `cloak setup` description now reflects that it detects and
+  registers the AI clients you have installed, and the SLSA badge points at
+  the verification instructions instead of an empty page.
+- Documentation clarifies that `vault.show` is CLI-only (never an MCP tool)
+  and that `cloak panic` acts immediately with no confirmation prompt.
+
+### Added
+- Regression test asserting stored secret values never appear in error
+  responses surfaced over IPC.
+
 ## [1.0.6] - 2026-06-06
 
 ### Fixed
