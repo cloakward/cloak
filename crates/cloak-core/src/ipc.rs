@@ -16,6 +16,8 @@
 //!
 //! Helpers in this module never log or surface secret material.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -191,6 +193,39 @@ where
     Ok(Frame(body))
 }
 
+/// Read one length-prefixed frame, bounding how long the *body* may take
+/// to arrive once its length prefix has been read.
+///
+/// The wait for the 4-byte length prefix is intentionally unbounded: that
+/// is the idle "waiting for the peer's next request" state, and a
+/// legitimately persistent connection may sit there for minutes between
+/// tool calls. But once a peer announces a body length it must deliver
+/// those bytes within `body_timeout`; a peer that declares a large frame
+/// and then stalls (slow-loris / partial-frame) is cut off with
+/// [`Error::IpcFraming`] so it cannot park a task and its buffer
+/// indefinitely. The caller drops the connection on error.
+pub async fn read_frame_timed<R>(r: &mut R, body_timeout: Duration) -> Result<Frame>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let mut len_buf = [0u8; 4];
+    r.read_exact(&mut len_buf)
+        .await
+        .map_err(|_| Error::IpcFraming("short read on length prefix"))?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_FRAME_SIZE {
+        return Err(Error::IpcFraming("frame exceeds 4 MiB"));
+    }
+    let mut body = vec![0u8; len];
+    if len > 0 {
+        tokio::time::timeout(body_timeout, r.read_exact(&mut body))
+            .await
+            .map_err(|_| Error::IpcFraming("frame body read timed out"))?
+            .map_err(|_| Error::IpcFraming("short read on frame body"))?;
+    }
+    Ok(Frame(body))
+}
+
 /// Write one length-prefixed frame to `w`.
 ///
 /// Returns [`Error::IpcFraming`] if the payload exceeds the 4 MiB cap;
@@ -221,6 +256,20 @@ where
     R: AsyncReadExt + Unpin,
 {
     let frame = read_frame(r).await?;
+    let req: Request = serde_json::from_slice(&frame.0)
+        .map_err(|_| Error::IpcFraming("malformed JSON request"))?;
+    Ok(req)
+}
+
+/// Like [`read_request_json`] but bounds the body-read phase by
+/// `body_timeout` (see [`read_frame_timed`]). Used by the daemon's
+/// connection loop to shut down slow-loris peers without disturbing
+/// legitimately idle persistent connections.
+pub async fn read_request_json_timed<R>(r: &mut R, body_timeout: Duration) -> Result<Request>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let frame = read_frame_timed(r, body_timeout).await?;
     let req: Request = serde_json::from_slice(&frame.0)
         .map_err(|_| Error::IpcFraming("malformed JSON request"))?;
     Ok(req)
@@ -332,6 +381,33 @@ mod tests {
             Err(Error::IpcFraming(m)) => assert!(m.contains("body")),
             other => panic!("expected IpcFraming, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn body_read_timeout_fires_on_stalled_peer() {
+        let (mut a, mut b) = duplex(64);
+        // Declare 100 bytes, send only 10, then stall (writer stays open,
+        // so the reader must rely on the timeout rather than EOF).
+        let prefix = 100u32.to_le_bytes();
+        a.write_all(&prefix).await.unwrap();
+        a.write_all(&[0u8; 10]).await.unwrap();
+        let r = read_frame_timed(&mut b, Duration::from_millis(50)).await;
+        match r {
+            Err(Error::IpcFraming(m)) => assert!(m.contains("timed out")),
+            other => panic!("expected IpcFraming timeout, got {other:?}"),
+        }
+        drop(a);
+    }
+
+    #[tokio::test]
+    async fn timed_frame_roundtrip_under_deadline() {
+        let (mut a, mut b) = duplex(8 * 1024);
+        let payload = b"prompt body".to_vec();
+        write_frame(&mut a, &payload).await.unwrap();
+        let f = read_frame_timed(&mut b, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(f.0, payload);
     }
 
     #[tokio::test]

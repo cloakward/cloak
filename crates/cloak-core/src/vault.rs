@@ -561,8 +561,19 @@ impl Vault {
         let aad = canonical_aad(&row.name, created_unix, row.version);
         let subkey = derive_subkey(master, row.id as u64, RECORD_CTX)?;
         let pt = aead::open(subkey.expose_secret(), &row.nonce, &aad, &row.ciphertext)?;
-        // Convert to UTF-8; reject non-UTF8 (we only store strings).
-        let s = String::from_utf8(pt).map_err(|_| Error::VaultFormat("plaintext not utf-8"))?;
+        // Convert to UTF-8; reject non-UTF8 (we only store strings). On the
+        // success path `from_utf8` reuses the plaintext allocation, which the
+        // returned `Secret<String>` zeroizes on drop. On the error path the
+        // bytes survive inside the `FromUtf8Error`, so zeroize them explicitly
+        // before discarding rather than leaking plaintext into freed heap.
+        let s = match String::from_utf8(pt) {
+            Ok(s) => s,
+            Err(e) => {
+                let mut bytes = e.into_bytes();
+                bytes.zeroize();
+                return Err(Error::VaultFormat("plaintext not utf-8"));
+            }
+        };
         Ok(Secret::new(s))
     }
 

@@ -31,7 +31,7 @@ jobs:
         id: cred
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          TAG: ${{ github.event.release.tag_name || inputs.ref }}
+          TAG: ${{ inputs.ref }}
         run: |
           set -euo pipefail
           case "${TAG#v}" in
@@ -56,7 +56,7 @@ jobs:
         id: tag
         env:
           # Honor either the release event or the manual dispatch input.
-          TAG: ${{ github.event.release.tag_name || inputs.ref }}
+          TAG: ${{ inputs.ref }}
         run: |
           set -euo pipefail
           if [ -z "${TAG}" ]; then

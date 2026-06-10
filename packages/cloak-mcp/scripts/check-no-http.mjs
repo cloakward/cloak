@@ -1,7 +1,16 @@
 #!/usr/bin/env node
-// CI gate: forbid any direct HTTP/networking imports or fetch calls in src/.
-// Cloak's invariant is that the MCP shim performs ZERO outbound HTTP — all
-// network egress originates from the Rust daemon. This script enforces that.
+// CI gate: forbid direct HTTP/networking imports, fetch/WebSocket calls, and
+// spawns of network CLIs in src/. Cloak's invariant is that the MCP shim
+// performs ZERO outbound network I/O of its own — all egress originates from
+// the Rust daemon. `node:net` is the only permitted network primitive (the
+// local UDS in ipc.ts); `node:child_process` is permitted only to launch the
+// trusted `cloak` CLI.
+//
+// This is a regression guard, NOT a sandbox: it stops outbound networking
+// from being reintroduced by accident during a refactor. A determined author
+// can still bypass a static scan (aliased/dynamic imports, base64-eval, …);
+// the real boundary is the daemon's peer-auth and the published binary being
+// built solely from src/. Keep that boundary — don't treat this as airtight.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -12,15 +21,27 @@ const ROOT = join(__dirname, "..");
 const SRC = join(ROOT, "src");
 
 // Banned bare-module identifiers (matched as imported module specifiers).
+// NOTE: `net`/`node:net` and `child_process`/`node:child_process` are
+// deliberately NOT banned — they are the permitted UDS + trusted-CLI paths.
 const BANNED_MODULES = [
   "http",
   "https",
   "node:http",
   "node:https",
+  "http2",
+  "node:http2",
+  "dns",
+  "node:dns",
+  "node:dns/promises",
+  "dgram",
+  "node:dgram",
+  "tls",
+  "node:tls",
   "axios",
   "undici",
   "node-fetch",
   "got",
+  "ws",
 ];
 
 // Patterns:
@@ -33,9 +54,22 @@ const importPatterns = BANNED_MODULES.map(
     ),
 );
 
-// Match `fetch(` as a global call. Allow comments to mention fetch.
-// Detect bare `fetch(` not preceded by an identifier char or dot.
-const fetchPattern = /(?<![A-Za-z0-9_$.])fetch\s*\(/;
+// Banned call / construction patterns (comments already stripped). Covers
+// bare `fetch(`, indirect `globalThis|window|self|global.fetch(`, bracket
+// access `global["fetch"]`, and `new WebSocket(` / `new EventSource(`.
+const bannedCallPatterns = [
+  { re: /(?<![A-Za-z0-9_$.])fetch\s*\(/, label: "fetch() call" },
+  { re: /(?:globalThis|window|self|global)\s*\.\s*fetch\b/, label: "indirect fetch reference" },
+  { re: /(?:globalThis|window|self|global)\s*\[\s*['"]fetch['"]\s*\]/, label: "indirect fetch reference" },
+  { re: /\bnew\s+WebSocket\b/, label: "WebSocket" },
+  { re: /\bnew\s+EventSource\b/, label: "EventSource" },
+];
+
+// Heuristic: flag spawning a known network CLI by literal name. Won't catch
+// a variable-built command, but stops the obvious `spawnSync("curl", …)`
+// exfil path that the module bans miss (child_process is allowed only to
+// launch the trusted cloak CLI, which is referenced by a path variable).
+const bannedSpawnTarget = /['"`](?:curl|wget|nc|ncat|socat|telnet)['"`]/;
 
 function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -76,8 +110,13 @@ for (const file of walkTs(SRC)) {
         offenders.push(`${relative(ROOT, file)}:${i + 1}: banned import: ${line.trim()}`);
       }
     }
-    if (fetchPattern.test(line)) {
-      offenders.push(`${relative(ROOT, file)}:${i + 1}: banned fetch() call: ${line.trim()}`);
+    for (const { re, label } of bannedCallPatterns) {
+      if (re.test(line)) {
+        offenders.push(`${relative(ROOT, file)}:${i + 1}: banned ${label}: ${line.trim()}`);
+      }
+    }
+    if (bannedSpawnTarget.test(line)) {
+      offenders.push(`${relative(ROOT, file)}:${i + 1}: banned network CLI spawn: ${line.trim()}`);
     }
   }
 }
@@ -88,4 +127,6 @@ if (offenders.length > 0) {
   process.exit(1);
 }
 
-console.log("cloak-mcp: outbound HTTP gate ok (no banned imports or fetch calls in src/)");
+console.log(
+  "cloak-mcp: outbound network gate ok (no banned imports, fetch/WebSocket calls, or network-CLI spawns in src/)",
+);

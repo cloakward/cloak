@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/cloakward/cloak/actions/workflows/ci.yml"><img src="https://github.com/cloakward/cloak/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/cloakward/cloak/attestations"><img src="https://slsa.dev/images/gh-badge-level3.svg" alt="SLSA L3"></a>
+  <a href="docs/RELEASE.md#verify-slsa-l3-provenance"><img src="https://slsa.dev/images/gh-badge-level3.svg" alt="SLSA L3"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0"></a>
 </p>
 
@@ -41,7 +41,7 @@ brew install cloakward/cloak/cloak
 cloak setup
 ```
 
-`cloak setup` creates the vault, starts the daemon, and connects your AI clients: Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue.dev, and Codex.
+`cloak setup` walks you through creating the vault, starting the daemon, and registering the AI clients it finds installed. Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue.dev, and Codex are all supported.
 
 Add your first key:
 
