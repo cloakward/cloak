@@ -30,6 +30,9 @@ export async function dispatchTool(name: string, args: unknown): Promise<ToolRes
     return await tool.handler(args);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // `redactText` is a best-effort, shape-based net (see its JSDoc). The
+    // real guarantee is that the daemon never puts a stored secret into an
+    // error message; this just hardens against accidental leakage.
     return {
       content: [{ type: "text", text: `error: ${redactText(msg)}` }],
       isError: true,

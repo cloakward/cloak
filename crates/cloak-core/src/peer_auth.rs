@@ -402,9 +402,11 @@ pub fn peer_info_from_std_unix(stream: &std::os::unix::net::UnixStream) -> Resul
 fn peer_info_from_raw_fd(fd: std::os::fd::RawFd) -> Result<PeerInfo> {
     // Prefer LOCAL_PEERTOKEN: it gives us PID *and* the non-recycling
     // pidversion in one syscall. If the kernel ever rejects the option
-    // (it has been stable since Mountain Lion), fall back to
-    // LOCAL_PEERPID and leave `identity` empty — session binding then
-    // degrades to the legacy (pid, basename, conn_id) triple.
+    // (it has been stable since Mountain Lion), fall back to LOCAL_PEERPID
+    // and leave `identity` empty. A `None` identity is NOT a silent
+    // downgrade: `handle_handshake` refuses to issue a session token
+    // without one, so the connection fails closed rather than binding to
+    // the weaker (pid, basename, conn_id) triple.
     let (pid, identity) = match macos::get_peer_audit_token(fd) {
         Ok(tok) => {
             let pid = macos::audit_token_pid(&tok);

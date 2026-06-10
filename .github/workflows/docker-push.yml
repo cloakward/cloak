@@ -28,7 +28,7 @@ on:
         type: string
 
 concurrency:
-  group: docker-push-${{ github.event.release.tag_name || inputs.ref }}
+  group: docker-push-${{ inputs.ref }}
   cancel-in-progress: false
 
 env:

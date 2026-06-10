@@ -2,7 +2,7 @@
 #
 # Builds, tests, lints, and formats the workspace on every supported
 # (os, target) pair. Plus a TypeScript pass for the MCP shim on
-# non-Windows rows. See PLAN.md s3 W3.
+# non-Windows rows.
 name: ci
 
 on:
@@ -15,6 +15,12 @@ on:
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# Least privilege: this workflow only builds, tests, lints, and formats.
+# It needs nothing beyond read access to the checked-out code, including
+# when reused via workflow_call from release.yml.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
