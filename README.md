@@ -25,16 +25,13 @@ Cloak keeps your keys in an encrypted vault on your machine. The agent never rec
 
 ## Example
 
-> **You:** What PRs am I being asked to review?
+> **You:** test my checkout — create a $20 charge and confirm it succeeds.
 >
-> **Claude:** *(calls `proxy_authenticated_http_request` on `api.github.com`; Cloak attaches your `GITHUB_TOKEN` and runs the request)*
+> **Claude:** *(calls `proxy_authenticated_http_request` on `api.stripe.com`; Cloak attaches your `STRIPE_SECRET_KEY` and runs the request)*
 >
-> You have 3 open review requests:
-> - **acmecorp/api#412** &nbsp;cache layer for `/v1/users`
-> - **acmecorp/worker#198** &nbsp;race in graceful shutdown
-> - **acmecorp/sdk-js#67** &nbsp;clarify rate-limit headers
+> ✓ `pi_3Q2k…` succeeded — $20.00, `card_visa`. Your checkout works.
 
-Claude got the answer. It never got the stored token.
+Claude tested it against the live API. Your `STRIPE_SECRET_KEY` — which can refund every charge and drain the account — never reached the model.
 
 ## Install
 
