@@ -51,10 +51,22 @@ cloak daemon restart && cloak unlock
 Now ask your agent, in plain English:
 
 > **You:** test my checkout, create a $20 charge and confirm it works.
->
-> **Claude:** ✓ `pi_3Q2k…` succeeded, $20.00. Your checkout works.
 
-Cloak attached the key for that one request and handed back only the result. Your `STRIPE_SECRET_KEY`, which can refund every charge and drain the account, never reached the model.
+Cloak attaches `STRIPE_SECRET_KEY` for that one request and hands back only the result. The key, which can refund every charge and drain the account, never reaches the model.
+
+Here is a real proxied call to prove it, pointed at an echo endpoint so the redaction is visible. The token was sent (the server received it and echoed it back), and Cloak stripped it from what the model sees:
+
+```text
+proxy_authenticated_http_request  →  GET https://httpbin.org/headers  (bearer)
+
+Status 200
+{
+  "headers": {
+    "Authorization": "[REDACTED]",
+    "Host": "httpbin.org"
+  }
+}
+```
 
 `cloak setup` connects Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue.dev, and Codex that it finds installed. The [quickstart](docs/QUICKSTART.md) covers Linux, Docker, and the Claude Desktop extension.
 
