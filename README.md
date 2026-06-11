@@ -1,7 +1,8 @@
 <h1 align="center">Cloak</h1>
 
 <p align="center">
-  <strong>Your AI agent can use your API keys. It can never read them.</strong>
+  <strong>Stop pasting API keys into your AI.</strong><br>
+  Cloak lets your agents use your keys without ever seeing them.
 </p>
 
 <p align="center">
@@ -13,9 +14,9 @@
   <img src="docs/cloak-demo.gif" alt="Store an API key in Cloak's encrypted vault, then let an agent use it without the model ever seeing the key" width="820">
 </p>
 
-Hand an AI agent an API key and you've handed it to the model — its context, its provider's logs, and anyone who can read them. One prompt injection and the key walks out the door.
+Hand an AI agent an API key and you've handed it to the model: its context, its provider's logs, and anyone who can read them. One prompt injection and the key walks out the door.
 
-Cloak keeps your keys in an encrypted vault on your machine. The agent never receives the stored key — it asks Cloak to *use* the key, and gets back only the result.
+Cloak keeps your keys in an encrypted vault on your machine. The agent never receives the stored key. It asks Cloak to use the key, and gets back only the result.
 
 - **No `read_secret` tool.** The agent can list, sign, proxy, and mint. It cannot read a stored value.
 - **Allowlisted by default.** A key reaches a host only if you approved it.
@@ -32,7 +33,7 @@ cloak setup                     # creates the vault, starts the daemon, connects
 cloak add STRIPE_SECRET_KEY     # the key goes into the encrypted vault
 ```
 
-Allow which host that key is allowed to reach — add this to your `policy.toml`:
+Allow which host that key is allowed to reach by adding this to your `policy.toml`:
 
 ```toml
 [[secrets]]
@@ -49,11 +50,11 @@ cloak daemon restart && cloak unlock
 
 Now ask your agent, in plain English:
 
-> **You:** test my checkout — create a $20 charge and confirm it works.
+> **You:** test my checkout, create a $20 charge and confirm it works.
 >
-> **Claude:** ✓ `pi_3Q2k…` succeeded — $20.00. Your checkout works.
+> **Claude:** ✓ `pi_3Q2k…` succeeded, $20.00. Your checkout works.
 
-Cloak attached the key for that one request and handed back only the result. Your `STRIPE_SECRET_KEY` — which can refund every charge and drain the account — never reached the model.
+Cloak attached the key for that one request and handed back only the result. Your `STRIPE_SECRET_KEY`, which can refund every charge and drain the account, never reached the model.
 
 `cloak setup` connects Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue.dev, and Codex that it finds installed. The [quickstart](docs/QUICKSTART.md) covers Linux, Docker, and the Claude Desktop extension.
 
@@ -61,15 +62,15 @@ Cloak attached the key for that one request and handed back only the result. You
 
 Three pieces:
 
-- **`cloak`** — the CLI you use to add and manage secrets.
-- **`cloakd`** — a local daemon that holds the keys and does the privileged work.
-- **`cloak-mcp`** — the MCP server your AI client connects to.
+- **`cloak`**: the CLI you use to add and manage secrets.
+- **`cloakd`**: a local daemon that holds the keys and does the privileged work.
+- **`cloak-mcp`**: the MCP server your AI client connects to.
 
 Your agent calls a tool on `cloak-mcp`. `cloakd` checks your policy, attaches the secret only for the allowed request, and returns the result. The stored key never reaches the agent or model.
 
 ## What it protects (and what it doesn't)
 
-Cloak stops your long-lived key from leaking — it doesn't make a hijacked agent harmless. A minted token or a proxied response still goes to the agent, and an agent can still misuse the access you allowlisted. It's built for a single-user machine; root and compromised hosts are out of scope. The [threat model](docs/THREAT_MODEL.md) is honest about the rest.
+Cloak stops your long-lived key from leaking. It does not make a hijacked agent harmless: a minted token or a proxied response still goes to the agent, and an agent can still misuse the access you allowlisted. It is built for a single-user machine; root and compromised hosts are out of scope. The [threat model](docs/THREAT_MODEL.md) is honest about the rest.
 
 ## Documentation
 
