@@ -84,7 +84,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  // Stderr only — stdout is reserved for MCP framing.
+  // Stderr only; stdout is reserved for MCP framing.
   const msg = err instanceof Error ? err.message : String(err);
   process.stderr.write(`cloak-mcp fatal: ${msg}\n`);
   process.exit(1);

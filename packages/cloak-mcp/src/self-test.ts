@@ -6,7 +6,7 @@ import { handshake, request } from "./ipc.ts";
 export async function runSelfTest(): Promise<void> {
   await handshake();
   await request("vault.list", {});
-  // Stdout is fine here — self-test is not used over MCP framing.
+  // Stdout is fine here; self-test is not used over MCP framing.
   process.stdout.write("ok\n");
 }
 
