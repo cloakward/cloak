@@ -50,7 +50,7 @@ cloak daemon restart && cloak unlock
 
 Now ask your agent, in plain English:
 
-> **You:** test my checkout, create a $50 charge and confirm it works.
+> **You:** test my checkout: create a $50 Stripe PaymentIntent with pm_card_visa and confirm it succeeded.
 
 The agent calls `proxy_authenticated_http_request`. Cloak attaches `STRIPE_SECRET_KEY`, sends the request to Stripe, and returns only the result. This is a real one, captured in test mode:
 
