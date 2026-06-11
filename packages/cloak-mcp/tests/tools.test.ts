@@ -561,4 +561,23 @@ describe("tools", () => {
     );
     expect(tools.length).toBe(6);
   });
+
+  test("tool input schemas avoid keywords that hide a tool from the model", async () => {
+    const { tools } = await import("../src/tools/index.ts");
+    // The Anthropic tool-input-schema validator rejects JSON Schema conditional
+    // keywords (if/then/else/allOf), and a tool whose schema is rejected is
+    // silently dropped from the model's toolset, so the model never sees it.
+    // Any such validation must live in the runtime zod schema instead. This
+    // guards the proxy tool, which once used allOf + if/then and vanished from
+    // every agent that tried to use a key.
+    const forbidden = ['"allOf":', '"if":', '"then":', '"else":'];
+    for (const t of tools) {
+      const json = JSON.stringify(t.inputSchema);
+      for (const kw of forbidden) {
+        expect(`${t.name} contains ${kw}: ${json.includes(kw)}`).toBe(
+          `${t.name} contains ${kw}: false`,
+        );
+      }
+    }
+  });
 });

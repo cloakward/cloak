@@ -100,16 +100,12 @@ const inputSchema = {
     },
   },
   required: ["secret_name", "method", "url", "auth_scheme"],
-  allOf: [
-    {
-      if: { properties: { auth_scheme: { const: "header" } }, required: ["auth_scheme"] },
-      then: { required: ["header_name"] },
-    },
-    {
-      if: { properties: { auth_scheme: { enum: ["bearer", "basic"] } }, required: ["auth_scheme"] },
-      then: { not: { required: ["header_name"] } },
-    },
-  ],
+  // NOTE: the conditional "header_name is required iff auth_scheme is 'header'"
+  // rule is enforced at runtime by `argsSchema` (zod superRefine) below. It is
+  // deliberately NOT expressed here with JSON Schema if/then/allOf: the
+  // Anthropic tool-input-schema validator rejects those keywords, and a tool
+  // with an unsupported schema is silently dropped from the model's toolset.
+  // Keeping this schema to the supported subset is what makes the tool visible.
   additionalProperties: false,
 } as const;
 
