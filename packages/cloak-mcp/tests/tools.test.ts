@@ -548,10 +548,10 @@ describe("tools", () => {
       "Return metadata about a single named secret (kind, tags, created/updated timestamps, version). Never returns the secret value.",
     );
     expect(desc("sign_request")).toBe(
-      "Compute authentication headers for an outbound HTTP request using a stored secret as the signing key. Supports AWS SigV4 and generic HMAC-SHA256. Returns only the computed headers — the underlying secret is never disclosed. Use this when an API requires request signing rather than a bearer token.",
+      "Compute authentication headers for an outbound HTTP request by signing it with a stored secret. Supports only AWS SigV4 and generic HMAC-SHA256, and returns just the computed headers; the secret is never disclosed. Use this only for APIs that require request signing, such as AWS services. For normal API-key or bearer-token auth (Stripe, OpenAI, GitHub, and the like), use proxy_authenticated_http_request instead.",
     );
     expect(desc("proxy_authenticated_http_request")).toBe(
-      "Send an HTTPS request to a host on the user's allowlist, with the named secret attached by the daemon as bearer, basic, or custom-header authentication. Returns status, redacted headers, and base64-encoded body. Query-string auth is disabled because URLs are commonly logged.",
+      "Make an authenticated HTTPS API call using a stored secret as the credential. This is the primary way to call an external API that authenticates with an API key or token (for example Stripe, OpenAI, GitHub, or Slack): the daemon attaches the named secret as a Bearer token, HTTP Basic credential, or custom header, sends the request to a host on the user's allowlist, and returns the status, redacted headers, and base64-encoded body. The secret value is never disclosed to you. Query-string auth is disabled because URLs are commonly logged.",
     );
     expect(desc("mint_short_lived_token")).toBe(
       "Mint a short-lived derived token from a long-lived parent secret. AWS STS is implemented; GitHub App and GitLab PAT kinds are reserved and currently return not-supported. Returns the derived token and its expiry. The long-lived parent never leaves the daemon.",
