@@ -15,7 +15,7 @@ const inputSchema = {
 export const listSecretNames: CloakTool = {
   name: "list_secret_names",
   description:
-    "List the names and metadata of secrets stored in the local Cloak vault. Returns names, kinds, and tags only — never the secret values themselves.",
+    "List the names and metadata of secrets stored in the local Cloak vault. Returns names, kinds, and tags only, never the secret values themselves.",
   inputSchema,
   outputSchema: secretListJsonSchema,
   async handler(rawArgs: unknown): Promise<ToolResult> {

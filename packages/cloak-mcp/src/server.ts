@@ -31,7 +31,7 @@ const SERVER_INSTRUCTIONS = [
   "- Only when an API requires request signing (AWS SigV4 or HMAC-SHA256): use sign_request.",
   "- list_secret_names and get_secret_metadata show which secrets exist (names and metadata only). query_audit reads the audit log.",
   "",
-  "Do not attempt to read, print, echo, or shell out to obtain a raw key (for example `cloak show`, `cloak run`, environment variables, or curl with the key inline). Those paths are intentionally blocked and will fail. If you find yourself wanting the key's value, you want proxy_authenticated_http_request instead.",
+  "Do not try to obtain the raw key value. There is no MCP tool that returns a secret, and reading it out of band (shelling out to `cloak show` or `cloak run`, environment variables, or curl with the key inline) is not the supported path: `cloak show` and `cloak run` require interactive user presence and will not return a value to you here. If you find yourself wanting the key's value, use proxy_authenticated_http_request instead and let Cloak make the call.",
 ].join("\n");
 
 function printVersion(): void {
