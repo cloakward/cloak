@@ -51,10 +51,24 @@ cloak daemon restart && cloak unlock
 Now ask your agent, in plain English:
 
 > **You:** test my checkout, create a $20 charge and confirm it works.
->
-> **Claude:** ✓ `pi_3Q2k…` succeeded, $20.00. Your checkout works.
 
-Cloak attached the key for that one request and handed back only the result. Your `STRIPE_SECRET_KEY`, which can refund every charge and drain the account, never reached the model.
+The agent calls `proxy_authenticated_http_request`. Cloak attaches `STRIPE_SECRET_KEY`, sends the request to Stripe, and returns only the result. This is a real one, captured in test mode:
+
+```text
+proxy_authenticated_http_request  →  POST https://api.stripe.com/v1/payment_intents
+
+Status 200
+{
+  "id": "pi_3Th13uKCZ65x2cgg1VtFHsoK",
+  "amount": 2000,
+  "amount_received": 2000,
+  "currency": "usd",
+  "latest_charge": "ch_3Th13uKCZ65x2cgg11mVQRCN",
+  "livemode": false
+}
+```
+
+A real $20 charge went through. The `STRIPE_SECRET_KEY` that authorized it, which can refund every charge and drain the account, appears nowhere in what the model received.
 
 `cloak setup` connects Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue.dev, and Codex that it finds installed. The [quickstart](docs/QUICKSTART.md) covers Linux, Docker, and the Claude Desktop extension.
 
