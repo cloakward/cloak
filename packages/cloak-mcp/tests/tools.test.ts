@@ -529,6 +529,57 @@ describe("tools", () => {
     });
     expect(camelCredentialScope.isError).toBe(true);
     expect(camelCredentialScope.content[0].text).toContain("credential-shaped fields");
+
+    // Scope structural limits (depth, key count, array size, control chars) are
+    // enforced ONLY by the runtime validator now that the advertised schema is
+    // lean, so lock each branch here against a silent regression.
+    const deepScope = await dispatchTool("mint_short_lived_token", {
+      secret_name: "aws",
+      kind: "aws-sts",
+      scope: { a: { b: { c: { d: { e: 1 } } } } },
+    });
+    expect(deepScope.isError).toBe(true);
+    expect(deepScope.content[0].text).toContain("levels deep");
+
+    const controlScope = await dispatchTool("mint_short_lived_token", {
+      secret_name: "aws",
+      kind: "aws-sts",
+      scope: { region: `us${String.fromCharCode(1)}east` },
+    });
+    expect(controlScope.isError).toBe(true);
+    expect(controlScope.content[0].text).toContain("control characters");
+
+    const manyKeysScope = await dispatchTool("mint_short_lived_token", {
+      secret_name: "aws",
+      kind: "aws-sts",
+      scope: Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`k${i}`, 1])),
+    });
+    expect(manyKeysScope.isError).toBe(true);
+    expect(manyKeysScope.content[0].text).toContain("object keys");
+
+    const bigArrayScope = await dispatchTool("mint_short_lived_token", {
+      secret_name: "aws",
+      kind: "aws-sts",
+      scope: { list: Array.from({ length: 65 }, (_, i) => i) },
+    });
+    expect(bigArrayScope.isError).toBe(true);
+    expect(bigArrayScope.content[0].text).toContain("at most 64 items");
+  });
+
+  test("tools/list payload stays under the strict-client byte budget", async () => {
+    const { tools } = await import("../src/tools/index.ts");
+    // A bloated tools/list (one tool's scope schema was once ~14 KB of
+    // recursive anyOf + credential regexes) made strict MCP clients like Codex
+    // time out parsing it. Keep the advertised surface lean so first-connect
+    // stays fast for every agent, not just Claude.
+    const advertised = tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+      outputSchema: t.outputSchema,
+    }));
+    const bytes = JSON.stringify({ tools: advertised }).length;
+    expect(bytes).toBeLessThan(20_000);
   });
 
   test("unknown tools are marked as MCP tool errors", async () => {
@@ -609,6 +660,7 @@ describe("tools", () => {
     for (const t of tools) {
       const used = new Set<string>();
       collect(t.inputSchema, used);
+      collect(t.outputSchema, used);
       for (const kw of used) {
         expect(`${t.name} schema keyword '${kw}' allowed: ${ALLOWED.has(kw)}`).toBe(
           `${t.name} schema keyword '${kw}' allowed: true`,

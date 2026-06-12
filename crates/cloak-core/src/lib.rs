@@ -1,4 +1,4 @@
-//! Cloak core library — vault, crypto, daemon, IPC.
+//! Cloak core library - vault, crypto, daemon, IPC.
 //!
 //! Security boundary: this crate is the **only** code in the workspace that
 //! handles raw secret material. The MCP shim never sees plaintext.
@@ -7,7 +7,7 @@
 //! - All AEAD goes through [`crypto::aead`] (XChaCha20-Poly1305-IETF only).
 //! - All KDF goes through [`crypto::kdf`] (Argon2id keyed mode only).
 //! - Secret-typed values use [`crypto::Secret`] (zeroize-on-drop).
-//! - Outbound HTTP originates here ([`egress`]) — never in `cloak-mcp`.
+//! - Outbound HTTP originates here ([`egress`]) - never in `cloak-mcp`.
 
 // NOTE: We cannot use `#![forbid(unsafe_code)]` here because `crypto.rs`
 // must call libsodium FFI directly. Instead we lock down unsafe usage by

@@ -87,9 +87,10 @@ fn find_secret_table_mut<'a>(doc: &'a mut DocumentMut, secret: &str) -> Option<&
         .find(|t| t.get("name").and_then(Item::as_str) == Some(secret))
 }
 
-/// Like [`find_secret_table_mut`] but appends a new entry (with
-/// `name = secret`, `kind = "api_key"`) when none exists, and always
-/// returns a mutable reference to the matching table.
+/// Like [`find_secret_table_mut`] but appends a new entry (with `name =
+/// secret` and no `kind`, so the rule matches the secret whatever its real
+/// kind) when none exists, and always returns a mutable reference to the
+/// matching table.
 fn secret_table_mut<'a>(doc: &'a mut DocumentMut, secret: &str) -> &'a mut Table {
     // Ensure the array-of-tables exists.
     if doc
@@ -111,7 +112,11 @@ fn secret_table_mut<'a>(doc: &'a mut DocumentMut, secret: &str) -> &'a mut Table
         None => {
             let mut t = Table::new();
             t.insert("name", toml_edit::value(secret));
-            t.insert("kind", toml_edit::value("api_key"));
+            // Intentionally omit `kind`: an absent kind imposes no constraint,
+            // so the rule matches the secret regardless of its real kind.
+            // Hardcoding `kind = "api_key"` here would silently and permanently
+            // deny non-api_key secrets, because the policy engine denies on a
+            // kind mismatch before it ever checks `allowed_hosts`.
             arr.push(t);
             arr.len() - 1
         }
@@ -194,10 +199,12 @@ mod tests {
         let out = allow_host(&mut doc, "STRIPE_SECRET_KEY", "api.stripe.com");
         assert_eq!(out, AllowOutcome::Added);
         assert_eq!(hosts(&doc, "STRIPE_SECRET_KEY"), vec!["api.stripe.com"]);
-        // kind defaulted.
+        // No `kind` is written for a brand-new rule: an absent kind imposes no
+        // constraint, so the rule matches the secret whatever its real kind.
+        // Hardcoding a kind here would silently deny non-api_key secrets.
         let arr = doc["secrets"].as_array_of_tables().unwrap();
         let t = arr.iter().next().unwrap();
-        assert_eq!(t.get("kind").and_then(Item::as_str), Some("api_key"));
+        assert!(t.get("kind").is_none());
     }
 
     #[test]

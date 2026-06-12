@@ -12,19 +12,19 @@
 //! 3. Check the rate limit. On exhaustion, audit `Denied` and return
 //!    `Error::PolicyDenied("rate limited")`.
 //! 4. Lock the vault mutex and `vault.show()` the secret (only after the
-//!    policy gate has passed — a denied call must never even read the
+//!    policy gate has passed - a denied call must never even read the
 //!    plaintext).
 //! 5. For external side effects (proxy / mint), audit `Started` before
 //!    sending anything over the network.
 //! 6. Do the real work (sign / proxy / mint / query).
 //! 7. Audit `Ok` (or `Error` if the real work failed after policy passed).
-//! 8. Return only the *new* outputs — never echo the secret, never echo
+//! 8. Return only the *new* outputs - never echo the secret, never echo
 //!    the auth header that was attached to a proxied request.
 //!
 //! AWS SigV4 signing (`tool.sign_request` with `scheme="aws-sigv4"`) and
 //! AWS STS minting (`tool.mint_token` with `kind="aws-sts"`) are real, post
 //! W1 (decision: option A). They use:
-//! - `aws-sigv4` for the V4 algorithm — KAT-verified against the published
+//! - `aws-sigv4` for the V4 algorithm - KAT-verified against the published
 //!   AWS test suite (see `sigv4_kat_get_vanilla`).
 //! - `aws-sdk-sts` with an explicit Smithy HTTP client using rustls/ring
 //!   for STS calls;
@@ -54,7 +54,7 @@ const MAX_AUDIT_QUERY_LIMIT: usize = 1000;
 const AWS_STS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 // -------------------------------------------------------------------------
-// HandlerCtx — the bag of references each handler call needs.
+// HandlerCtx - the bag of references each handler call needs.
 // -------------------------------------------------------------------------
 
 /// Bundle of references threaded through every privileged tool handler.
@@ -65,7 +65,7 @@ const AWS_STS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct HandlerCtx<'a> {
     /// The vault. `Mutex` because `rusqlite::Connection` is `!Sync`.
     pub vault: &'a Mutex<Vault>,
-    /// The policy engine — its rate-limiter is mutable so we lock too.
+    /// The policy engine - its rate-limiter is mutable so we lock too.
     pub policy: &'a Mutex<PolicyEngine>,
     /// The hash-chained audit log.
     pub audit: &'a Mutex<AuditLog>,
@@ -317,7 +317,20 @@ async fn enforce_policy(
 
     let deny_reason: Option<String> = match decision.action {
         Action::Allow => None,
-        Action::Deny => Some(format!("denied: {}", decision.reason)),
+        Action::Deny => {
+            let mut msg = format!("denied: {}", decision.reason);
+            // Close the loop: when a proxy call is blocked on the host
+            // allowlist, tell the user the exact command that grants access.
+            // `secret_name` and `target_host` are already reflected in
+            // `decision.reason`, so this surfaces no new untrusted content, and
+            // the command form is fixed.
+            if policy_tool == "proxy_authenticated_http_request" {
+                if let (Some(name), Some(host)) = (secret_name, target_host) {
+                    msg.push_str(&format!("\nto allow it, run: cloak allow {name} {host}"));
+                }
+            }
+            Some(msg)
+        }
         Action::RequireConfirmation => Some(format!(
             "confirmation not implemented for {} in v0.1",
             tool_wire
@@ -386,7 +399,7 @@ struct SignRequestParams {
 
 /// Handler for `tool.sign_request`.
 ///
-/// Returns only the new/modified auth headers — never the original
+/// Returns only the new/modified auth headers - never the original
 /// request headers, never the body, never the secret.
 ///
 /// HMAC-SHA256 canonical string (documented):
@@ -492,7 +505,7 @@ pub async fn sign_request(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value>
                 Utc::now(),
             )
             .map_err(|e| {
-                // Constant message — never surface key material or AWS internals.
+                // Constant message - never surface key material or AWS internals.
                 tracing::debug!(error = %e, "aws-sigv4 sign failed");
                 Error::Other("aws-sigv4: sign failed")
             })
@@ -566,7 +579,7 @@ fn sign_hmac_sha256(
 /// the caller didn't already supply one).
 ///
 /// `key_pair` must be `"<access_key_id>:<secret_access_key>"`. On any
-/// other shape, returns `Error::Other` with a constant message — the
+/// other shape, returns `Error::Other` with a constant message - the
 /// secret value is never embedded in the error.
 ///
 /// `now` is parameterized so the KAT vectors can pin the timestamp.
@@ -597,7 +610,7 @@ fn sign_aws_sigv4(
     };
 
     // Build the headers we want to feed into the canonicalization. SigV4
-    // requires the Host header — supply one if the caller didn't.
+    // requires the Host header - supply one if the caller didn't.
     // Keep the caller's keys verbatim (case-insensitive matching is the
     // signing layer's job).
     let mut headers: Vec<(String, String)> = Vec::with_capacity(request_headers.len() + 1);
@@ -660,7 +673,7 @@ fn sign_aws_sigv4(
         out.insert(canon.to_string(), value.to_string());
     }
     // If the signer didn't surface X-Amz-Content-Sha256 (it does for some
-    // services, e.g. s3, but not all), include it ourselves — callers
+    // services, e.g. s3, but not all), include it ourselves - callers
     // expect a stable shape.
     out.entry("X-Amz-Content-Sha256".to_string())
         .or_insert(body_sha256_hex);
@@ -740,7 +753,7 @@ pub async fn proxy_http(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
         }
     };
 
-    // Strip caller-supplied auth-bearing headers — case-insensitive.
+    // Strip caller-supplied auth-bearing headers - case-insensitive.
     let stripped: BTreeMap<String, String> = p
         .headers
         .iter()
@@ -1406,7 +1419,7 @@ pub async fn mint_token(ctx: &HandlerCtx<'_>, params: &Value) -> Result<Value> {
         DateTime::<Utc>::from_timestamp(expiration_secs, 0).unwrap_or_else(Utc::now);
 
     // Encode the temporary credentials as a base64'd JSON envelope
-    // — this is the documented "token" wire shape.
+    // - this is the documented "token" wire shape.
     let envelope = json!({
         "access_key_id": creds.access_key_id,
         "secret_access_key": creds.secret_access_key,
@@ -1601,7 +1614,7 @@ mod tests {
         assert!(h.contains_key("X-Amz-Date"));
         assert!(h.contains_key("X-Amz-Content-Sha256"));
         assert!(h.contains_key("Host"));
-        // No stub marker — this is real V4.
+        // No stub marker - this is real V4.
         assert!(!h.contains_key("X-Cloak-Sigv4-Stub"));
         assert_eq!(h.get("Host").map(String::as_str), Some("example.com"));
         assert!(h

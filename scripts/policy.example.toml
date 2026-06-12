@@ -1,4 +1,4 @@
-# Cloak policy — default deny-by-default with a few common allow rules.
+# Cloak policy - default deny-by-default with a few common allow rules.
 #
 # Reload: restart `cloakd` to pick up policy changes (`cloak daemon restart`).
 # Check: run `cloak doctor` after copying this file to the default policy path.
@@ -12,7 +12,7 @@ action = "deny"
 burst = 10
 refill_per_minute = 30
 
-# Per-tool defaults — can be overridden by [[secrets]] rules below.
+# Per-tool defaults - can be overridden by [[secrets]] rules below.
 [tools.proxy_authenticated_http_request]
 allowed_hosts = []  # empty = deny all; populate per-secret instead
 

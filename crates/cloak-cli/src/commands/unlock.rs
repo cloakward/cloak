@@ -2,7 +2,7 @@
 //!
 //! Implements the "ask for the passphrase, retry up to 3 times on
 //! [`Error::InvalidPassphrase`]" interaction. Other error variants from
-//! [`Vault::unlock`] are not retried — they indicate a real problem
+//! [`Vault::unlock`] are not retried - they indicate a real problem
 //! (corrupted header, unsupported version, etc.).
 
 use anyhow::Result;
@@ -22,7 +22,7 @@ pub const MAX_ATTEMPTS: u32 = 3;
 pub fn unlock_interactive(vault: &mut Vault) -> Result<()> {
     if !vault.is_initialized()? {
         return Err(SystemError::boxed(
-            "vault not initialized — run `cloak init` first",
+            "vault not initialized - run `cloak init` first",
         ));
     }
 

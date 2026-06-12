@@ -6,12 +6,12 @@
 //! `~/Library/Application Support/cloak/vault.cloak`).
 //!
 //! The `meta` table holds:
-//! - `format_version` — currently `1`.
-//! - `salt` — 16 bytes, fed to Argon2id along with the pepper.
-//! - `kdf_phc` — PHC-encoded Argon2id params + salt (self-describing).
-//! - `wrap_nonce` + `wrap_aead` — the master key, wrapped under
+//! - `format_version` - currently `1`.
+//! - `salt` - 16 bytes, fed to Argon2id along with the pepper.
+//! - `kdf_phc` - PHC-encoded Argon2id params + salt (self-describing).
+//! - `wrap_nonce` + `wrap_aead` - the master key, wrapped under
 //!   `wrap_key = Argon2id(passphrase, pepper)` with AAD `cloak.master.v1`.
-//! - `monotonic_counter` — strictly-increasing integer; rollback rejected.
+//! - `monotonic_counter` - strictly-increasing integer; rollback rejected.
 //!
 //! Each row in `secrets` carries its own AEAD nonce and ciphertext. The
 //! per-record key is derived via `crypto_kdf_derive_from_key(master,
@@ -110,11 +110,11 @@ pub struct SecretMetadata {
     pub version: u64,
 }
 
-/// Result of `Vault::initialize` — surfaces the autotuned Argon2id
+/// Result of `Vault::initialize` - surfaces the autotuned Argon2id
 /// parameters so callers can show them to the user, plus the freshly
 /// generated 24-word BIP-39 recovery mnemonic. The mnemonic is **only**
-/// returned here (and on demand via [`Vault::reveal_recovery_mnemonic`]
-/// — except that the mnemonic itself is not stored, so on-demand reveal
+/// returned here (and on demand via [`Vault::reveal_recovery_mnemonic`],
+/// except that the mnemonic itself is not stored, so on-demand reveal
 /// is impossible; we surface this contract by returning it from
 /// `initialize` and never persisting it).
 pub struct InitResult {
@@ -149,7 +149,7 @@ pub struct VaultStatus {
 pub struct Vault {
     path: PathBuf,
     store: SqliteStore,
-    /// Cached master key — present iff unlocked.
+    /// Cached master key - present iff unlocked.
     master: Option<Secret<[u8; 32]>>,
 }
 
@@ -647,7 +647,7 @@ impl Vault {
             return Err(Error::VaultFormat("unknown recovery format"));
         }
         let key = mnemonic.derive_recovery_key()?;
-        // Discard the unwrapped master — we only care about the AEAD-tag check.
+        // Discard the unwrapped master - we only care about the AEAD-tag check.
         let master = recovery::unwrap_master(&key, &nonce, &ct)?;
         // `master` zeroizes on drop.
         drop(master);
@@ -665,8 +665,8 @@ impl Vault {
     /// passphrase is what the user types from now on.
     ///
     /// Errors:
-    /// - [`Error::InvalidMnemonic`] — wrong words or tampered recovery wrap.
-    /// - [`Error::NoRecoveryWrap`] — vault has no recovery wrap.
+    /// - [`Error::InvalidMnemonic`] - wrong words or tampered recovery wrap.
+    /// - [`Error::NoRecoveryWrap`] - vault has no recovery wrap.
     pub fn restore_with_mnemonic(
         &mut self,
         mnemonic: &RecoveryMnemonic,
@@ -893,7 +893,7 @@ mod tests {
         });
     }
 
-    /// Fast Argon2id params for tests — production values come from
+    /// Fast Argon2id params for tests - production values come from
     /// `kdf::autotune()` but we cannot afford that per-test.
     fn fast_params() -> KdfParams {
         KdfParams {
@@ -1071,7 +1071,7 @@ mod tests {
             .unwrap();
         // bump to a value that's now <= current counter we'd compute via
         // `next_counter`. Hand-call the store's bump with a backwards
-        // value — must reject.
+        // value - must reject.
         let r = v.store.bump_counter(0);
         assert!(matches!(r, Err(Error::VaultRollbackDetected)));
     }

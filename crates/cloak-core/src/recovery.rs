@@ -3,7 +3,7 @@
 //! At vault-creation time we generate 256 bits of entropy, encode it as a
 //! 24-word English BIP-39 mnemonic, and derive a 32-byte "recovery key"
 //! from the standard BIP-39 seed (PBKDF2-HMAC-SHA512, 2048 iterations,
-//! salt = "mnemonic" + empty BIP-39 passphrase, 64-byte output — we use
+//! salt = "mnemonic" + empty BIP-39 passphrase, 64-byte output - we use
 //! the first 32 bytes). The recovery key wraps the master key under the
 //! same XChaCha20-Poly1305 AEAD that the passphrase wrap uses, with a
 //! distinct AAD ([`RECOVERY_AAD`]).
@@ -75,8 +75,8 @@ impl RecoveryMnemonic {
     /// whitespace, collapses inner whitespace runs, and validates against
     /// the English wordlist + BIP-39 checksum.
     ///
-    /// On any malformed input — wrong word count, unknown word, bad
-    /// checksum — returns [`Error::InvalidMnemonic`] with a stable
+    /// On any malformed input - wrong word count, unknown word, bad
+    /// checksum - returns [`Error::InvalidMnemonic`] with a stable
     /// short message (no echo of the user's input).
     pub fn parse(s: &str) -> Result<Self> {
         // Normalize: collapse all whitespace runs to single spaces and

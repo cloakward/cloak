@@ -911,7 +911,7 @@ mod tests {
         "#;
         let mut e = PolicyEngine::from_str(toml).unwrap();
         // FOO matches the secret rule, but the rule has no entry for
-        // query_audit — should fall through to [tools.query_audit].
+        // query_audit - should fall through to [tools.query_audit].
         let d = e.evaluate(&ctx("query_audit", Some("FOO")));
         assert_eq!(d.action, Action::Allow);
     }

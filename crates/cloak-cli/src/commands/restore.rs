@@ -1,4 +1,4 @@
-//! `cloak restore` — re-derive vault access from a 24-word mnemonic.
+//! `cloak restore` - re-derive vault access from a 24-word mnemonic.
 //!
 //! When a user has lost their vault passphrase but still has the BIP-39
 //! recovery seed they wrote down at vault creation, this command walks
@@ -15,7 +15,7 @@
 //!
 //! On success the vault is unlocked: subsequent commands can run in the
 //! same process without re-entering the new passphrase. Touch ID is
-//! NOT required here — possession of the mnemonic is the auth factor.
+//! NOT required here - possession of the mnemonic is the auth factor.
 
 use std::io::{self, BufRead, IsTerminal};
 
@@ -35,7 +35,7 @@ pub fn run(ctx: &Context) -> Result<()> {
     let mut vault = open_vault(ctx)?;
     if !vault.is_initialized()? {
         return Err(SystemError::boxed(format!(
-            "vault not initialized at {} — `cloak restore` only operates \
+            "vault not initialized at {} - `cloak restore` only operates \
              on existing vaults that already carry a recovery seed",
             ctx.vault_path.display()
         )));

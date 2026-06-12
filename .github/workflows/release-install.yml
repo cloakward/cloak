@@ -303,8 +303,8 @@ jobs:
           # runners vary: `/opt` is 0777, and some arm64 images have a
           # group/other-writable component under $HOME. To get a deterministic,
           # clean ancestry on EVERY Linux runner, stage into a fresh root-owned
-          # tree directly under `/` — whose only ancestor is `/` itself, which is
-          # always root:root 0755 — so there is no pre-existing dirty parent to
+          # tree directly under `/` - whose only ancestor is `/` itself, which is
+          # always root:root 0755 - so there is no pre-existing dirty parent to
           # trip the trust-path check. macOS install trust uses the CodeDirectory
           # hash and a clean $HOME prefix is sufficient there.
           if [ "${RUNNER_OS:-}" = "Linux" ]; then

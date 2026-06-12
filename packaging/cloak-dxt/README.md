@@ -1,4 +1,4 @@
-# Cloak.dxt — Claude Desktop Extension
+# Cloak.dxt - Claude Desktop Extension
 
 Drag-and-drop install of the `cloak-mcp` shim for Claude Desktop. Zero terminal commands for the install step.
 

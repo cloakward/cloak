@@ -193,7 +193,7 @@ pub mod aead {
     }
 
     /// Verify+decrypt `ciphertext` (which is `ct || tag`). Returns the
-    /// plaintext on success or [`Error::Aead`] on tag mismatch — this
+    /// plaintext on success or [`Error::Aead`] on tag mismatch - this
     /// function never panics on malformed input.
     pub fn open(
         key: &[u8; KEY_LEN],
@@ -302,7 +302,7 @@ pub mod kdf {
     /// `mem_kib` is in KiB (libsodium internally takes `memlimit` in bytes;
     /// we multiply by 1024 at the FFI boundary).
     /// `t_cost` is `opslimit` (number of passes).
-    /// `p_cost` is informational only — libsodium's `crypto_pwhash` is
+    /// `p_cost` is informational only - libsodium's `crypto_pwhash` is
     /// single-threaded, but we record `p` for PHC interoperability.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct KdfParams {
@@ -316,7 +316,7 @@ pub mod kdf {
 
     impl Default for KdfParams {
         fn default() -> Self {
-            // 64 MiB memory, 3 passes, p=4 — the spec's default.
+            // 64 MiB memory, 3 passes, p=4 - the spec's default.
             Self {
                 mem_kib: 64 * 1024,
                 t_cost: 3,
@@ -423,7 +423,7 @@ pub mod kdf {
         if baseline >= 200 {
             return Ok(params);
         }
-        // Too fast — bump `t` until we land in the band or hit t=8.
+        // Too fast - bump `t` until we land in the band or hit t=8.
         for t in 4..=8u32 {
             params.t_cost = t;
             let ms = measure(params)?;
@@ -431,7 +431,7 @@ pub mod kdf {
                 return Ok(params);
             }
         }
-        // Hit t=8 and still under 200ms — accept what we have.
+        // Hit t=8 and still under 200ms - accept what we have.
         Ok(params)
     }
 

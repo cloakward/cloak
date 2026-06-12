@@ -1,4 +1,4 @@
-# Build artefacts and editor noise — these would balloon the build
+# Build artefacts and editor noise - these would balloon the build
 # context (and thus the time spent shipping it to the daemon) without
 # contributing to the image.
 target/
@@ -12,7 +12,7 @@ target/
 *.log
 .DS_Store
 
-# Unrelated workspaces — the Dockerfile only builds `cloak-core`'s
+# Unrelated workspaces - the Dockerfile only builds `cloak-core`'s
 # `cloakd` and `cloak` binaries, so packaging the bun-compiled MCP shim,
 # docs, and unrelated install scripts would be wasted I/O. The pinned
 # libsodium prep script is intentionally kept because the Dockerfile runs it.

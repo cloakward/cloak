@@ -1,4 +1,4 @@
-# W3 — supply-chain + license + advisory gate.
+# W3 - supply-chain + license + advisory gate.
 # Runs once per push/PR on Linux. Blocks merge.
 name: security
 
@@ -86,7 +86,7 @@ jobs:
       - name: aws-lc-rs forbidden in cloak-core dep tree
         run: |
           if cargo tree --locked -p cloak-core 2>&1 | grep -q 'aws-lc-rs'; then
-            echo "aws-lc-rs in cloak-core dep tree — forbidden, see PLAN.md R2"
+            echo "aws-lc-rs in cloak-core dep tree - forbidden, see PLAN.md R2"
             exit 1
           fi
           echo "ok: aws-lc-rs absent from cloak-core dep tree"

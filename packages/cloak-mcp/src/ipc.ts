@@ -97,6 +97,15 @@ function failAllPending(err: Error): void {
   pending.clear();
 }
 
+// On socket loss (e.g. the daemon restarted), drop the cached session so the
+// next request transparently re-handshakes instead of replaying a stale token
+// that a freshly restarted daemon would reject. Without this the MCP process
+// would stay broken until the client restarted it.
+function resetSessionState(): void {
+  sessionToken = null;
+  sessionEnsured = null;
+}
+
 function verifyDaemonWithCli(): void {
   if (socketOverridesAllowed()) {
     return;
@@ -134,6 +143,7 @@ function onData(chunk: Buffer): void {
       }
       socket = null;
       recvBuffer = Buffer.alloc(0);
+      resetSessionState();
       return;
     }
     if (recvBuffer.length < 4 + len) {
@@ -210,11 +220,13 @@ async function connectIpc(): Promise<Socket> {
         failAllPending(new Error(`cloakd socket error: ${err.message}`));
         socket = null;
         recvBuffer = Buffer.alloc(0);
+        resetSessionState();
       });
       s.on("close", () => {
         failAllPending(new Error("cloakd socket closed"));
         if (socket === s) socket = null;
         recvBuffer = Buffer.alloc(0);
+        resetSessionState();
       });
       socket = s;
       connecting = null;

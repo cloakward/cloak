@@ -59,7 +59,7 @@ pub fn prompt_passphrase_twice() -> Result<Secret<String>> {
             .context("failed to read passphrase confirmation")?;
 
         let matches: bool = first.as_bytes().ct_eq(second.as_bytes()).into();
-        // Wipe the second buffer immediately whether or not it matched —
+        // Wipe the second buffer immediately whether or not it matched -
         // we never need it again.
         second.zeroize();
 

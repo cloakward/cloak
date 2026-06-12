@@ -1,4 +1,4 @@
-# W9b — release pipeline: cosign keyless signing + SLSA L3 provenance.
+# W9b - release pipeline: cosign keyless signing + SLSA L3 provenance.
 #
 # Triggers ONLY on `v*` tag pushes (e.g. v0.9.0-rc1, v1.0.0). Builds release
 # tarballs of `cloak`, `cloakd`, and `cloak-mcp` for the v1.0 platforms,
@@ -230,9 +230,9 @@ jobs:
       - name: cloak-mcp single-binary build
         # `bun build --compile` embeds the runner host's bun runtime (glibc-linked,
         # host arch). Skip on:
-        #   * x86_64-unknown-linux-musl — bun runtime is glibc-linked, won't run on
+        #   * x86_64-unknown-linux-musl - bun runtime is glibc-linked, won't run on
         #     a pure-musl userspace.
-        #   * aarch64-unknown-linux-gnu — runs on x86_64 host; bun --compile cannot
+        #   * aarch64-unknown-linux-gnu - runs on x86_64 host; bun --compile cannot
         #     cross-target arm64.
         # These two tarballs ship cloak + cloakd only.
         if: ${{ matrix.target != 'x86_64-unknown-linux-musl' && matrix.target != 'aarch64-unknown-linux-gnu' }}
@@ -305,7 +305,7 @@ jobs:
           echo "::error::Stable macOS releases must be Developer ID signed and submitted to Apple notarytool."
           exit 1
 
-      - name: Apple codesign — import Developer ID cert into temp keychain
+      - name: Apple codesign - import Developer ID cert into temp keychain
         id: apple_codesign
         if: ${{ matrix.platform == 'macos' && steps.apple_secrets.outputs.available == 'true' }}
         env:
@@ -317,7 +317,7 @@ jobs:
           set -euo pipefail
           target="${{ matrix.target }}"
 
-          # Throwaway keychain with a random unlock password — we delete
+          # Throwaway keychain with a random unlock password - we delete
           # it after the build via a cleanup step. The keychain holds
           # only the Developer ID Application certificate for the
           # duration of this job.
@@ -393,13 +393,13 @@ jobs:
           echo "keychain_path=${KEYCHAIN_PATH}" >> "$GITHUB_OUTPUT"
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Apple codesign — skip notice
+      - name: Apple codesign - skip notice
         if: ${{ matrix.platform == 'macos' && steps.apple_secrets.outputs.available != 'true' }}
         shell: bash
         run: |
           echo "::warning::Apple signing/notarization skipped for prerelease preview. Tarball will ship unsigned (Gatekeeper may require xattr -d com.apple.quarantine on download)."
 
-      - name: Apple notarize — submit zip and staple binaries
+      - name: Apple notarize - submit zip and staple binaries
         id: apple_notarize
         if: ${{ matrix.platform == 'macos' && steps.apple_codesign.outputs.signed == 'true' }}
         env:
@@ -444,7 +444,7 @@ jobs:
 
           # Staple the notarization ticket to each binary in-place.
           # After stapling, the binaries carry an offline-verifiable
-          # receipt — Gatekeeper accepts them without a network round-trip.
+          # receipt - Gatekeeper accepts them without a network round-trip.
           for bin in \
             "target/${target}/release/cloak" \
             "target/${target}/release/cloakd" \
@@ -453,7 +453,7 @@ jobs:
             if [ -f "$bin" ]; then
               echo "stapling ${bin}..."
               # `stapler staple` only works on bundles/dmgs/pkgs, not
-              # on bare Mach-O binaries — for command-line tools the
+              # on bare Mach-O binaries - for command-line tools the
               # notarization ticket lives in Apple's CDN and Gatekeeper
               # fetches it on first launch (online check). For an
               # offline-stapled experience we'd ship a .pkg or .dmg;
@@ -467,13 +467,13 @@ jobs:
           rm -f "$KEY_PATH" "$NOTARY_ZIP"
           echo "notarized=true" >> "$GITHUB_OUTPUT"
 
-      - name: Apple notarize — cleanup temp keychain
+      - name: Apple notarize - cleanup temp keychain
         if: ${{ always() && matrix.platform == 'macos' && steps.apple_codesign.outputs.keychain_path != '' }}
         shell: bash
         run: |
           security delete-keychain "${{ steps.apple_codesign.outputs.keychain_path }}" || true
 
-      - name: Apple notarize — production assertion
+      - name: Apple notarize - production assertion
         if: ${{ matrix.platform == 'macos' && steps.meta.outputs.prerelease != 'true' && steps.apple_notarize.outputs.notarized != 'true' }}
         shell: bash
         run: |
@@ -697,7 +697,7 @@ jobs:
           set -euo pipefail
           cd dist
           # The SLSA generic generator wants base64 of a sha256sums-style
-          # listing of every artifact we want covered by provenance —
+          # listing of every artifact we want covered by provenance -
           # that's every tarball, every .dxt, plus the sums file itself.
           tmp="$(mktemp)"
           while IFS= read -r f; do
@@ -724,12 +724,12 @@ jobs:
           retention-days: 7
 
   # -------------------------------------------------------------------
-  # 2b. Cloak.dxt — Claude Desktop Extension package.
+  # 2b. Cloak.dxt - Claude Desktop Extension package.
   #
   # Builds one .dxt per Claude Desktop platform we currently ship
   # (macOS arm64/x64) by
   # reusing the cloak-mcp binary from the same tarball the build job
-  # produced. No second build of cloak-mcp — the bytes inside the .dxt
+  # produced. No second build of cloak-mcp - the bytes inside the .dxt
   # are byte-identical to those inside the signed tarball. Windows
   # packaging is deferred until Windows support ships.
   #
@@ -984,7 +984,7 @@ jobs:
   # -------------------------------------------------------------------
   # 7. Verification gate.
   #
-  # Fresh runner — verifies the same signed-bundle + SLSA provenance
+  # Fresh runner - verifies the same signed-bundle + SLSA provenance
   # artifacts that were attached to the draft release. We pull them
   # from the workflow's artifact storage rather than `gh release
   # download`, because gh cannot fetch from a release that is still

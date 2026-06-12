@@ -9,9 +9,9 @@
 //! 3. `bind(2)` the UDS, chmod it to `0600`.
 //! 4. Open the vault (it may be locked / uninitialized; that's fine).
 //! 5. Install signal handlers for SIGINT/SIGTERM (graceful shutdown)
-//!    and SIGHUP (logged "reload requested" — actual reload lives in
-//!    the policy slice).
-//! 6. Accept loop: per connection — peer-auth, dispatch, write replies.
+//!    and SIGHUP, which reloads the policy in place (fail-closed: a bad
+//!    policy file is rejected and the live policy is kept).
+//! 6. Accept loop: per connection, peer-auth, dispatch, write replies.
 //!
 //! All `tracing` records carry `peer_pid`, `basename`, and `method`;
 //! they never carry params, since params can contain passphrases or
@@ -124,7 +124,7 @@ fn bind_listener(path: &Path) -> Result<UnixListener> {
                 ));
             }
             Err(_) => {
-                // Stale — clean it up.
+                // Stale - clean it up.
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -136,7 +136,7 @@ fn bind_listener(path: &Path) -> Result<UnixListener> {
     }
     let listener = UnixListener::bind(path)?;
     // chmod 0600 so only the daemon's own UID can connect (defense in
-    // depth — `getpeereid` is the real gate).
+    // depth - `getpeereid` is the real gate).
     let perms = std::fs::Permissions::from_mode(0o600);
     std::fs::set_permissions(path, perms)?;
     Ok(listener)
@@ -335,8 +335,8 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     );
 
     // 1b. Spawn a per-connection peer-exit watcher (kqueue NOTE_EXIT on
-    //     macOS, pidfd POLLIN on Linux). If the peer dies — even before
-    //     its socket FIN reaches us — we revoke every session bound to
+    //     macOS, pidfd POLLIN on Linux). If the peer dies - even before
+    //     its socket FIN reaches us - we revoke every session bound to
     //     this peer's identity AND every session bound to this conn-id
     //     immediately, closing the PID-recycle window (threat model
     //     A8). `peer_exit` lets the read loop break out of `read` the

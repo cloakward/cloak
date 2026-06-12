@@ -1,4 +1,4 @@
-//! `cloak import [PATH] [--update] [--replace]` — load a `.env` file.
+//! `cloak import [PATH] [--update] [--replace]` - load a `.env` file.
 //!
 //! Default mode: refuse to write if the vault already contains *any*
 //! secrets. `--update` adds new keys and overwrites existing values.
@@ -37,7 +37,7 @@ pub fn run(ctx: &Context, path: Option<PathBuf>, mode: Mode, yes: bool) -> Resul
 
     let mut vault = open_vault(ctx)?;
     if !vault.is_initialized()? {
-        anyhow::bail!("vault not initialized — run `cloak setup` first");
+        anyhow::bail!("vault not initialized - run `cloak setup` first");
     }
     unlock_interactive(&mut vault)?;
 
@@ -210,6 +210,12 @@ pub fn run(ctx: &Context, path: Option<PathBuf>, mode: Mode, yes: bool) -> Resul
             String::new()
         }
     );
+    if added > 0 {
+        println!();
+        println!("Each imported secret starts denied. Let one reach a host with:");
+        println!("  cloak allow <NAME> <HOST>   e.g. cloak allow OPENAI_API_KEY api.openai.com");
+        println!("See current rules with `cloak policy`.");
+    }
     Ok(())
 }
 

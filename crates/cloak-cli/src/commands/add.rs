@@ -1,4 +1,4 @@
-//! `cloak add NAME [--kind KIND] [--tag TAG ...]` — insert a new secret.
+//! `cloak add NAME [--kind KIND] [--tag TAG ...]` - insert a new secret.
 
 use anyhow::Result;
 use cloak_core::crypto::Secret;

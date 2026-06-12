@@ -350,7 +350,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Bump the monotonic counter to `new_value`. Refuses to roll back —
+    /// Bump the monotonic counter to `new_value`. Refuses to roll back -
     /// `new_value` must be strictly greater than the current value.
     pub fn bump_counter(&self, new_value: u64) -> Result<()> {
         let current: Option<i64> = self
@@ -708,7 +708,7 @@ mod tests {
     #[test]
     fn strict_mode_rejects_text_in_int_column() {
         let (_d, s) = fresh_store();
-        // monotonic_counter is INTEGER under STRICT — inserting a string
+        // monotonic_counter is INTEGER under STRICT - inserting a string
         // value should fail.
         let r = s.conn.execute(
             "INSERT INTO meta (id, format_version, salt, kdf_phc, wrap_nonce, \

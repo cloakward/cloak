@@ -1,4 +1,4 @@
-//! `cloak daemon {install,start,stop,restart,status}` — per-component primitives
+//! `cloak daemon {install,start,stop,restart,status}` - per-component primitives
 //! for installing and supervising `cloakd`.
 //!
 //! These are the building blocks the `cloak setup` wizard composes. They

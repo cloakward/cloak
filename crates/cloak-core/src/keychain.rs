@@ -42,7 +42,7 @@ pub const PEPPER_LEN: usize = 32;
 ///
 /// When `CLOAK_PEPPER_FILE` is set we cannot write the mirror into the
 /// OS keychain; instead we write it to a 0600 file alongside the pepper
-/// file. See [`THREAT_MODEL.md`] — in this fallback an attacker who can
+/// file. See [`THREAT_MODEL.md`] - in this fallback an attacker who can
 /// roll the vault back can also roll the counter file back in lockstep,
 /// defeating the detection. The OS keychain path is the real defense.
 const ROLLBACK_COUNTER_FILENAME: &str = "rollback-counter";
@@ -120,14 +120,14 @@ pub enum AuditHeadAnchor {
 /// Env var: if set, points at a file holding the pepper bytes.
 ///
 /// This is a v0.1 escape hatch (also the spec'd Linux fallback) for
-/// environments where the OS keychain is not available — headless
+/// environments where the OS keychain is not available - headless
 /// servers, CI runners, dev sandboxes that cannot prompt for keychain
 /// authorization. The file is read with `0600` mode requirements
 /// **enforced** on read; refusing to load a world-readable pepper file
 /// is intentional. Generation is on-demand: if the file does not exist,
 /// a fresh 32-byte pepper is written there with mode `0600`.
 ///
-/// This is documented as **insecure relative to the OS keychain** —
+/// This is documented as **insecure relative to the OS keychain** -
 /// `THREAT_MODEL.md` lists it as a residual risk for v0.1.
 pub const PEPPER_FILE_ENV: &str = "CLOAK_PEPPER_FILE";
 
@@ -200,9 +200,9 @@ fn file_pepper(path: &std::path::Path) -> Result<Secret<Vec<u8>>> {
 /// macOS Security Framework `OSStatus` for `errSecItemNotFound`.
 ///
 /// This is the ONLY `OSStatus` we treat as "no pepper exists yet, create one".
-/// Every other status — `errSecAuthFailed` (-25293) post-sleep transient,
+/// Every other status - `errSecAuthFailed` (-25293) post-sleep transient,
 /// `errSecInteractionNotAllowed` (-25308) locked-headless, `errSecUserCanceled`
-/// (-128), etc. — must propagate so cloakd does not regenerate-and-overwrite a
+/// (-128), etc. - must propagate so cloakd does not regenerate-and-overwrite a
 /// valid pepper (which would brick the vault). The same constant gates the
 /// rollback-counter read path.
 #[cfg(target_os = "macos")]
@@ -233,7 +233,7 @@ fn keychain_pepper() -> Result<Secret<Vec<u8>>> {
         }
         Err(e) => {
             // `errSecItemNotFound` (-25300) is the legitimate first-install
-            // signal — there is no pepper yet, so we generate and store one.
+            // signal - there is no pepper yet, so we generate and store one.
             //
             // ALL OTHER OSStatus values must propagate. In particular:
             //   - `errSecAuthFailed` (-25293): post-sleep transient, the
@@ -493,7 +493,7 @@ pub fn clear_audit_head_pending() -> Result<()> {
 /// `read_keychain_counter` / `mirror_counter` are all gated behind
 /// `#[cfg(any(test, feature = "test-util"))]` so release binaries
 /// compiled without `--features test-util` cannot honor the env var
-/// at all — a same-UID attacker cannot disable A7 read-side rollback
+/// at all - a same-UID attacker cannot disable A7 read-side rollback
 /// detection by setting it in their environment.
 #[cfg(any(test, feature = "test-util"))]
 const DISABLE_MIRROR_ENV: &str = "CLOAK_DISABLE_ROLLBACK_MIRROR";
@@ -885,7 +885,7 @@ fn keychain_counter_read() -> Result<Option<RollbackCounterMirror>> {
         Ok(bytes) => decode_rollback_state(&bytes).map(Some),
         Err(e) => {
             // `errSecItemNotFound` (-25300) is the "no mirror yet" signal
-            // — first run after upgrade. Anything else is an error.
+            // - first run after upgrade. Anything else is an error.
             if e.code() == -25300 {
                 Ok(None)
             } else {
@@ -1250,8 +1250,8 @@ mod linux_secret_service {
     }
 
     /// Pick a usable, unlocked collection. Try the default alias first,
-    /// then `login`. If both refuse to unlock — which is what happens on
-    /// a headless SSH session with no agent — surface a typed error.
+    /// then `login`. If both refuse to unlock - which is what happens on
+    /// a headless SSH session with no agent - surface a typed error.
     fn unlocked_collection<'a>(ss: &'a SecretService<'a>) -> Result<Collection<'a>> {
         if let Ok(c) = ss.get_default_collection() {
             if try_unlock(&c).is_ok() {
@@ -1331,7 +1331,7 @@ mod linux_secret_service {
         Ok(())
     }
 
-    /// Counter-mirror search attributes — same `service`, distinct
+    /// Counter-mirror search attributes - same `service`, distinct
     /// `account` so the pepper item is never accidentally read or
     /// overwritten.
     fn counter_attrs() -> HashMap<&'static str, &'static str> {
@@ -1561,7 +1561,7 @@ mod linux_secret_service {
         //! - `no_dbus_returns_typed_error`: with the session bus
         //!   address pointed at nothing, `pepper_get_or_create()`
         //!   returns a `Keychain` error whose message tells the user
-        //!   to set `CLOAK_PEPPER_FILE`. This test is gate-free — it
+        //!   to set `CLOAK_PEPPER_FILE`. This test is gate-free - it
         //!   forces the failure path and is safe to run anywhere.
 
         use super::*;
@@ -1801,8 +1801,8 @@ mod macos_tests {
     //!
     //! Background: a previous `Err(_) => create new pepper` arm in
     //! [`keychain_pepper`] swallowed every Security Framework error,
-    //! including `errSecAuthFailed` (-25293) — a transient that fires
-    //! routinely after a wake-from-sleep — and called
+    //! including `errSecAuthFailed` (-25293) - a transient that fires
+    //! routinely after a wake-from-sleep - and called
     //! `set_generic_password`, which **overwrites** the existing pepper.
     //! That permanently bricks the vault (the master-key wrap can no
     //! longer be derived). v1.0 BLOCKER fix.
@@ -1834,19 +1834,19 @@ mod macos_tests {
     }
 
     /// Every other Security Framework status that has been observed in
-    /// the field MUST NOT classify as missing — otherwise cloakd will
+    /// the field MUST NOT classify as missing - otherwise cloakd will
     /// regenerate the pepper and brick the vault.
     #[test]
     fn transient_and_locked_errors_are_not_missing() {
-        // errSecAuthFailed — post-sleep transient (the original bug).
+        // errSecAuthFailed - post-sleep transient (the original bug).
         assert!(!is_item_not_found(-25293));
-        // errSecInteractionNotAllowed — locked keychain, no UI.
+        // errSecInteractionNotAllowed - locked keychain, no UI.
         assert!(!is_item_not_found(-25308));
-        // errSecUserCanceled — user dismissed unlock prompt.
+        // errSecUserCanceled - user dismissed unlock prompt.
         assert!(!is_item_not_found(-128));
-        // errSecMissingEntitlement — sandbox/entitlement misconfig.
+        // errSecMissingEntitlement - sandbox/entitlement misconfig.
         assert!(!is_item_not_found(-34018));
-        // errSecBadReq — generic bad-request.
+        // errSecBadReq - generic bad-request.
         assert!(!is_item_not_found(-909));
         // 0 ("no error") clearly isn't a missing item either.
         assert!(!is_item_not_found(0));

@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "cloak",
   "display_name": "Cloak",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "MCP-native secrets vault. Raw stored secrets are not returned as MCP tool output.",
   "long_description": "Cloak replaces the anti-pattern of pasting API keys into prompts with a hardened local daemon that never returns raw stored secret values to the model. Agents call action-shaped MCP tools (sign_request, proxy_authenticated_http_request, mint_short_lived_token) and the daemon performs the privileged operation on the agent's behalf. Derived tokens and proxied upstream responses are still visible to the MCP client by design. Reveal is a deliberate user-presence-gated CLI act, not a tool call.\n\nThis extension bundles the cloak-mcp shim. It requires the cloak CLI + cloakd daemon to be installed and set up separately (see https://github.com/cloakward/cloak#install). Run `cloak setup` in a terminal first so Cloak can safely display and verify the one-time recovery seed, then run `cloak daemon start` and `cloak unlock`. Restart Claude Desktop after the daemon is running and unlocked.",
   "author": {
@@ -18,7 +18,7 @@
   "support": "https://github.com/cloakward/cloak/issues",
   "license": "Apache-2.0",
   "privacy_policies": [
-    "https://github.com/cloakward/cloak/blob/v1.1.0/docs/PRIVACY.md",
+    "https://github.com/cloakward/cloak/blob/v1.1.1/docs/PRIVACY.md",
     "https://aws.amazon.com/privacy/"
   ],
   "keywords": [
@@ -48,7 +48,7 @@
   "tools": [
     {
       "name": "list_secret_names",
-      "description": "List the names and metadata of secrets stored in the local Cloak vault. Returns names, kinds, and tags only — never the secret values themselves."
+      "description": "List the names and metadata of secrets stored in the local Cloak vault. Returns names, kinds, and tags only - never the secret values themselves."
     },
     {
       "name": "get_secret_metadata",
@@ -56,7 +56,7 @@
     },
     {
       "name": "sign_request",
-      "description": "Compute authentication headers for an outbound HTTP request using a stored secret as the signing key. Supports AWS SigV4 and generic HMAC-SHA256. Returns only the computed headers — the underlying secret is never disclosed."
+      "description": "Compute authentication headers for an outbound HTTP request using a stored secret as the signing key. Supports AWS SigV4 and generic HMAC-SHA256. Returns only the computed headers - the underlying secret is never disclosed."
     },
     {
       "name": "proxy_authenticated_http_request",
@@ -68,7 +68,7 @@
     },
     {
       "name": "query_audit",
-      "description": "Query the local Cloak audit log of privileged operations. Filterable by time range, tool name, secret name, and result. Returns audit entries — never secret values."
+      "description": "Query the local Cloak audit log of privileged operations. Filterable by time range, tool name, secret name, and result. Returns audit entries - never secret values."
     }
   ],
   "tools_generated": false,

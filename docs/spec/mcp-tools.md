@@ -47,7 +47,7 @@ export const tools: ReadonlyArray<CloakTool> = [
 
 **Description:**
 > List the names and metadata of secrets stored in the local Cloak vault.
-> Returns names, kinds, and tags only — never the secret values themselves.
+> Returns names, kinds, and tags only - never the secret values themselves.
 
 **Input schema:**
 ```json
@@ -121,7 +121,7 @@ The shim returns the daemon body verbatim as the tool result text. No values.
 **Description:**
 > Compute authentication headers for an outbound HTTP request using a stored
 > secret as the signing key. Supports AWS SigV4 and generic HMAC-SHA256.
-> Returns only the computed headers — the underlying secret is never
+> Returns only the computed headers - the underlying secret is never
 > disclosed. Use this when an API requires request signing rather than a
 > bearer token.
 
@@ -151,10 +151,10 @@ The shim returns the daemon body verbatim as the tool result text. No values.
 
 **Schemes:**
 
-- `hmac-sha256` — daemon computes
+- `hmac-sha256` - daemon computes
   `HMAC-SHA256(key, "{METHOD}\n{URL}\n{sha256_hex(body)}\n")` and returns
   `{ "X-Cloak-Signature": "<lowercase hex>" }`.
-- `aws-sigv4` — daemon signs in-process with the Rust `aws-sigv4` crate. The
+- `aws-sigv4` - daemon signs in-process with the Rust `aws-sigv4` crate. The
   secret value must be in the form `<access_key_id>:<secret_access_key>`.
   `aws_region` defaults to `us-east-1` and `aws_service` defaults to
   `execute-api` when omitted. KAT-verified against the published `get-vanilla`
@@ -230,7 +230,7 @@ body, and signing key never appear in the response and are never logged.
 | `header` | Adds `<header_name>: <secret>` |
 
 The daemon strips any caller-supplied `Authorization`, `Cookie`, or
-credential-shaped headers before attaching its own — no smuggling.
+credential-shaped headers before attaching its own - no smuggling.
 
 Caveat: the upstream response is returned to the MCP client. Cloak redacts exact
 secret forms from response body/headers and marks `redacted=true` if it changed
@@ -308,10 +308,10 @@ daemon before the secret is read.
 
 **Implemented kinds (v1.0):**
 
-- `aws-sts` — calls real AWS STS `GetSessionToken` (post-W1) and returns a
+- `aws-sts` - calls real AWS STS `GetSessionToken` (post-W1) and returns a
   base64'd JSON envelope of the temporary credentials with an RFC3339
   `expires_at`. The parent secret value must be `<access_key_id>:<secret_access_key>`.
-- `github-app` / `gitlab-pat` — schema is stable but the handlers return a
+- `github-app` / `gitlab-pat` - schema is stable but the handlers return a
   typed not-supported error. Calls are still policy-checked, rate-limited,
   and audited.
 
@@ -345,7 +345,7 @@ expires. Rotating the parent is a separate flow.
 
 **Description:**
 > Query the local Cloak audit log of privileged operations. Filterable by
-> time range, tool name, secret name, and result. Returns audit entries —
+> time range, tool name, secret name, and result. Returns audit entries -
 > never secret values.
 
 **Input schema:**
@@ -411,9 +411,9 @@ request and a final `ok` or `error` entry after it returns.
 
 - No `get_secret`, `reveal_secret`, `read_secret`, or any other accessor that
   would return raw stored material to the model.
-- No `vault.add`, `vault.set`, `vault.rm`, `vault.show` — write/reveal methods
+- No `vault.add`, `vault.set`, `vault.rm`, `vault.show` - write/reveal methods
   are CLI-only in `crates/cloak-core/src/daemon.rs`.
-- No streaming, no bidirectional pushes — request/response only.
+- No streaming, no bidirectional pushes - request/response only.
 
 If you propose a new tool, it requires a Discussion + varun approval
 (see `CONTRIBUTING.md` Hard rules and Escalation).

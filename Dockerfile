@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 #
-# W9e — Multi-arch container image for `cloakd` (the Cloak daemon).
+# W9e - Multi-arch container image for `cloakd` (the Cloak daemon).
 #
 # This image starts the daemon and also carries the trusted `cloak` CLI
 # sibling needed by installed-binary peer pinning. It does not ship the
@@ -12,7 +12,7 @@
 # via two native runner jobs (ubuntu-24.04 for linux/amd64,
 # ubuntu-24.04-arm for linux/arm64); the per-arch images are then
 # stitched into a multi-arch manifest with `docker buildx imagetools
-# create`. We deliberately do NOT cross-compile inside Docker — the
+# create`. We deliberately do NOT cross-compile inside Docker - the
 # previous `FROM --platform=$BUILDPLATFORM` + `rustup target add`
 # arrangement consistently failed with `error[E0463]: can't find
 # crate for core` (#46).
@@ -21,11 +21,11 @@
 #   * Vault, audit, policy, and runtime socket state live under
 #     /var/lib/cloak (declared as a VOLUME and wired via XDG env vars).
 #   * The pepper file is read from /run/secrets/cloak-pepper. Mount it
-#     as a Docker secret — never bake it into the image.
+#     as a Docker secret - never bake it into the image.
 #   * No ports are exposed; IPC is UDS-only.
 
 # -----------------------------------------------------------------------------
-# Stage 1 — builder
+# Stage 1 - builder
 # -----------------------------------------------------------------------------
 # `rust:1.94.1-bookworm` matches `rust-toolchain.toml` and is pinned by
 # multi-arch index digest. Bookworm is also what the distroless runtime is
@@ -97,7 +97,7 @@ RUN set -eux; \
     chown -R 65532:65532 /runtime-var-lib-cloak
 
 # -----------------------------------------------------------------------------
-# Stage 2 — runtime (distroless)
+# Stage 2 - runtime (distroless)
 # -----------------------------------------------------------------------------
 # `cc-debian12` ships glibc + libgcc + libstdc++ but no shell and no
 # package manager, and is pinned by multi-arch index digest. The daemon
@@ -107,9 +107,9 @@ FROM gcr.io/distroless/cc-debian12:nonroot@sha256:bd2899c12b335c827750ccf2359879
 LABEL org.opencontainers.image.source="https://github.com/cloakward/cloak"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.title="cloakd"
-LABEL org.opencontainers.image.description="MCP-native local secrets vault — daemon"
+LABEL org.opencontainers.image.description="MCP-native local secrets vault - daemon"
 LABEL org.opencontainers.image.documentation="https://github.com/cloakward/cloak/blob/main/docs/QUICKSTART.md"
-LABEL io.cloak.volume.var-lib-cloak="vault state — mount a named volume here so secrets survive container restarts"
+LABEL io.cloak.volume.var-lib-cloak="vault state - mount a named volume here so secrets survive container restarts"
 
 COPY --from=builder /cloakd /cloakd
 COPY --from=builder /cloak /cloak

@@ -7,7 +7,7 @@
 #      proceed on any mismatch (defeats a moved/MITM'd upstream alias).
 #   2. libsodium-sys-stable's build script then verifies the minisign
 #      signature (LATEST.tar.gz.minisig) over the archive against
-#      libsodium's embedded release public key — it carries the
+#      libsodium's embedded release public key - it carries the
 #      `minisign-verify` build dependency for exactly this, and runs the
 #      check unconditionally in the SODIUM_DIST_DIR path before extracting
 #      and compiling.

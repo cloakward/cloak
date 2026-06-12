@@ -1,6 +1,6 @@
 //! IPC framing (length-prefixed JSON over UDS / Named Pipe).
 //!
-//! Wire format (frozen — see `docs/IPC_WIRE.md`):
+//! Wire format (frozen - see `docs/IPC_WIRE.md`):
 //!
 //! ```text
 //! +----------------+------------------------------------+
@@ -44,7 +44,7 @@ pub struct Request {
     /// Method-specific parameters (validated by each handler).
     #[serde(default)]
     pub params: serde_json::Value,
-    /// Session token — required for every method except `*.handshake`.
+    /// Session token - required for every method except `*.handshake`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_token: Option<String>,
 }
@@ -57,7 +57,7 @@ pub struct Response {
     /// Successful result payload (handler-specific shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
-    /// Failure payload — symbolic code + human message.
+    /// Failure payload - symbolic code + human message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<RpcError>,
 }
@@ -141,7 +141,7 @@ impl From<&Error> for RpcError {
             Error::InvalidPassphrase => {
                 rpc_error("invalid-params", "invalid passphrase or tampered vault")
             }
-            // Recovery-seed paths never traverse the IPC boundary —
+            // Recovery-seed paths never traverse the IPC boundary -
             // `cloak restore` / `cloak backup *` are CLI-only and the
             // MCP shim has no access to the mnemonic. We still map the
             // variants to a typed RPC code so a stray library use from

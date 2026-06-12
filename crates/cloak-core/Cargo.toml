@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Cloak — secure local secrets vault. Core library."
+description = "Cloak - secure local secrets vault. Core library."
 
 [lib]
 name = "cloak_core"
@@ -49,7 +49,7 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
 
-# AWS — pinned narrow feature surface to keep the daemon binary small and
+# AWS - pinned narrow feature surface to keep the daemon binary small and
 # avoid pulling aws-lc-rs (we keep libsodium as the only crypto primitive in
 # the secret-protection path; rustls/ring is fine for AWS TLS).
 #
@@ -79,7 +79,7 @@ core-foundation = "0.10"
 # Touch ID prompt before serving `vault.show`; the CLI no longer
 # pre-prompts (see `crates/cloak-core/src/biometric.rs`). A same-UID
 # attacker who connects to the daemon socket directly cannot bypass
-# this — the daemon ignores any client-supplied biometric assertion.
+# this - the daemon ignores any client-supplied biometric assertion.
 objc2 = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSString", "NSError"] }
 objc2-local-authentication = { version = "0.2", features = ["LAContext", "LAError", "block2"] }
@@ -95,7 +95,7 @@ block2 = "0.5"
 # `crates/cloak-core/src/keychain.rs` (Linux arm).
 [target.'cfg(target_os = "linux")'.dependencies]
 secret-service = { version = "5.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
-# Linux user-presence gate — `cloakd` calls polkit's
+# Linux user-presence gate - `cloakd` calls polkit's
 # `org.freedesktop.PolicyKit1.Authority.CheckAuthorization` against the
 # `dev.cloak.show-secret` action before serving `vault.show`. We use
 # the typed proxy from `zbus_polkit` over the synchronous `zbus`

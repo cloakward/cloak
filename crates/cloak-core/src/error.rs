@@ -8,7 +8,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// All errors from cloak-core. Error messages never contain secret material.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// AEAD seal/open failed — typically a tampered ciphertext or wrong key.
+    /// AEAD seal/open failed - typically a tampered ciphertext or wrong key.
     #[error("aead: {0}")]
     Aead(&'static str),
 
@@ -43,7 +43,7 @@ pub enum Error {
 
     /// The vault was created before the BIP-39 recovery seed feature
     /// shipped and therefore has no recovery wrap to use.
-    #[error("this vault has no recovery seed (created before recovery seed support landed; create a new vault to opt in — migration in v1.1)")]
+    #[error("this vault has no recovery seed (created before recovery seed support landed; create a new vault to opt in - migration in v1.1)")]
     NoRecoveryWrap,
 
     /// Record with the given name already exists.
@@ -93,7 +93,7 @@ pub enum Error {
     /// Server-side biometric / user-presence prompt was cancelled,
     /// timed out, unavailable, or otherwise not confirmed. Returned by
     /// the daemon's `vault.show` handler before any plaintext is
-    /// produced — a same-UID attacker who connects to the daemon
+    /// produced - a same-UID attacker who connects to the daemon
     /// socket directly cannot bypass this.
     #[error("biometric / user-presence not confirmed")]
     BiometricFailed,

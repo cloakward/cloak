@@ -6,10 +6,10 @@
 //!
 //! # Exit codes
 //!
-//! - `0` — success.
-//! - `1` — user-facing error (wrong passphrase, secret not found,
+//! - `0` - success.
+//! - `1` - user-facing error (wrong passphrase, secret not found,
 //!   biometric failed, refusing to write to non-TTY, invalid input).
-//! - `2` — system / config error (vault not initialized when expected,
+//! - `2` - system / config error (vault not initialized when expected,
 //!   IO failure, malformed flag).
 
 use std::ffi::OsString;
@@ -55,12 +55,12 @@ mod unlock;
 // CLI types
 // -------------------------------------------------------------------------
 
-/// `cloak` — local secrets vault for Claude Desktop and friends.
+/// `cloak` - local secrets vault for Claude Desktop and friends.
 #[derive(Debug, Parser)]
 #[command(
     name = "cloak",
     version,
-    about = "Cloak — MCP-native secrets vault.",
+    about = "Cloak - MCP-native secrets vault.",
     long_about = "Cloak is a local secrets vault. Secrets are AEAD-encrypted at rest under \
                   a key derived from your passphrase via Argon2id. Reveal is gated behind \
                   local user-presence checks."
@@ -301,7 +301,7 @@ pub enum RollbackCmd {
 #[derive(Debug, Subcommand)]
 pub enum BackupCmd {
     /// Surface the recovery seed disposition for this vault. The
-    /// 24-word phrase is NOT re-displayed — Cloak does not keep a
+    /// 24-word phrase is NOT re-displayed - Cloak does not keep a
     /// copy. This command confirms the wrap exists and is reachable.
     Mnemonic,
     /// Round-trip a candidate 24-word seed against the vault's stored
@@ -445,7 +445,7 @@ pub fn run() -> Result<ExitCode> {
     // recurse.
     if requires_vault(&cli.command) && !vault_exists(&ctx) {
         eprintln!(
-            "(no vault found at {} — running setup wizard first)",
+            "(no vault found at {} - running setup wizard first)",
             ctx.vault_path.display()
         );
         let setup_exit = setup::run(

@@ -1,10 +1,10 @@
-# W9e — multi-arch container image for `cloakd`.
+# W9e - multi-arch container image for `cloakd`.
 #
 # Two native runner jobs build per-arch images (linux/amd64 on
 # ubuntu-24.04, linux/arm64 on ubuntu-24.04-arm), then a third job
 # stitches them into a multi-arch manifest with `docker buildx
 # imagetools create`. We deliberately do NOT cross-compile inside
-# Docker — the previous `FROM --platform=$BUILDPLATFORM` arrangement
+# Docker - the previous `FROM --platform=$BUILDPLATFORM` arrangement
 # consistently failed with `error[E0463]: can't find crate for core`
 # on the linux/arm64 row across four iteration attempts (see #46).
 # Native compilation per arch sidesteps the problem entirely.

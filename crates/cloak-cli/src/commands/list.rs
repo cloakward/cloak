@@ -1,4 +1,4 @@
-//! `cloak list` — print metadata for every secret. Never plaintext.
+//! `cloak list` - print metadata for every secret. Never plaintext.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -8,7 +8,7 @@ use super::{open_vault, Context};
 const STALE_DAYS: i64 = 90;
 
 /// Print a compact table of secrets sorted by name. Empty vault prints
-/// `(no secrets)`. No unlock is required — the data we print is
+/// `(no secrets)`. No unlock is required - the data we print is
 /// metadata-only.
 pub fn run(ctx: &Context) -> Result<()> {
     let vault = open_vault(ctx)?;

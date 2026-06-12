@@ -35,8 +35,8 @@ pub fn run(_ctx: &Context, secret: &str, host: &str) -> Result<()> {
     let outcome = allow_host(&mut doc, secret, host);
     if outcome == AllowOutcome::AlreadyPresent {
         println!("{secret} -> {host} already allowed (no change)");
-        // Still trigger a reload so the on-disk and live policy agree even
-        // if a previous edit never reached a running daemon.
+        // Nothing changed on disk, so there is no reload to do: the live and
+        // on-disk policy already agree on this host.
     } else {
         atomic_write_with_backup(&path, doc.to_string().as_bytes(), 0o600)?;
     }

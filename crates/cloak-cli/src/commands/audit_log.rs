@@ -2,7 +2,7 @@
 //! `cloak {run, export, panic}` can record their actions without going
 //! through an IPC method we don't have. We open the same audit file the
 //! daemon uses (`<data_dir>/cloak/audit.jsonl`), append a single entry,
-//! and close — all under the per-process `flock` the audit module
+//! and close - all under the per-process `flock` the audit module
 //! provides for multi-writer safety.
 //!
 //! Audit entries **never** carry the secret value. They carry the secret

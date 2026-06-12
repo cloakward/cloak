@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Cloak CLI — human surface for the local secrets vault."
+description = "Cloak CLI - human surface for the local secrets vault."
 
 [[bin]]
 name = "cloak"
@@ -38,7 +38,7 @@ libc = "0.2"
 # The biometric / user-presence gate now lives in `cloak-core`
 # (`cloak_core::biometric`) so `cloakd` can fire the OS-level prompt
 # itself when serving `vault.show`. The CLI re-uses that module via the
-# `cloak-core` library dep — no per-platform CLI deps needed for it.
+# `cloak-core` library dep - no per-platform CLI deps needed for it.
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

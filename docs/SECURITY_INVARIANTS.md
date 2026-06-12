@@ -7,12 +7,12 @@ test that asserts it, and the CI check that gates regressions.
 `README.md` links here and carries only a short summary; this file is the
 source of truth.
 
-## I1 — No MCP tool returns raw stored secret values
+## I1 - No MCP tool returns raw stored secret values
 
 The MCP-callable surface contains no `get_secret` / `reveal_secret` /
 `read_secret` method. Every tool returns either metadata (names, kinds, tags),
 the result of a privileged daemon-side action (computed headers, HTTP response,
-minted derivative), or an audit query — never a raw stored secret value. The
+minted derivative), or an audit query - never a raw stored secret value. The
 minted derivative is still a credential returned to the MCP client by design,
 and proxied HTTP responses are returned without arbitrary body redaction.
 
@@ -32,7 +32,7 @@ and proxied HTTP responses are returned without arbitrary body redaction.
 - **CI gate:** `cloak-mcp install + lint + test + build` step in
   `.github/workflows/ci.yml`.
 
-## I2 — The daemon owns all outbound HTTP
+## I2 - The daemon owns all outbound HTTP
 
 `cloak-mcp` imports zero HTTP clients. Network egress is daemon-owned and
 limited to explicit tool calls: `proxy_authenticated_http_request` goes through
@@ -41,7 +41,7 @@ redirects disabled, 30s timeout), while `mint_short_lived_token` uses the AWS
 Smithy STS client in `crates/cloak-core/src/handlers.rs` with a daemon-side
 30-second timeout. `egress.rs` additionally refuses any non-global destination
 address (loopback/private/link-local/metadata/ULA) for both IP-literal hosts
-and hostnames — the hostname filter runs in the DNS resolver reqwest connects
+and hostnames - the hostname filter runs in the DNS resolver reqwest connects
 through, so DNS-rebinding cannot slip a private address past the host allowlist
 (tested in `crates/cloak-core/src/egress.rs::tests`). Host allowlists apply to
 proxy requests; STS minting is
@@ -54,7 +54,7 @@ gated by tool/secret policy instead.
   against the real `src/` tree on every test run.
 - **CI gate:** `bun run lint:no-http` in the MCP test step.
 
-## I3 — Peer auth runs before any session token issuance
+## I3 - Peer auth runs before any session token issuance
 
 A connection from an unknown binary (basename not on the allowlist), an
 unknown UID, with no resolvable on-disk path, with a mismatched installed
@@ -69,7 +69,7 @@ is closed before the daemon writes anything to it. No session token is minted.
   require_same_uid toggle).
 - **CI gate:** `cargo test --workspace`.
 
-## I4 — Policy is checked before vault read
+## I4 - Policy is checked before vault read
 
 Every privileged tool handler runs the policy gate (and rate-limit bucket)
 before touching the vault. A denied call writes an audit entry with
@@ -83,7 +83,7 @@ before touching the vault. A denied call writes an audit entry with
   secret.
 - **CI gate:** `cargo test --workspace`.
 
-## I5 — libsodium only, no rolling our own
+## I5 - libsodium only, no rolling our own
 
 AEAD is XChaCha20-Poly1305-IETF; KDF is Argon2id keyed mode; per-record
 subkeys come from `crypto_kdf_derive_from_key` (BLAKE2b under the hood);
@@ -108,7 +108,7 @@ secret-protection path.
   (`deny.toml`).
 - **CI gate:** `cargo test --workspace`; `cargo deny` (W9-series).
 
-## I6 — `Secret<T>` zeroize-on-drop everywhere
+## I6 - `Secret<T>` zeroize-on-drop everywhere
 
 Every secret-typed value is wrapped in `crypto::Secret<T>`, which redacts
 `Debug` to `"***"` and zeroizes its inner buffer on drop. The only accessor
@@ -126,7 +126,7 @@ is `expose_secret()`, so reads are grep-able.
 
 ## Supplementary invariants
 
-### S1 — Audit log is hash-chained and tamper-evident
+### S1 - Audit log is hash-chained and tamper-evident
 `crates/cloak-core/src/audit.rs:160-186` builds each entry's `prev_hash` over
 the canonical-JSON serialization of the previous entry. `verify()` at
 `crates/cloak-core/src/audit.rs:188-220` rejects mutated/deleted/reordered
@@ -136,12 +136,12 @@ anchored outside the log; non-empty logs with no anchor fail closed unless an
 operator explicitly adopts the verified current head with
 `cloak audit adopt-head --yes`.
 
-### S2 — Session tokens use constant-time compare
+### S2 - Session tokens use constant-time compare
 `crates/cloak-core/src/session.rs:124` uses `subtle::ConstantTimeEq::ct_eq`
 on the token bytes. (`THREAT_MODEL.md` listed this as a v0.1 residual risk;
 the v1.0 fix landed pre-tag.)
 
-### S3 — Vault rollback is rejected
+### S3 - Vault rollback is rejected
 A monotonic counter lives in the vault's `meta` table and is mirrored
 into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`,
 or a 0600 `rollback-counter` file alongside `CLOAK_PEPPER_FILE`) together
@@ -160,7 +160,7 @@ covered by `crates/cloak-core/src/vault.rs::tests::rollback_counter_rejected_via
 the read-side gate end-to-end is covered by
 `crates/cloak-core/tests/rollback_mirror.rs`.
 
-### S4 — Per-record AAD prevents cross-record swap
+### S4 - Per-record AAD prevents cross-record swap
 The AAD bound to each record's ciphertext is
 `name_len_be(u32) || name_utf8 || created_unix_be(i64) || version_be(u64)`
 (`crates/cloak-core/src/vault.rs:414-426`). Tested by

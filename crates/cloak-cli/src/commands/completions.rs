@@ -1,4 +1,4 @@
-//! `cloak completions <SHELL>` — emit shell completion scripts.
+//! `cloak completions <SHELL>` - emit shell completion scripts.
 
 use anyhow::Result;
 use clap::CommandFactory;

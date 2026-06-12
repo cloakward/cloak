@@ -1,4 +1,4 @@
-//! `cloak export [PATH]` — render the vault as a `.env` file on disk.
+//! `cloak export [PATH]` - render the vault as a `.env` file on disk.
 //!
 //! ## Security boundary
 //! - Goes through the same user-presence-gated `vault.show` path as
@@ -40,7 +40,7 @@ pub fn run(ctx: &Context, path: Option<PathBuf>, force: bool) -> Result<()> {
 
     let mut vault = open_vault(ctx)?;
     if !vault.is_initialized()? {
-        anyhow::bail!("vault not initialized — run `cloak setup` first");
+        anyhow::bail!("vault not initialized - run `cloak setup` first");
     }
     unlock_interactive(&mut vault)?;
 

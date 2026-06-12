@@ -100,4 +100,4 @@ brew uninstall cloak
 rm -rf ~/Library/Application\ Support/cloak  # or ~/.local/share/cloak on Linux
 ```
 
-`cloak panic` is also the right command if you suspect compromise: it stops the daemon, revokes live sessions, and prints a rotation worksheet. It acts **immediately, with no confirmation prompt** — that is deliberate, so you can cut access fast in an incident; it does not touch your stored secrets, only the running daemon and its sessions. It does not uninstall the LaunchAgent/systemd unit; use your package manager or remove the service file separately when uninstalling.
+`cloak panic` is also the right command if you suspect compromise: it stops the daemon, revokes live sessions, and prints a rotation worksheet. It acts **immediately, with no confirmation prompt** - that is deliberate, so you can cut access fast in an incident; it does not touch your stored secrets, only the running daemon and its sessions. It does not uninstall the LaunchAgent/systemd unit; use your package manager or remove the service file separately when uninstalling.

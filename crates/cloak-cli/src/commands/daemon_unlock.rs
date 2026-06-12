@@ -1,4 +1,4 @@
-//! `cloak daemon-unlock` — push the vault passphrase into the running
+//! `cloak daemon-unlock` - push the vault passphrase into the running
 //! daemon so MCP peers can serve `vault.list` / `tool.*` requests.
 //!
 //! ## Why this exists

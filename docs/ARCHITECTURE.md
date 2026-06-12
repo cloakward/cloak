@@ -87,7 +87,7 @@ credentials from the kernel and gates them through `peer_auth::check()`.
   PID/UID/GID, `SO_PEERPIDFD` for non-recycling pidfd identity, and the
   `/proc/<pid>/exe` magic symlink for the binary. The trust hash is taken from
   the `/proc/<pid>/exe` symlink itself (which the kernel pins to the actual
-  executed inode), **not** by re-reading the resolved path by name — so a
+  executed inode), **not** by re-reading the resolved path by name - so a
   same-UID attacker cannot restore trusted bytes at the path after launching a
   different executable. Linux has no running-process code-directory equivalent,
   so the residual exec-after-connect race is inherent to the same-UID model.
@@ -145,7 +145,7 @@ all tables `STRICT`. Migrations are forward-only and recorded in
 The vault master key is generated once at `init`, stays in `cloakd` memory
 while the vault is unlocked, and is **never** persisted in plaintext.
 
-1. **Pepper** comes from the OS keychain — macOS Keychain generic-password
+1. **Pepper** comes from the OS keychain - macOS Keychain generic-password
    storage or freedesktop Secret Service / GNOME Keyring on Linux.
    `CLOAK_PEPPER_FILE` is a 0600-only escape hatch for CI and headless
    servers (`crates/cloak-core/src/keychain.rs`). v1.0 does not install a
@@ -153,17 +153,17 @@ while the vault is unlocked, and is **never** persisted in plaintext.
    defense against vault-file-only theft, not against a same-user process that
    can satisfy the OS keychain access policy.
 2. **`wrap_key = Argon2id(HMAC-SHA256(pepper, passphrase), salt, params)`**
-   — keyed-mode KDF, autotuned to ≤500 ms at `init`. The pepper raises the
+   - keyed-mode KDF, autotuned to ≤500 ms at `init`. The pepper raises the
    bar for an offline attacker who has only the vault file.
    (`crates/cloak-core/src/crypto.rs:366-381`)
 3. **`wrap_aead = XChaCha20-Poly1305-IETF(wrap_key, wrap_nonce, master, AAD = b"cloak.master.v1")`**
-   — versioned AAD so a future v2 wrap scheme will not collide with v1.
+   - versioned AAD so a future v2 wrap scheme will not collide with v1.
    (`crates/cloak-core/src/vault.rs:40,210,246`)
 
 ### Per-record subkeys and AAD
 
 Each `secrets` row carries its own AEAD nonce and ciphertext. The per-record
-key is **not** the master key — it is derived per-rowid:
+key is **not** the master key - it is derived per-rowid:
 
 ```
 record_key = crypto_kdf_derive_from_key(master, record_id, b"cloakrec")
@@ -204,7 +204,7 @@ reviewing the current vault file; the old counter-only mirror cannot prove
 pre-upgrade history. With `CLOAK_PEPPER_FILE` set the
 mirror falls back to a 0600 file alongside the pepper; in that fallback
 an attacker who can roll back the vault can also roll back the counter
-file in lockstep — see `docs/THREAT_MODEL.md`.
+file in lockstep - see `docs/THREAT_MODEL.md`.
 
 ## Privileged tool dispatch
 
@@ -215,7 +215,7 @@ follows the same ordered recipe (`crates/cloak-core/src/handlers.rs:1-22`):
 2. Resolve the policy `EvalContext` from `(tool, secret_name, secret_kind,
    target_host, peer_basename)`.
 3. Run the policy gate. On `Action::Deny` or `RequireConfirmation`,
-   audit a `Denied` entry and return `Error::PolicyDenied` — **never**
+   audit a `Denied` entry and return `Error::PolicyDenied` - **never**
    touching the vault. `RequireConfirmation` is parsed today but fails
    closed; there is no confirmation side-channel yet.
 4. Run the rate-limit gate (token bucket per `(tool, peer, secret)`).
@@ -232,7 +232,7 @@ The order is load-bearing: a denied call cannot decrypt
 ## Outbound HTTP
 
 Network egress is daemon-owned and limited to explicit tool calls. The MCP shim
-imports zero HTTP clients — `packages/cloak-mcp/scripts/check-no-http.mjs`
+imports zero HTTP clients - `packages/cloak-mcp/scripts/check-no-http.mjs`
 (invoked by `bun run lint:no-http`) fails CI on regression.
 
 `tool.proxy_http` uses `crates/cloak-core/src/egress.rs` with reqwest, rustls,

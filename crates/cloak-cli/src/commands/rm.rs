@@ -1,4 +1,4 @@
-//! `cloak rm` — single-name, `--tag TAG`, and `--all` removal.
+//! `cloak rm` - single-name, `--tag TAG`, and `--all` removal.
 
 use anyhow::Result;
 use cloak_core::Error;
@@ -23,7 +23,7 @@ pub fn run(ctx: &Context, sel: Selector, yes: bool) -> Result<()> {
     let mut vault = open_vault(ctx)?;
     if !vault.is_initialized()? {
         return Err(SystemError::boxed(
-            "vault not initialized — run `cloak setup` first",
+            "vault not initialized - run `cloak setup` first",
         ));
     }
     let all = vault.list()?;

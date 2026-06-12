@@ -8,7 +8,7 @@
 #
 # State is hermetic: HOME is redirected to a tempdir so the vault, audit
 # log, and policy file all live there. The macOS Keychain item
-# `dev.cloak / vault.pepper` is shared with production — that is the
+# `dev.cloak / vault.pepper` is shared with production - that is the
 # correct production behavior, and the test relies on it.
 #
 # Run from a Mac with a libsodium toolchain:

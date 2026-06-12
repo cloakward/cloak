@@ -35,25 +35,15 @@ cloak import .env               # pull every key you already have into the encry
 
 That works for any secret: an LLM key, a payments key, a cloud credential, a git token. Add them one at a time instead with `cloak add OPENAI_API_KEY`.
 
-Allowlist where each key is allowed to go in your `policy.toml`, one block per secret:
-
-```toml
-[[secrets]]
-name = "OPENAI_API_KEY"
-[secrets.tools.proxy_authenticated_http_request]
-allowed_hosts = ["api.openai.com"]
-
-[[secrets]]
-name = "STRIPE_SECRET_KEY"
-[secrets.tools.proxy_authenticated_http_request]
-allowed_hosts = ["api.stripe.com"]
-```
-
-Pick up the policy and unlock the daemon so your agent can use the vault:
+Every secret starts denied. Allow each key to reach a host with one command, applied live with no daemon restart:
 
 ```sh
-cloak daemon restart && cloak unlock
+cloak allow OPENAI_API_KEY api.openai.com
+cloak allow STRIPE_SECRET_KEY api.stripe.com
+cloak policy                    # see what each key can reach
 ```
+
+Prefer a file? The same rules live in `policy.toml`, one `[[secrets]]` block per secret. Remove a host with `cloak deny`.
 
 Your agent can now use any of them, in plain English. One worked example:
 
