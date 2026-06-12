@@ -100,16 +100,12 @@ const inputSchema = {
     },
   },
   required: ["secret_name", "method", "url", "auth_scheme"],
-  allOf: [
-    {
-      if: { properties: { auth_scheme: { const: "header" } }, required: ["auth_scheme"] },
-      then: { required: ["header_name"] },
-    },
-    {
-      if: { properties: { auth_scheme: { enum: ["bearer", "basic"] } }, required: ["auth_scheme"] },
-      then: { not: { required: ["header_name"] } },
-    },
-  ],
+  // NOTE: the conditional "header_name is required iff auth_scheme is 'header'"
+  // rule is enforced at runtime by `argsSchema` (zod superRefine) below. It is
+  // deliberately NOT expressed here with JSON Schema if/then/allOf: the
+  // Anthropic tool-input-schema validator rejects those keywords, and a tool
+  // with an unsupported schema is silently dropped from the model's toolset.
+  // Keeping this schema to the supported subset is what makes the tool visible.
   additionalProperties: false,
 } as const;
 
@@ -157,7 +153,7 @@ function formatProxyResponse(r: ProxyResponse): string {
 export const proxyAuthenticatedHttpRequest: CloakTool = {
   name: "proxy_authenticated_http_request",
   description:
-    "Send an HTTPS request to a host on the user's allowlist, with the named secret attached by the daemon as bearer, basic, or custom-header authentication. Returns status, redacted headers, and base64-encoded body. Query-string auth is disabled because URLs are commonly logged.",
+    "Make an authenticated HTTPS API call using a stored secret as the credential. This is the primary way to call an external API that authenticates with an API key or token (for example Stripe, OpenAI, GitHub, or Slack): the daemon attaches the named secret as a Bearer token, HTTP Basic credential, or custom header, sends the request to a host on the user's allowlist, and returns the status, redacted headers, and base64-encoded body. The secret value is never disclosed to you. Query-string auth is disabled because URLs are commonly logged.",
   inputSchema,
   outputSchema: proxyResponseOutputJsonSchema,
   async handler(rawArgs: unknown): Promise<ToolResult> {

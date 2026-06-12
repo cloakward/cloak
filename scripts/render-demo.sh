@@ -38,6 +38,15 @@ CLOAK_UNSAFE_TEST_MODE=1 CLOAK_PASSPHRASE="$PASSPHRASE" CLOAK_ALLOW_MNEMONIC_STD
 
 # Render with a clean env (no CLOAK_PASSPHRASE) so `cloak add` shows the real
 # interactive passphrase prompt rather than a test-mode banner.
+# Seed a realistic multi-provider .env so the demo imports the whole thing,
+# showing Cloak holds every kind of secret, not one provider.
+cat > "$REPO_ROOT/.env" <<'ENVEOF'
+OPENAI_API_KEY=sk-proj-Hk9f7Q2mZ...real
+STRIPE_SECRET_KEY=sk_live_51H8xQ2eZ...real
+GITHUB_TOKEN=ghp_8sB2kLpV9c...real
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG...real
+ENVEOF
+
 echo "==> rendering docs/cloak-demo.gif"
 vhs docs/demo.tape
 

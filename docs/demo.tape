@@ -20,13 +20,13 @@ Set TypingSpeed 50ms
 Sleep 900ms
 
 # --- the usual way ---
-Type "# the usual way: paste your key into .env"
+Type "# every secret you have, sitting in .env in plaintext"
 Enter
-Sleep 1100ms
-Type `echo "OPENAI_API_KEY=sk-proj-Hk9f...real" >> .env`
+Sleep 900ms
+Type "cat .env"
 Enter
-Sleep 1300ms
-Type "# your AI agent reads .env. now the model has your key."
+Sleep 2600ms
+Type "# your agent reads .env. now the model can see all of them."
 Enter
 Sleep 2600ms
 
@@ -35,24 +35,21 @@ Enter
 Sleep 500ms
 
 # --- the cloak way ---
-Type "# with cloak: the key goes into an encrypted vault"
+Type "# with cloak: pull your whole .env into an encrypted vault"
 Enter
 Sleep 1100ms
-Type "cloak add OPENAI_API_KEY"
+Type "cloak import .env"
 Enter
 Sleep 1200ms
 Type "demo-passphrase-not-secret"
 Enter
-Sleep 500ms
-Type "sk-proj-Hk9f...real"
-Enter
-Sleep 2200ms
+Sleep 2600ms
 
 Type "cloak list"
 Enter
-Sleep 3000ms
+Sleep 3200ms
 
-Type "# the agent uses the key through cloak, but never sees it."
+Type "# your agents use any of them through cloak, but never see the keys."
 Enter
 Sleep 900ms
 Type "# every call is logged. the model decrypts nothing."

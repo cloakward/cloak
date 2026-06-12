@@ -27,7 +27,7 @@ pub fn unlock_interactive(vault: &mut Vault) -> Result<()> {
     }
 
     for attempt in 1..=MAX_ATTEMPTS {
-        let pass = prompt_passphrase("passphrase: ")?;
+        let pass = prompt_passphrase("vault passphrase: ")?;
         match vault.unlock(&pass) {
             Ok(()) => return Ok(()),
             Err(Error::InvalidPassphrase) => {

@@ -18,6 +18,22 @@ import { runSelfTest } from "./self-test.ts";
 
 const VERSION = packageJson.version;
 
+// Top-level brief handed to the client on initialize. Clients surface this to
+// the model before it picks a tool, so it has to reset the default prior
+// ("read the secret, then use it myself") to Cloak's model ("never read it;
+// ask Cloak to make the authenticated call"). Without this, agents reach for a
+// nonexistent read tool or shell out to the CLI and give up.
+const SERVER_INSTRUCTIONS = [
+  "Cloak is a local secrets vault. The secret values it holds must never be revealed to you or written into the conversation, and by design there is NO tool and no way to read a secret's value.",
+  "",
+  "To USE a secret, do not try to fetch it. Let Cloak make the authenticated request for you, and it returns the response with the secret redacted:",
+  "- Calling an API that authenticates with an API key, token, bearer, or HTTP Basic credential (for example Stripe, OpenAI, GitHub, Slack): use proxy_authenticated_http_request. This is the normal path; reach for it first.",
+  "- Only when an API requires request signing (AWS SigV4 or HMAC-SHA256): use sign_request.",
+  "- list_secret_names and get_secret_metadata show which secrets exist (names and metadata only). query_audit reads the audit log.",
+  "",
+  "Do not try to obtain the raw key value. There is no MCP tool that returns a secret, and reading it out of band (shelling out to `cloak show` or `cloak run`, environment variables, or curl with the key inline) is not the supported path: `cloak show` and `cloak run` require interactive user presence and will not return a value to you here. If you find yourself wanting the key's value, use proxy_authenticated_http_request instead and let Cloak make the call.",
+].join("\n");
+
 function printVersion(): void {
   process.stdout.write(`cloak-mcp ${VERSION}\n`);
 }
@@ -46,7 +62,7 @@ async function main(): Promise<void> {
 
   const server = new Server(
     { name: "cloak-mcp", version: VERSION },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -68,7 +84,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  // Stderr only — stdout is reserved for MCP framing.
+  // Stderr only; stdout is reserved for MCP framing.
   const msg = err instanceof Error ? err.message : String(err);
   process.stderr.write(`cloak-mcp fatal: ${msg}\n`);
   process.exit(1);

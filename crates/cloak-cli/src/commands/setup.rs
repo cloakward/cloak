@@ -114,7 +114,7 @@ pub fn run(ctx: &Context, opts: SetupOptions) -> Result<u8> {
     println!("Setup complete.");
     println!();
     println!("What's next:");
-    println!("  cloak add OPENAI_API_KEY    add a secret (input is hidden as you type)");
+    println!("  cloak add <NAME>            add a secret, e.g. STRIPE_SECRET_KEY (input hidden)");
     println!("  cloak daemon start          start cloakd for MCP clients");
     println!("  cloak unlock                unlock cloakd after each daemon start");
     println!("  cloak list                  see what's in the vault");

@@ -253,11 +253,11 @@ pub fn unregister(client: Client) -> Result<RegisterOutcome> {
         Client::ClaudeCode => {
             // `claude mcp remove cloak` — best-effort.
             let status = std::process::Command::new("claude")
-                .args(["mcp", "remove", SERVER_NAME])
+                .args(["mcp", "remove", "-s", "user", SERVER_NAME])
                 .status();
             match status {
                 Ok(s) if s.success() => Ok(RegisterOutcome::RegisteredCommand(
-                    "claude mcp remove cloak".into(),
+                    "claude mcp remove -s user cloak".into(),
                 )),
                 _ => Ok(RegisterOutcome::Skipped("claude CLI not available")),
             }
@@ -273,10 +273,14 @@ fn register_claude_code() -> Result<RegisterOutcome> {
     if !which_bin("claude") {
         return Ok(RegisterOutcome::Skipped("claude CLI not on PATH"));
     }
+    // Register at `user` scope so the Cloak tool is available in every
+    // project, not just whatever directory `cloak setup` happened to run in.
     let status = std::process::Command::new("claude")
         .args([
             "mcp",
             "add",
+            "-s",
+            "user",
             SERVER_NAME,
             "--",
             mcp_bin.to_str().unwrap_or("cloak-mcp"),
@@ -287,7 +291,7 @@ fn register_claude_code() -> Result<RegisterOutcome> {
         anyhow::bail!("`claude mcp add cloak` failed (exit {})", status);
     }
     Ok(RegisterOutcome::RegisteredCommand(format!(
-        "claude mcp add {SERVER_NAME} -- {}",
+        "claude mcp add -s user {SERVER_NAME} -- {}",
         mcp_bin.display()
     )))
 }

@@ -51,7 +51,7 @@ const inputSchema = {
 export const queryAudit: CloakTool = {
   name: "query_audit",
   description:
-    "Query the local Cloak audit log of privileged operations. Filterable by time range, tool name, secret name, and result. Returns audit entries — never secret values.",
+    "Query the local Cloak audit log of privileged operations. Filterable by time range, tool name, secret name, and result. Returns audit entries, never secret values.",
   inputSchema,
   outputSchema: auditQueryOutputJsonSchema,
   async handler(rawArgs: unknown): Promise<ToolResult> {

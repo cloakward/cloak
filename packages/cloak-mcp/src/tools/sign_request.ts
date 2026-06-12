@@ -84,7 +84,7 @@ const inputSchema = {
 export const signRequest: CloakTool = {
   name: "sign_request",
   description:
-    "Compute authentication headers for an outbound HTTP request using a stored secret as the signing key. Supports AWS SigV4 and generic HMAC-SHA256. Returns only the computed headers — the underlying secret is never disclosed. Use this when an API requires request signing rather than a bearer token.",
+    "Compute authentication headers for an outbound HTTP request by signing it with a stored secret. Supports only AWS SigV4 and generic HMAC-SHA256, and returns just the computed headers; the secret is never disclosed. Use this only for APIs that require request signing, such as AWS services. For normal API-key or bearer-token auth (Stripe, OpenAI, GitHub, and the like), use proxy_authenticated_http_request instead.",
   inputSchema,
   outputSchema: signRequestOutputJsonSchema,
   async handler(rawArgs: unknown): Promise<ToolResult> {
