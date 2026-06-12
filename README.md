@@ -30,12 +30,19 @@ macOS (arm64/x64) and Linux (x64 glibc):
 ```sh
 brew install cloakward/cloak/cloak
 cloak setup                     # creates the vault, starts the daemon, connects your AI clients
-cloak add STRIPE_SECRET_KEY     # the key goes into the encrypted vault
+cloak import .env               # pull every key you already have into the encrypted vault
 ```
 
-Allow which host that key is allowed to reach by adding this to your `policy.toml`:
+That works for any secret: an LLM key, a payments key, a cloud credential, a git token. Add them one at a time instead with `cloak add OPENAI_API_KEY`.
+
+Allowlist where each key is allowed to go in your `policy.toml`, one block per secret:
 
 ```toml
+[[secrets]]
+name = "OPENAI_API_KEY"
+[secrets.tools.proxy_authenticated_http_request]
+allowed_hosts = ["api.openai.com"]
+
 [[secrets]]
 name = "STRIPE_SECRET_KEY"
 [secrets.tools.proxy_authenticated_http_request]
@@ -48,9 +55,9 @@ Pick up the policy and unlock the daemon so your agent can use the vault:
 cloak daemon restart && cloak unlock
 ```
 
-Now ask your agent, in plain English:
+Your agent can now use any of them, in plain English. One worked example:
 
-> **You:** test my checkout, create a $20 charge and confirm it works.
+> **You:** test my checkout: create a $50 Stripe PaymentIntent with pm_card_visa and confirm it succeeded.
 
 The agent calls `proxy_authenticated_http_request`. Cloak attaches `STRIPE_SECRET_KEY`, sends the request to Stripe, and returns only the result. This is a real one, captured in test mode:
 
@@ -59,16 +66,15 @@ proxy_authenticated_http_request  →  POST https://api.stripe.com/v1/payment_in
 
 Status 200
 {
-  "id": "pi_3Th13uKCZ65x2cgg1VtFHsoK",
-  "amount": 2000,
-  "amount_received": 2000,
+  "id": "pi_3ThFkTKCZ65x2cgg0rzmsrj3",
+  "amount": 5000,
+  "amount_received": 5000,
   "currency": "usd",
-  "latest_charge": "ch_3Th13uKCZ65x2cgg11mVQRCN",
   "livemode": false
 }
 ```
 
-A real $20 charge went through. The `STRIPE_SECRET_KEY` that authorized it, which can refund every charge and drain the account, appears nowhere in what the model received.
+A real $50 charge went through. The `STRIPE_SECRET_KEY` that authorized it, which can refund every charge and drain the account, appears nowhere in what the model received.
 
 `cloak setup` connects Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue.dev, and Codex that it finds installed. The [quickstart](docs/QUICKSTART.md) covers Linux, Docker, and the Claude Desktop extension.
 

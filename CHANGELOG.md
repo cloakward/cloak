@@ -4,6 +4,33 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-06-11
+
+### Fixed
+- The `proxy_authenticated_http_request` MCP tool was being dropped from the
+  model's toolset because its advertised input schema used JSON Schema
+  conditional keywords (`if`/`then`/`allOf`) that the model tool-schema
+  validator rejects. Agents saw only the other tools, could not make an
+  authenticated API call, and concluded a stored key could not be used at all.
+  The conditional rule (a custom header name is required only for `header`
+  auth) is still enforced at runtime by the request validator, and a
+  regression test now guards against reintroducing an unsupported keyword.
+
+### Changed
+- `cloak-mcp` now ships a top-level instructions brief and clearer tool
+  descriptions, so agents reach for `proxy_authenticated_http_request` to use
+  a secret (the daemon makes the authenticated request and returns the result
+  with the secret redacted) instead of trying to read the raw key or shell out
+  to the CLI. `sign_request` is described as AWS SigV4 / HMAC signing only.
+- `cloak setup` registers the Claude Code MCP server at user scope, so the
+  Cloak tools are available in every project, not only the directory where
+  setup ran.
+- The setup wizard's add hint is generic instead of OpenAI-specific, and the
+  unlock prompt is labeled `vault passphrase` so it is not mistaken for an API
+  key or an account password.
+- README: launch rewrite with a sharper tagline, a real Stripe integration
+  example captured through the proxy, and a demo GIF.
+
 ## [1.0.7] - 2026-06-10
 
 ### Security

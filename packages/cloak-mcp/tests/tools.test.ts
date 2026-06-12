@@ -542,23 +542,78 @@ describe("tools", () => {
     const { tools } = await import("../src/tools/index.ts");
     const desc = (n: string) => tools.find((t) => t.name === n)?.description;
     expect(desc("list_secret_names")).toBe(
-      "List the names and metadata of secrets stored in the local Cloak vault. Returns names, kinds, and tags only — never the secret values themselves.",
+      "List the names and metadata of secrets stored in the local Cloak vault. Returns names, kinds, and tags only, never the secret values themselves.",
     );
     expect(desc("get_secret_metadata")).toBe(
       "Return metadata about a single named secret (kind, tags, created/updated timestamps, version). Never returns the secret value.",
     );
     expect(desc("sign_request")).toBe(
-      "Compute authentication headers for an outbound HTTP request using a stored secret as the signing key. Supports AWS SigV4 and generic HMAC-SHA256. Returns only the computed headers — the underlying secret is never disclosed. Use this when an API requires request signing rather than a bearer token.",
+      "Compute authentication headers for an outbound HTTP request by signing it with a stored secret. Supports only AWS SigV4 and generic HMAC-SHA256, and returns just the computed headers; the secret is never disclosed. Use this only for APIs that require request signing, such as AWS services. For normal API-key or bearer-token auth (Stripe, OpenAI, GitHub, and the like), use proxy_authenticated_http_request instead.",
     );
     expect(desc("proxy_authenticated_http_request")).toBe(
-      "Send an HTTPS request to a host on the user's allowlist, with the named secret attached by the daemon as bearer, basic, or custom-header authentication. Returns status, redacted headers, and base64-encoded body. Query-string auth is disabled because URLs are commonly logged.",
+      "Make an authenticated HTTPS API call using a stored secret as the credential. This is the primary way to call an external API that authenticates with an API key or token (for example Stripe, OpenAI, GitHub, or Slack): the daemon attaches the named secret as a Bearer token, HTTP Basic credential, or custom header, sends the request to a host on the user's allowlist, and returns the status, redacted headers, and base64-encoded body. The secret value is never disclosed to you. Query-string auth is disabled because URLs are commonly logged.",
     );
     expect(desc("mint_short_lived_token")).toBe(
       "Mint a short-lived derived token from a long-lived parent secret. AWS STS is implemented; GitHub App and GitLab PAT kinds are reserved and currently return not-supported. Returns the derived token and its expiry. The long-lived parent never leaves the daemon.",
     );
     expect(desc("query_audit")).toBe(
-      "Query the local Cloak audit log of privileged operations. Filterable by time range, tool name, secret name, and result. Returns audit entries — never secret values.",
+      "Query the local Cloak audit log of privileged operations. Filterable by time range, tool name, secret name, and result. Returns audit entries, never secret values.",
     );
     expect(tools.length).toBe(6);
+  });
+
+  test("tool input schemas use only keywords the model tool-schema validator accepts", async () => {
+    const { tools } = await import("../src/tools/index.ts");
+    // The Anthropic tool-input-schema validator silently DROPS any tool whose
+    // advertised schema uses an unsupported keyword (the proxy tool once used
+    // if/then/allOf and vanished from every agent's toolset). A blacklist only
+    // catches keywords we already know are fatal; this is a WHITELIST, so a
+    // future tool added with oneOf/$ref/dependencies/if-variants/etc. fails
+    // here loudly instead of disappearing in the real client. Any conditional
+    // or cross-field validation must live in the runtime zod schema instead.
+    //
+    // Empirically accepted (and therefore allowed): the simple structural
+    // keywords plus `not`, `propertyNames`, and `anyOf` (sign_request and the
+    // proxy advertise `anyOf` and were both used by live agents).
+    const ALLOWED = new Set([
+      "$schema", "type", "properties", "required", "additionalProperties",
+      "description", "enum", "items", "not", "anyOf", "propertyNames",
+      "pattern", "format", "minLength", "maxLength", "minItems", "maxItems",
+      "minimum", "maximum", "minProperties", "maxProperties",
+    ]);
+    // Keys whose values are NOT subschemas (so their contents are data, not
+    // keywords): do not recurse into them.
+    const LEAF = new Set([
+      "type", "required", "enum", "description", "format", "pattern",
+      "default", "examples", "title", "$schema", "$id", "$ref", "const",
+      "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems",
+      "minProperties", "maxProperties", "multipleOf",
+    ]);
+    const collect = (node: unknown, out: Set<string>): void => {
+      if (Array.isArray(node)) {
+        for (const x of node) collect(x, out);
+        return;
+      }
+      if (node === null || typeof node !== "object") return;
+      for (const [key, val] of Object.entries(node as Record<string, unknown>)) {
+        out.add(key);
+        if (key === "properties" || key === "patternProperties" || key === "$defs" || key === "definitions") {
+          if (val && typeof val === "object") {
+            for (const sub of Object.values(val as Record<string, unknown>)) collect(sub, out);
+          }
+        } else if (!LEAF.has(key)) {
+          collect(val, out);
+        }
+      }
+    };
+    for (const t of tools) {
+      const used = new Set<string>();
+      collect(t.inputSchema, used);
+      for (const kw of used) {
+        expect(`${t.name} schema keyword '${kw}' allowed: ${ALLOWED.has(kw)}`).toBe(
+          `${t.name} schema keyword '${kw}' allowed: true`,
+        );
+      }
+    }
   });
 });
