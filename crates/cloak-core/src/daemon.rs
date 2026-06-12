@@ -179,6 +179,18 @@ fn default_policy_path() -> PathBuf {
     crate::policy::default_policy_path()
 }
 
+/// Re-read, validate, and atomically swap the active policy from the policy
+/// file. On any parse or read error the current policy is kept (fail closed)
+/// and the error is returned. Returns the number of per-secret rules loaded.
+async fn reload_policy(ctx: &DaemonCtx) -> Result<usize> {
+    let path = default_policy_path();
+    let new_engine = PolicyEngine::from_path(&path)?;
+    let count = new_engine.secret_rule_count();
+    *ctx.policy_engine.lock().await = new_engine;
+    tracing::info!(rules = count, "policy reloaded");
+    Ok(count)
+}
+
 /// Default audit log path: `<data_dir>/cloak/audit.jsonl` (e.g.
 /// `~/Library/Application Support/cloak/audit.jsonl` on macOS).
 fn default_audit_path() -> Result<PathBuf> {
@@ -208,7 +220,12 @@ async fn handle_signals(ctx: Arc<DaemonCtx>) -> Result<()> {
                 return Ok(());
             }
             _ = sighup.recv() => {
-                tracing::info!("SIGHUP: policy reload requested (not yet implemented)");
+                if let Err(e) = reload_policy(&ctx).await {
+                    tracing::warn!(
+                        error = %e,
+                        "SIGHUP: policy reload failed; keeping current policy"
+                    );
+                }
             }
         }
     }
@@ -552,7 +569,10 @@ fn spawn_peer_exit_watcher(
 
 /// Methods callable only by the CLI peer (basename == `cloak`).
 fn is_cli_only_method(m: &str) -> bool {
-    matches!(m, "vault.show" | "vault.unlock" | "vault.lock") || is_test_only_vault_write_method(m)
+    matches!(
+        m,
+        "vault.show" | "vault.unlock" | "vault.lock" | "policy.reload"
+    ) || is_test_only_vault_write_method(m)
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -584,6 +604,7 @@ fn known_method(m: &str) -> bool {
             | "tool.proxy_http"
             | "tool.mint_token"
             | "tool.query_audit"
+            | "policy.reload"
     ) || is_test_only_vault_write_method(m)
 }
 
@@ -794,6 +815,12 @@ async fn dispatch_method(
                 "format_version": s.format_version,
                 "locked": s.locked,
             }))
+        }
+
+        // ---- policy: hot-reload from the policy file (CLI-only) ----
+        "policy.reload" => {
+            let count = reload_policy(ctx).await?;
+            Ok(json!({ "reloaded": true, "rule_count": count }))
         }
 
         // ---- vault: test-only management fixture methods ----

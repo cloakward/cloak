@@ -17,6 +17,10 @@ Commands:
   get            Get metadata for a secret (name / kind / tags / timestamps). Never returns
                  plaintext
   list           List secrets (metadata only). Empty vault prints "(no secrets)"
+  allow          Allow a secret to reach a host via the authenticated HTTP proxy. Persists the rule
+                 to the policy file and hot-reloads a running daemon
+  deny           Revoke a secret's permission to reach a host. Inverse of `allow`
+  policy         Print a readable summary of the active policy file
   rm             Remove secret(s). Bulk modes: `--tag T`, `--all`
   show           Reveal a secret's plaintext (user-presence gated, TTY-only)
   status         Print vault file status and daemon unlock state when available

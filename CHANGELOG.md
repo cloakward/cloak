@@ -4,6 +4,15 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+### Added
+- `cloak allow <SECRET> <HOST>` and `cloak deny <SECRET> <HOST>` manage a
+  secret's proxy allowlist from the command line instead of hand-editing the
+  policy file, and `cloak policy` prints the active policy in plain English.
+  The daemon hot-reloads the policy when it changes (a new `policy.reload` IPC
+  method, also wired to SIGHUP), so allowlist changes apply immediately with no
+  `cloak daemon restart` and no re-unlock. A reload validates the new policy and
+  keeps the previous one if the file is malformed (fail closed).
+
 ### Fixed
 - `cloak-mcp` answers the MCP `initialize` request immediately and performs the
   daemon handshake lazily on the first tool call, instead of blocking startup on

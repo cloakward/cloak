@@ -21,12 +21,15 @@ use clap::{Parser, Subcommand, ValueEnum};
 use cloak_core::vault::{SecretKind, Vault};
 
 mod add;
+mod allow;
 mod audit_log;
 mod backup;
 mod clients;
 mod completions;
 mod daemon;
+mod daemon_ipc;
 mod daemon_unlock;
+mod deny;
 mod doctor;
 mod dotenv;
 mod export;
@@ -35,6 +38,8 @@ mod import;
 mod init;
 mod list;
 mod panic;
+mod policy_edit;
+mod policy_show;
 mod recovery_display;
 mod restore;
 mod rm;
@@ -130,6 +135,26 @@ pub enum Command {
 
     /// List secrets (metadata only). Empty vault prints "(no secrets)".
     List,
+
+    /// Allow a secret to reach a host via the authenticated HTTP proxy.
+    /// Persists the rule to the policy file and hot-reloads a running daemon.
+    Allow {
+        /// Secret name (e.g. `STRIPE_SECRET_KEY`).
+        secret: String,
+        /// Host to allow (e.g. `api.stripe.com`).
+        host: String,
+    },
+
+    /// Revoke a secret's permission to reach a host. Inverse of `allow`.
+    Deny {
+        /// Secret name (e.g. `STRIPE_SECRET_KEY`).
+        secret: String,
+        /// Host to remove from the secret's allowlist.
+        host: String,
+    },
+
+    /// Print a readable summary of the active policy file.
+    Policy,
 
     /// Remove secret(s). Bulk modes: `--tag T`, `--all`.
     Rm {
@@ -466,6 +491,13 @@ pub fn run() -> Result<ExitCode> {
         Command::Set { name } => set::run(&ctx, &name).map(|_| ExitCode::SUCCESS),
         Command::Get { name } => get::run(&ctx, &name).map(|_| ExitCode::SUCCESS),
         Command::List => list::run(&ctx).map(|_| ExitCode::SUCCESS),
+        Command::Allow { secret, host } => {
+            allow::run(&ctx, &secret, &host).map(|_| ExitCode::SUCCESS)
+        }
+        Command::Deny { secret, host } => {
+            deny::run(&ctx, &secret, &host).map(|_| ExitCode::SUCCESS)
+        }
+        Command::Policy => policy_show::run(&ctx).map(|_| ExitCode::SUCCESS),
         Command::Rm {
             name,
             yes,

@@ -216,6 +216,11 @@ impl PolicyEngine {
         }
     }
 
+    /// Number of per-secret rules in the active policy (used for reload feedback).
+    pub fn secret_rule_count(&self) -> usize {
+        self.policy.secrets.len()
+    }
+
     /// Evaluate a request against the policy.
     pub fn evaluate(&mut self, ctx: &EvalContext<'_>) -> Decision {
         // 1. Find the most-specific matching [[secrets]] rule.
