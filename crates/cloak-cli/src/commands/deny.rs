@@ -42,9 +42,7 @@ pub fn run(_ctx: &Context, secret: &str, host: &str) -> Result<()> {
             match call_daemon("policy.reload", json!({})) {
                 Ok(_) => println!("denied {secret} -> {host} (live)"),
                 Err(e) if is_daemon_down(&e) => {
-                    println!(
-                        "denied {secret} -> {host} (saved; applies when cloakd next starts)"
-                    );
+                    println!("denied {secret} -> {host} (saved; applies when cloakd next starts)");
                 }
                 Err(e) => {
                     println!("denied {secret} -> {host} (saved)");

@@ -98,7 +98,10 @@ pub(crate) fn call_daemon(method: &str, params: Value) -> Result<Value> {
     {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::metadata(&sock).map_err(|e| {
-            SystemError::boxed(format!("could not stat cloakd socket {}: {e}", sock.display()))
+            SystemError::boxed(format!(
+                "could not stat cloakd socket {}: {e}",
+                sock.display()
+            ))
         })?;
         let mode = meta.mode() & 0o777;
         if mode & 0o077 != 0 {

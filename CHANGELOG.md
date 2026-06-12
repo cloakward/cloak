@@ -4,6 +4,8 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-12
+
 ### Added
 - `cloak allow <SECRET> <HOST>` and `cloak deny <SECRET> <HOST>` manage a
   secret's proxy allowlist from the command line instead of hand-editing the

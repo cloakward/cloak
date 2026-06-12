@@ -55,9 +55,7 @@ fn reload_and_report(secret: &str, host: &str, outcome: AllowOutcome) {
     match call_daemon("policy.reload", json!({})) {
         Ok(_) => println!("allowed {secret} -> {host} (live)"),
         Err(e) if is_daemon_down(&e) => {
-            println!(
-                "allowed {secret} -> {host} (saved; applies when cloakd next starts)"
-            );
+            println!("allowed {secret} -> {host} (saved; applies when cloakd next starts)");
         }
         Err(e) => {
             println!("allowed {secret} -> {host} (saved)");

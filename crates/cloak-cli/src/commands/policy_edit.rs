@@ -92,10 +92,16 @@ fn find_secret_table_mut<'a>(doc: &'a mut DocumentMut, secret: &str) -> Option<&
 /// returns a mutable reference to the matching table.
 fn secret_table_mut<'a>(doc: &'a mut DocumentMut, secret: &str) -> &'a mut Table {
     // Ensure the array-of-tables exists.
-    if doc.get("secrets").and_then(Item::as_array_of_tables).is_none() {
+    if doc
+        .get("secrets")
+        .and_then(Item::as_array_of_tables)
+        .is_none()
+    {
         doc["secrets"] = Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
     }
-    let arr = doc["secrets"].as_array_of_tables_mut().expect("secrets aot");
+    let arr = doc["secrets"]
+        .as_array_of_tables_mut()
+        .expect("secrets aot");
 
     let existing_idx = arr
         .iter()
@@ -132,7 +138,11 @@ fn allowed_hosts_array_mut(table: &mut Table) -> &mut Array {
     let proxy = tools[PROXY_TOOL].as_table_mut().expect("proxy tool table");
 
     // allowed_hosts
-    if proxy.get("allowed_hosts").and_then(Item::as_array).is_none() {
+    if proxy
+        .get("allowed_hosts")
+        .and_then(Item::as_array)
+        .is_none()
+    {
         proxy.insert("allowed_hosts", toml_edit::value(Array::new()));
     }
     proxy["allowed_hosts"]

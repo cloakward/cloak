@@ -1,4 +1,4 @@
-# Cloak Threat Model (v1.0.8)
+# Cloak Threat Model (v1.1.0)
 
 > This document describes what Cloak defends against, what it does not,
 > and the trust assumptions underpinning each defense. It enumerates the
@@ -150,7 +150,7 @@ that can read or use the recovery wrap. The same-UID `A2` attacker who
 can talk to the daemon socket does not gain a new privilege from this
 feature.
 
-## Residual risks accepted for v1.0.8
+## Residual risks accepted for v1.1.0
 
 - No certificate pinning on outbound HTTP.
 - No swap-disable / mlock on `cloakd`.

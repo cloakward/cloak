@@ -13,7 +13,10 @@ use super::Context;
 pub fn run(_ctx: &Context) -> Result<()> {
     let path = default_policy_path();
     if !path.exists() {
-        println!("no policy yet (run `cloak setup` to create one at {})", path.display());
+        println!(
+            "no policy yet (run `cloak setup` to create one at {})",
+            path.display()
+        );
         return Ok(());
     }
 

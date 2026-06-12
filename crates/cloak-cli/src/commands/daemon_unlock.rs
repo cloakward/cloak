@@ -36,7 +36,10 @@ pub fn run(_ctx: &Context) -> Result<()> {
     // socket-safety + peer-credential checks, handshakes, and forwards the
     // unlock. The security posture is identical to the inline version this
     // replaced.
-    call_daemon("vault.unlock", json!({ "passphrase": pass.expose_secret() }))?;
+    call_daemon(
+        "vault.unlock",
+        json!({ "passphrase": pass.expose_secret() }),
+    )?;
     println!("daemon vault unlocked");
     Ok(())
 }
