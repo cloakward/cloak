@@ -30,12 +30,19 @@ macOS (arm64/x64) and Linux (x64 glibc):
 ```sh
 brew install cloakward/cloak/cloak
 cloak setup                     # creates the vault, starts the daemon, connects your AI clients
-cloak add STRIPE_SECRET_KEY     # the key goes into the encrypted vault
+cloak import .env               # pull every key you already have into the encrypted vault
 ```
 
-Allow which host that key is allowed to reach by adding this to your `policy.toml`:
+That works for any secret: an LLM key, a payments key, a cloud credential, a git token. Add them one at a time instead with `cloak add OPENAI_API_KEY`.
+
+Allowlist where each key is allowed to go in your `policy.toml`, one block per secret:
 
 ```toml
+[[secrets]]
+name = "OPENAI_API_KEY"
+[secrets.tools.proxy_authenticated_http_request]
+allowed_hosts = ["api.openai.com"]
+
 [[secrets]]
 name = "STRIPE_SECRET_KEY"
 [secrets.tools.proxy_authenticated_http_request]
@@ -48,7 +55,7 @@ Pick up the policy and unlock the daemon so your agent can use the vault:
 cloak daemon restart && cloak unlock
 ```
 
-Now ask your agent, in plain English:
+Your agent can now use any of them, in plain English. One worked example:
 
 > **You:** test my checkout: create a $50 Stripe PaymentIntent with pm_card_visa and confirm it succeeded.
 
