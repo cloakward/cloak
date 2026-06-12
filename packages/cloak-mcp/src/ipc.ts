@@ -52,6 +52,12 @@ let connecting: Promise<Socket> | null = null;
 let sessionToken: string | null = null;
 const pending = new Map<string, PendingRequest>();
 let recvBuffer = Buffer.alloc(0);
+// Lazy daemon handshake: established on the first non-handshake request, not at
+// startup, so the MCP server answers `initialize` immediately. Handshaking at
+// startup ran a synchronous daemon status check that blocked the event loop and
+// tripped strict clients (Codex times out MCP startup after 30s).
+let sessionEnsured: Promise<void> | null = null;
+let sessionInitializer: (() => Promise<void>) | null = null;
 
 function socketOverridesAllowed(): boolean {
   return (
@@ -230,7 +236,30 @@ function encodeFrame(obj: object): Buffer {
   return Buffer.concat([header, json]);
 }
 
+// Register what establishes the daemon session (plain handshake, or the
+// DXT-aware handshake). Called lazily on the first tool request.
+export function setSessionInitializer(fn: () => Promise<void>): void {
+  sessionInitializer = fn;
+}
+
+async function ensureSession(): Promise<void> {
+  if (sessionToken) return;
+  if (!sessionEnsured) {
+    const init = sessionInitializer ?? handshake;
+    sessionEnsured = init().catch((err) => {
+      sessionEnsured = null;
+      throw err;
+    });
+  }
+  await sessionEnsured;
+}
+
 export async function request(method: string, params: object): Promise<unknown> {
+  // Establish the session on the first real request, never for the handshake
+  // call itself (which would recurse).
+  if (method !== "mcp.handshake") {
+    await ensureSession();
+  }
   const s = await connectIpc();
   const id = randomUUID();
   const body: RequestBody = { id, method, params };
@@ -274,6 +303,8 @@ export function _resetForTests(): void {
   socket = null;
   connecting = null;
   sessionToken = null;
+  sessionEnsured = null;
+  sessionInitializer = null;
   recvBuffer = Buffer.alloc(0);
 }
 

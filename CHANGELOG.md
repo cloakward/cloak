@@ -4,6 +4,14 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- `cloak-mcp` answers the MCP `initialize` request immediately and performs the
+  daemon handshake lazily on the first tool call, instead of blocking startup on
+  a synchronous daemon status check. Strict MCP clients that time out server
+  startup after 30 seconds (for example Codex) could not connect and now do.
+  `tools/list` needs no daemon and stays instant; a tool call with the daemon
+  down returns a clean error instead of failing startup.
+
 ## [1.0.8] - 2026-06-11
 
 ### Fixed

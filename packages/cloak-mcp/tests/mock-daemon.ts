@@ -60,7 +60,14 @@ export async function startMockDaemon(opts: MockOptions): Promise<MockServer> {
         } catch {
           continue;
         }
-        const handler = opts.handlers[req.method];
+        // Default mcp.handshake handler so tests survive the lazy session
+        // handshake that the IPC client now performs before the first request.
+        // Tests can still override it explicitly.
+        const handler =
+          opts.handlers[req.method] ??
+          (req.method === "mcp.handshake"
+            ? () => ({ session_token: "mock-session-token" })
+            : undefined);
         let respBody: object;
         if (!handler) {
           respBody = {

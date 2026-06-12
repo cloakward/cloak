@@ -31,6 +31,43 @@ describe("ipc", () => {
     await expect(ipc.request("vault.list", {})).rejects.toThrow(/too large/i);
   });
 
+  test("the daemon session is established lazily, once, on the first request", async () => {
+    // Guards the fix that lets the MCP server answer `initialize` without
+    // touching the daemon: no handshake until a request actually needs it,
+    // exactly one handshake, and no re-handshake on later calls. Re-adding an
+    // eager startup handshake would not change this, but breaking the lazy
+    // flow (or handshaking per call) would.
+    let handshakes = 0;
+    let lists = 0;
+    mock = await startMockDaemon({
+      handlers: {
+        "mcp.handshake": () => {
+          handshakes++;
+          return { session_token: "tok" };
+        },
+        "vault.list": () => {
+          lists++;
+          return { secrets: [] };
+        },
+      },
+    });
+    process.env["CLOAK_UNSAFE_TEST_MODE"] = "1";
+    process.env["CLOAK_SOCK"] = mock.path;
+    const ipc = await import("../src/ipc.ts");
+    ipc._resetForTests();
+    // No daemon contact until a request actually needs it.
+    expect(ipc._getSessionToken()).toBeNull();
+    expect(handshakes).toBe(0);
+    await ipc.request("vault.list", {});
+    expect(handshakes).toBe(1);
+    expect(lists).toBe(1);
+    expect(ipc._getSessionToken()).toBe("tok");
+    // A second call reuses the session, no re-handshake.
+    await ipc.request("vault.list", {});
+    expect(handshakes).toBe(1);
+    expect(lists).toBe(2);
+  });
+
   test("malformed JSON response yields a friendly error", async () => {
     mock = await startMockDaemon({
       handlers: {
