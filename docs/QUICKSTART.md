@@ -60,30 +60,20 @@ cloak status
 
 ## 5. Allow The API Host
 
-The API proxy is default-deny. Before an agent can call an API with a stored key, add an allow rule for that secret and host.
-
-Find the policy path:
+The API proxy is default-deny: every secret starts blocked. Allow a secret to reach a host with one command. It applies live, with no daemon restart and no re-unlock:
 
 ```sh
-cloak doctor
+cloak allow OPENAI_API_KEY api.openai.com
 ```
 
-Add a rule like this:
-
-```toml
-[[secrets]]
-name = "OPENAI_API_KEY"
-
-[secrets.tools.proxy_authenticated_http_request]
-allowed_hosts = ["api.openai.com"]
-```
-
-Then reload the daemon and unlock it again:
+Check what each secret can reach, or revoke a host:
 
 ```sh
-cloak daemon restart
-cloak unlock
+cloak policy
+cloak deny OPENAI_API_KEY api.openai.com
 ```
+
+Prefer to edit the file? `cloak doctor` prints the policy path; each secret is one `[[secrets]]` block with an `allowed_hosts` list. Changes via `cloak allow`/`deny` apply live; after a manual edit, run `cloak daemon restart` to pick it up.
 
 ## 6. Use It From Claude Desktop
 

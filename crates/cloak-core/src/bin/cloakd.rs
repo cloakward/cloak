@@ -1,4 +1,4 @@
-//! `cloakd` — the privileged daemon binary.
+//! `cloakd` - the privileged daemon binary.
 //!
 //! Runs the IPC listener, owns the vault, performs all egress.
 //! See `cloak_core::daemon` for the implementation.

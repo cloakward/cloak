@@ -10,7 +10,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-command -v vhs >/dev/null 2>&1 || { echo "vhs not found — install with: brew install vhs"; exit 1; }
+command -v vhs >/dev/null 2>&1 || { echo "vhs not found - install with: brew install vhs"; exit 1; }
 
 echo "==> building release cloak"
 cargo build --release --bin cloak >/dev/null

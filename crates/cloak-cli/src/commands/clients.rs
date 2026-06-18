@@ -26,7 +26,7 @@ use super::Context;
 pub enum Client {
     /// Claude Desktop (Anthropic), reads `claude_desktop_config.json`.
     ClaudeDesktop,
-    /// Claude Code CLI — registered via `claude mcp add cloak ...`.
+    /// Claude Code CLI - registered via `claude mcp add cloak ...`.
     ClaudeCode,
     /// Cursor editor.
     Cursor,
@@ -87,7 +87,7 @@ impl Client {
     }
 
     /// Path to the JSON config file we manage for this client, if any.
-    /// Claude Code is special: it has no JSON file we write — we shell
+    /// Claude Code is special: it has no JSON file we write - we shell
     /// out to `claude mcp add` instead.
     pub fn config_path(&self) -> Option<PathBuf> {
         let home = dirs::home_dir()?;
@@ -229,7 +229,7 @@ pub enum RegisterOutcome {
     Registered(PathBuf),
     /// We registered via an out-of-process tool (e.g. `claude mcp add`).
     RegisteredCommand(String),
-    /// The client's config was already pointing at cloak — nothing to do.
+    /// The client's config was already pointing at cloak - nothing to do.
     AlreadyPresent(PathBuf),
     /// The client isn't installed; we left it alone.
     Skipped(&'static str),
@@ -251,7 +251,7 @@ pub fn register(client: Client) -> Result<RegisterOutcome> {
 pub fn unregister(client: Client) -> Result<RegisterOutcome> {
     match client {
         Client::ClaudeCode => {
-            // `claude mcp remove cloak` — best-effort.
+            // `claude mcp remove cloak` - best-effort.
             let status = std::process::Command::new("claude")
                 .args(["mcp", "remove", "-s", "user", SERVER_NAME])
                 .status();
@@ -387,7 +387,7 @@ fn mcp_servers_key(client: Client) -> &'static str {
 }
 
 // -------------------------------------------------------------------------
-// Codex CLI — TOML at ~/.codex/config.toml
+// Codex CLI - TOML at ~/.codex/config.toml
 // -------------------------------------------------------------------------
 //
 // OpenAI Codex CLI reads `~/.codex/config.toml` with stanzas of the
@@ -498,11 +498,11 @@ fn unregister_codex_toml_at(path: &Path) -> Result<RegisterOutcome> {
 }
 
 // -------------------------------------------------------------------------
-// Continue.dev — per-server YAML at ~/.continue/mcpServers/<name>.yaml
+// Continue.dev - per-server YAML at ~/.continue/mcpServers/<name>.yaml
 // -------------------------------------------------------------------------
 //
 // Continue stores each MCP server as its own YAML file. We only touch
-// the `cloak.yaml` file — never any sibling files.
+// the `cloak.yaml` file - never any sibling files.
 
 fn register_continue_yaml(client: Client) -> Result<RegisterOutcome> {
     let path = client
@@ -659,7 +659,7 @@ fn strip_jsonc_comments(input: &str) -> String {
 }
 
 // -------------------------------------------------------------------------
-// CLI entrypoints — `cloak claude register` / `unregister`
+// CLI entrypoints - `cloak claude register` / `unregister`
 // -------------------------------------------------------------------------
 
 /// Selector for `cloak claude register --foo`.

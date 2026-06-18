@@ -6,10 +6,10 @@
 //!
 //! # Exit codes
 //!
-//! - `0` — success.
-//! - `1` — user-facing error (wrong passphrase, secret not found,
+//! - `0` - success.
+//! - `1` - user-facing error (wrong passphrase, secret not found,
 //!   biometric failed, refusing to write to non-TTY, invalid input).
-//! - `2` — system / config error (vault not initialized when expected,
+//! - `2` - system / config error (vault not initialized when expected,
 //!   IO failure, malformed flag).
 
 use std::ffi::OsString;
@@ -21,12 +21,15 @@ use clap::{Parser, Subcommand, ValueEnum};
 use cloak_core::vault::{SecretKind, Vault};
 
 mod add;
+mod allow;
 mod audit_log;
 mod backup;
 mod clients;
 mod completions;
 mod daemon;
+mod daemon_ipc;
 mod daemon_unlock;
+mod deny;
 mod doctor;
 mod dotenv;
 mod export;
@@ -35,6 +38,8 @@ mod import;
 mod init;
 mod list;
 mod panic;
+mod policy_edit;
+mod policy_show;
 mod recovery_display;
 mod restore;
 mod rm;
@@ -50,12 +55,12 @@ mod unlock;
 // CLI types
 // -------------------------------------------------------------------------
 
-/// `cloak` — local secrets vault for Claude Desktop and friends.
+/// `cloak` - local secrets vault for Claude Desktop and friends.
 #[derive(Debug, Parser)]
 #[command(
     name = "cloak",
     version,
-    about = "Cloak — MCP-native secrets vault.",
+    about = "Cloak - MCP-native secrets vault.",
     long_about = "Cloak is a local secrets vault. Secrets are AEAD-encrypted at rest under \
                   a key derived from your passphrase via Argon2id. Reveal is gated behind \
                   local user-presence checks."
@@ -130,6 +135,26 @@ pub enum Command {
 
     /// List secrets (metadata only). Empty vault prints "(no secrets)".
     List,
+
+    /// Allow a secret to reach a host via the authenticated HTTP proxy.
+    /// Persists the rule to the policy file and hot-reloads a running daemon.
+    Allow {
+        /// Secret name (e.g. `STRIPE_SECRET_KEY`).
+        secret: String,
+        /// Host to allow (e.g. `api.stripe.com`).
+        host: String,
+    },
+
+    /// Revoke a secret's permission to reach a host. Inverse of `allow`.
+    Deny {
+        /// Secret name (e.g. `STRIPE_SECRET_KEY`).
+        secret: String,
+        /// Host to remove from the secret's allowlist.
+        host: String,
+    },
+
+    /// Print a readable summary of the active policy file.
+    Policy,
 
     /// Remove secret(s). Bulk modes: `--tag T`, `--all`.
     Rm {
@@ -276,7 +301,7 @@ pub enum RollbackCmd {
 #[derive(Debug, Subcommand)]
 pub enum BackupCmd {
     /// Surface the recovery seed disposition for this vault. The
-    /// 24-word phrase is NOT re-displayed — Cloak does not keep a
+    /// 24-word phrase is NOT re-displayed - Cloak does not keep a
     /// copy. This command confirms the wrap exists and is reachable.
     Mnemonic,
     /// Round-trip a candidate 24-word seed against the vault's stored
@@ -420,7 +445,7 @@ pub fn run() -> Result<ExitCode> {
     // recurse.
     if requires_vault(&cli.command) && !vault_exists(&ctx) {
         eprintln!(
-            "(no vault found at {} — running setup wizard first)",
+            "(no vault found at {} - running setup wizard first)",
             ctx.vault_path.display()
         );
         let setup_exit = setup::run(
@@ -466,6 +491,13 @@ pub fn run() -> Result<ExitCode> {
         Command::Set { name } => set::run(&ctx, &name).map(|_| ExitCode::SUCCESS),
         Command::Get { name } => get::run(&ctx, &name).map(|_| ExitCode::SUCCESS),
         Command::List => list::run(&ctx).map(|_| ExitCode::SUCCESS),
+        Command::Allow { secret, host } => {
+            allow::run(&ctx, &secret, &host).map(|_| ExitCode::SUCCESS)
+        }
+        Command::Deny { secret, host } => {
+            deny::run(&ctx, &secret, &host).map(|_| ExitCode::SUCCESS)
+        }
+        Command::Policy => policy_show::run(&ctx).map(|_| ExitCode::SUCCESS),
         Command::Rm {
             name,
             yes,

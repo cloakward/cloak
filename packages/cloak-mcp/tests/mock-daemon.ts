@@ -60,7 +60,14 @@ export async function startMockDaemon(opts: MockOptions): Promise<MockServer> {
         } catch {
           continue;
         }
-        const handler = opts.handlers[req.method];
+        // Default mcp.handshake handler so tests survive the lazy session
+        // handshake that the IPC client now performs before the first request.
+        // Tests can still override it explicitly.
+        const handler =
+          opts.handlers[req.method] ??
+          (req.method === "mcp.handshake"
+            ? () => ({ session_token: "mock-session-token" })
+            : undefined);
         let respBody: object;
         if (!handler) {
           respBody = {
@@ -98,7 +105,7 @@ export async function startMockDaemon(opts: MockOptions): Promise<MockServer> {
         const json = Buffer.from(JSON.stringify(respBody), "utf8");
         if (opts.oversize) {
           opts.oversize = false;
-          // Lie about length — claim 5 MiB so client rejects.
+          // Lie about length - claim 5 MiB so client rejects.
           const header = Buffer.alloc(4);
           header.writeUInt32LE(5 * 1024 * 1024, 0);
           sock.write(Buffer.concat([header, json]));

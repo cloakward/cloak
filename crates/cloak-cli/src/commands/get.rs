@@ -1,11 +1,11 @@
-//! `cloak get NAME` — print metadata for a secret. Never plaintext.
+//! `cloak get NAME` - print metadata for a secret. Never plaintext.
 
 use anyhow::Result;
 use cloak_core::Error;
 
 use super::{open_vault, Context};
 
-/// Print metadata for a single secret. Does not unlock the vault — only
+/// Print metadata for a single secret. Does not unlock the vault - only
 /// the public `secrets` table columns (name, kind, tags, timestamps,
 /// version) are read.
 pub fn run(ctx: &Context, name: &str) -> Result<()> {

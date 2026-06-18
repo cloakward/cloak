@@ -12,7 +12,7 @@
 //!
 //! These tests touch the real macOS keychain (for the vault pepper) when
 //! the daemon initializes the vault. If the keychain is unavailable, we
-//! skip the test — same convention as `ipc_e2e.rs`.
+//! skip the test - same convention as `ipc_e2e.rs`.
 
 #![cfg(unix)]
 
@@ -95,7 +95,7 @@ async fn spawn_daemon(
     let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("handlers_e2e: skipping — cannot bind UDS: {e}");
+            eprintln!("handlers_e2e: skipping - cannot bind UDS: {e}");
             return None;
         }
     };
@@ -290,7 +290,7 @@ async fn sign_request_hmac_sha256_happy_path() {
         Some("policy-denied")
     );
 
-    // The signature must NOT contain the secret material — assert sig is
+    // The signature must NOT contain the secret material - assert sig is
     // the right length and only hex.
     assert_eq!(sig.len(), 64);
     assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
@@ -308,7 +308,7 @@ async fn sign_request_hmac_sha256_happy_path() {
     )
     .await;
     // query_audit isn't allowed in our minimal policy by default. Add an
-    // override and re-query — but our policy here is deny by default with
+    // override and re-query - but our policy here is deny by default with
     // a sign_request rule, so query_audit will be denied. Verify.
     assert_eq!(
         resp.error.as_ref().map(|e| e.code.as_str()),
@@ -316,7 +316,7 @@ async fn sign_request_hmac_sha256_happy_path() {
         "query_audit should be policy-denied without a tools.query_audit rule"
     );
 
-    // audit_log.verify() — the chain length should be > 0. Open the file
+    // audit_log.verify() - the chain length should be > 0. Open the file
     // out-of-band (separate AuditLog handle).
     let audit = AuditLog::open(&audit_path).unwrap();
     let count = audit.verify().expect("audit verifies");
@@ -991,7 +991,7 @@ async fn proxy_http_rejects_invalid_inputs_before_vault_read() {
 }
 
 /// Run a 1-shot HTTP server on a random local port. Returns
-/// (port, JoinHandle<Vec<u8>>) — the join handle yields the raw request
+/// (port, JoinHandle<Vec<u8>>) - the join handle yields the raw request
 /// bytes the server received, so the test can assert what the daemon
 /// sent.
 async fn one_shot_http_server() -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
@@ -1093,7 +1093,7 @@ async fn proxy_http_allowed_host_round_trip() {
     assert!(!serialized.contains("secret-bearer-tok"));
 
     // The captured request bytes should contain "Authorization: Bearer
-    // secret-bearer-tok" — proves the daemon attached it on the wire,
+    // secret-bearer-tok" - proves the daemon attached it on the wire,
     // even though it never came back to the caller.
     let request_bytes = tokio::time::timeout(Duration::from_secs(2), server_handle)
         .await
@@ -1466,7 +1466,7 @@ async fn no_leak_invariant_for_aws_handlers() {
         return;
     };
 
-    // 1. sign_request with aws-sigv4 — the SECRET portion of the secret
+    // 1. sign_request with aws-sigv4 - the SECRET portion of the secret
     // value must not appear in the response.
     let resp = rpc(
         &mut stream,
@@ -1493,9 +1493,9 @@ async fn no_leak_invariant_for_aws_handlers() {
     );
     // The AKID is exposed as the Credential= component of Authorization
     // (this is normal SigV4 wire behavior). We do NOT assert it's
-    // absent — that's the expected SigV4 design.
+    // absent - that's the expected SigV4 design.
 
-    // 2. mint_token aws-sts — neither AKID nor SECRET portion of the
+    // 2. mint_token aws-sts - neither AKID nor SECRET portion of the
     // parent credential may appear in the response or audit.
     let resp = rpc(
         &mut stream,
@@ -1540,7 +1540,7 @@ async fn no_leak_invariant_for_aws_handlers() {
 }
 
 /// Invariant: a stored secret value must never appear in an *error*
-/// response surfaced to a peer — not in the message, code, or any field of
+/// response surfaced to a peer - not in the message, code, or any field of
 /// the serialized wire response. Happy-path leakage is covered by the
 /// mint/sign tests above; this exercises the failure paths, including one
 /// (`sign_request` with a bad scheme) that errors *after* the secret has

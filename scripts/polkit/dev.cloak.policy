@@ -18,7 +18,7 @@
   To install distribution-wide:
     install -m 0644 dev.cloak.policy /usr/share/polkit-1/actions/
 
-  This file is purely descriptive — runtime enforcement is the polkit
+  This file is purely descriptive - runtime enforcement is the polkit
   daemon's job; Cloak only invokes `CheckAuthorization`.
 -->
 <policyconfig>

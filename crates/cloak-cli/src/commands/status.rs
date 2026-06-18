@@ -1,4 +1,4 @@
-//! `cloak status` — print vault metadata and daemon unlock state if reachable.
+//! `cloak status` - print vault metadata and daemon unlock state if reachable.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;

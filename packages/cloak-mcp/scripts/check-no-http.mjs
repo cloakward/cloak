@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // CI gate: forbid direct HTTP/networking imports, fetch/WebSocket calls, and
 // spawns of network CLIs in src/. Cloak's invariant is that the MCP shim
-// performs ZERO outbound network I/O of its own — all egress originates from
+// performs ZERO outbound network I/O of its own - all egress originates from
 // the Rust daemon. `node:net` is the only permitted network primitive (the
 // local UDS in ipc.ts); `node:child_process` is permitted only to launch the
 // trusted `cloak` CLI.
@@ -10,7 +10,7 @@
 // from being reintroduced by accident during a refactor. A determined author
 // can still bypass a static scan (aliased/dynamic imports, base64-eval, …);
 // the real boundary is the daemon's peer-auth and the published binary being
-// built solely from src/. Keep that boundary — don't treat this as airtight.
+// built solely from src/. Keep that boundary - don't treat this as airtight.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -22,7 +22,7 @@ const SRC = join(ROOT, "src");
 
 // Banned bare-module identifiers (matched as imported module specifiers).
 // NOTE: `net`/`node:net` and `child_process`/`node:child_process` are
-// deliberately NOT banned — they are the permitted UDS + trusted-CLI paths.
+// deliberately NOT banned - they are the permitted UDS + trusted-CLI paths.
 const BANNED_MODULES = [
   "http",
   "https",

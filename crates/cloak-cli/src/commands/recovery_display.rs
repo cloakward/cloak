@@ -7,7 +7,7 @@
 //!
 //! The 24-word seed is the irrecoverable backstop for the vault. If it
 //! lands in a log file (`cloak init > install.log`) the user has just
-//! written the master secret to disk in plaintext — we cannot retract
+//! written the master secret to disk in plaintext - we cannot retract
 //! it. So we refuse to write the words to a non-terminal stdout.
 //!
 //! Order of preference:
@@ -107,7 +107,7 @@ fn write_mnemonic<W: Write>(w: &mut W, words: &[String]) -> io::Result<()> {
     )?;
     writeln!(
         w,
-        "RECOVERY SEED — WRITE THESE 24 WORDS DOWN ON PAPER. STORE OFFLINE."
+        "RECOVERY SEED - WRITE THESE 24 WORDS DOWN ON PAPER. STORE OFFLINE."
     )?;
     writeln!(
         w,
@@ -126,7 +126,7 @@ fn write_mnemonic<W: Write>(w: &mut W, words: &[String]) -> io::Result<()> {
     )?;
     writeln!(
         w,
-        "decrypt every secret in the vault — treat them like the passphrase."
+        "decrypt every secret in the vault - treat them like the passphrase."
     )?;
     writeln!(w)?;
     writeln!(w, "Verify you wrote them down correctly with:")?;

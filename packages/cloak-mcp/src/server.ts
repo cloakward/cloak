@@ -14,6 +14,7 @@ import {
 import packageJson from "../package.json" with { type: "json" };
 import { tools, dispatchTool } from "./tools/index.ts";
 import { handshakeWithDxtFirstRun } from "./dxt-first-run.ts";
+import { setSessionInitializer } from "./ipc.ts";
 import { runSelfTest } from "./self-test.ts";
 
 const VERSION = packageJson.version;
@@ -56,9 +57,13 @@ async function main(): Promise<void> {
     }
   }
 
-  // The daemon's peer auth happens at IPC connect; we handshake to obtain
-  // a session token that gets attached to subsequent requests.
-  await handshakeWithDxtFirstRun();
+  // Register the daemon handshake to run lazily on the first tool call, NOT at
+  // startup. Doing it here previously blocked the MCP `initialize` response
+  // behind a synchronous daemon status check, so strict clients (Codex times
+  // out MCP startup after 30s) never saw the server come up. tools/list needs
+  // no daemon and stays instant; the first tool call establishes the session
+  // and attaches the token. The daemon's peer auth still happens at IPC connect.
+  setSessionInitializer(() => handshakeWithDxtFirstRun());
 
   const server = new Server(
     { name: "cloak-mcp", version: VERSION },

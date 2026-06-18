@@ -10,7 +10,7 @@
    branch; releases are tagged off `beta` once CI is green.
 2. **Bump the version.** Update `Cargo.toml::workspace.package.version` and
    `packages/cloak-mcp/package.json::version` to the new `X.Y.Z`. Update
-   `CHANGELOG.md`: rename the `Unreleased` heading to `[X.Y.Z] — YYYY-MM-DD`
+   `CHANGELOG.md`: rename the `Unreleased` heading to `[X.Y.Z] - YYYY-MM-DD`
    and start a fresh `Unreleased` section.
 3. **Tag.** `git tag -s vX.Y.Z -m "Cloak X.Y.Z"`, `git push origin vX.Y.Z`.
    The tag must be signed, annotated, and point at a commit reachable from
@@ -25,7 +25,7 @@
      Linux glibc x86_64 (`x86_64-unknown-linux-gnu`),
      Linux musl x86_64 (`x86_64-unknown-linux-musl`),
      Linux glibc arm64 (`aarch64-unknown-linux-gnu`).
-     Windows is not part of the current release artifacts — see
+     Windows is not part of the current release artifacts - see
      [issue #2](https://github.com/cloakward/cloak/issues/2).
    - Tarballs each row as `cloak-X.Y.Z-<target>.tar.gz`.
    - Builds Claude Desktop `.dxt` packages for macOS arm64/x64. Linux tarballs
@@ -195,7 +195,7 @@ combo (more robust, no 2FA prompts, can be revoked individually):
 
 1. https://appstoreconnect.apple.com/access/api → **Keys** tab.
 2. Click **+** → name it "Cloak notarytool" → **Access: Developer** is sufficient.
-3. **Download the `.p8`** — this is the only chance you get; the file disappears from the UI immediately after download.
+3. **Download the `.p8`** - this is the only chance you get; the file disappears from the UI immediately after download.
 4. Note the **Key ID** (10 chars) and the **Issuer ID** (UUID at the top of the page).
 5. `base64 -i AuthKey_<KEY_ID>.p8 | pbcopy` → `APPLE_API_KEY_BASE64`.
 
@@ -208,7 +208,7 @@ Some inputs are intentionally still moving or externally resolved:
   When bumping an action, resolve the tag to a new commit SHA in the same
   change and review the upstream release notes. **One documented exception:**
   the `slsa-framework/slsa-github-generator` reusable workflow is referenced
-  by its `v2.0.0` semver tag, not a SHA — the generator derives and
+  by its `v2.0.0` semver tag, not a SHA - the generator derives and
   self-verifies its builder version from the tag ref, and referencing it by
   commit digest makes its `final` job fail. (The `slsa-verifier` *installer*
   action is a normal action and stays SHA-pinned.)
@@ -240,21 +240,21 @@ Every Cloak release tag (`vX.Y.Z`) cut by the current workflow is built,
 signed, and provenance-attested by `.github/workflows/release.yml`. Each
 platform tarball ships with:
 
-- `cloak-<version>-<target>.tar.gz` — the release archive
-- `cloak-<version>-<target>.tar.gz.sig` — cosign keyless signature
-- `cloak-<version>-<target>.tar.gz.cert` — cosign Fulcio certificate
+- `cloak-<version>-<target>.tar.gz` - the release archive
+- `cloak-<version>-<target>.tar.gz.sig` - cosign keyless signature
+- `cloak-<version>-<target>.tar.gz.cert` - cosign Fulcio certificate
 
 Claude Desktop extension packages ship for macOS arm64/x64:
 
-- `Cloak-<version>-<platform>.dxt` — Claude Desktop extension archive
-- `Cloak-<version>-<platform>.dxt.sig` — cosign keyless signature
-- `Cloak-<version>-<platform>.dxt.cert` — cosign Fulcio certificate
+- `Cloak-<version>-<platform>.dxt` - Claude Desktop extension archive
+- `Cloak-<version>-<platform>.dxt.sig` - cosign keyless signature
+- `Cloak-<version>-<platform>.dxt.cert` - cosign Fulcio certificate
 
 Plus, attached once per release:
 
-- `sha256sums.txt` (and `.sig` / `.cert`) — aggregate hash file covering
+- `sha256sums.txt` (and `.sig` / `.cert`) - aggregate hash file covering
   tarballs and `.dxt` packages
-- `multiple.intoto.jsonl` — SLSA L3 provenance attestation
+- `multiple.intoto.jsonl` - SLSA L3 provenance attestation
 
 Older preview releases may include `.dxt` files without matching `.sig`,
 `.cert`, or SLSA subject entries. Treat those `.dxt` files as unsigned
@@ -302,7 +302,7 @@ slsa-verifier verify-artifact \
 ```
 
 A passing run binds the artifact's sha256 to a specific GitHub Actions
-build of `release.yml` at the tagged commit — proof the tarball or `.dxt`
+build of `release.yml` at the tagged commit - proof the tarball or `.dxt`
 was produced by the release pipeline and not tampered with after.
 
 ## Cross-check the aggregate hash file

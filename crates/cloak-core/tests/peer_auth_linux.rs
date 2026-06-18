@@ -5,7 +5,7 @@
 //! `0 tests` placeholder. CI exercises the real test on the
 //! ubuntu-glibc and ubuntu-musl rows.
 //!
-//! The watcher correctness is the load-bearing thing — actual PID
+//! The watcher correctness is the load-bearing thing - actual PID
 //! reuse is harder to reproduce deterministically and is not what we
 //! are guarding against. The guarantee Cloak gives is: "if the peer
 //! task exits, every session bound to its pidfd inode is dropped
@@ -22,7 +22,7 @@ use cloak_core::Error;
 use tokio::net::{UnixListener, UnixStream};
 
 /// Resolve a pidfd for the *peer* of a connected `UnixStream` and read
-/// its inode — used to model what the daemon records at handshake.
+/// its inode - used to model what the daemon records at handshake.
 fn peer_pidfd_inode(stream: &UnixStream) -> Option<(OwnedFd, u64)> {
     let sock_fd = stream.as_raw_fd();
     let cred = linux_pa::get_peer_cred(sock_fd).expect("SO_PEERCRED");
@@ -151,7 +151,7 @@ async fn inode_revoke_path_drops_only_matching_sessions() {
     // for the `LinuxPidfdInode` variant: issue two sessions with
     // different inodes and confirm the call only drops the matching
     // one. (Issuing through the daemon would require two distinct
-    // peer processes, which is outside the attack model — we trust
+    // peer processes, which is outside the attack model - we trust
     // the watcher to call this method with the right identity, and
     // that wiring is asserted by the watcher test above.)
     use chrono::Duration as ChronoDuration;
@@ -201,7 +201,7 @@ async fn inode_revoke_path_drops_only_matching_sessions() {
     );
 
     // A different `kind` with the same bytes must NOT match (defense
-    // in depth — never let macOS audit-token bytes accidentally
+    // in depth - never let macOS audit-token bytes accidentally
     // collide with a Linux inode).
     let cross_kind = PeerIdentity {
         kind: PeerIdentityKind::MacAuditToken,

@@ -1,4 +1,4 @@
-//! `cloak run (--only KEY1,KEY2 | --all) -- COMMAND` — run a child process with
+//! `cloak run (--only KEY1,KEY2 | --all) -- COMMAND` - run a child process with
 //! vault secrets injected as environment variables.
 //!
 //! ## Security boundary
@@ -39,7 +39,7 @@ pub fn run(
 
     let mut vault = open_vault(ctx)?;
     if !vault.is_initialized()? {
-        anyhow::bail!("vault not initialized — run `cloak setup` first");
+        anyhow::bail!("vault not initialized - run `cloak setup` first");
     }
     unlock_interactive(&mut vault)?;
 
@@ -83,7 +83,7 @@ pub fn run(
     for (k, v) in &env_pairs {
         child.env(k, v.expose_secret());
     }
-    // Inherit the rest of stdin/stdout/stderr — aws-vault style.
+    // Inherit the rest of stdin/stdout/stderr - aws-vault style.
     let status = child
         .status()
         .map_err(|e| anyhow::anyhow!("failed to spawn {}: {e}", program.to_string_lossy()))?;

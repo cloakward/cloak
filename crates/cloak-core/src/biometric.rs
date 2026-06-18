@@ -1,7 +1,7 @@
 //! Per-platform user-presence / biometric gate, invoked by `cloakd`
 //! when serving `vault.show`.
 //!
-//! Server-side enforcement (since v1.0): the daemon — not the CLI —
+//! Server-side enforcement (since v1.0): the daemon - not the CLI -
 //! fires the prompt before any plaintext leaves the vault. A same-UID
 //! attacker who connects to the daemon socket directly cannot skip the
 //! Touch ID / polkit step by lying in the request payload; the daemon
@@ -9,12 +9,12 @@
 //!
 //! Each platform exposes the same [`authenticate`] entry point:
 //!
-//! - **macOS** — Touch ID via the `LocalAuthentication` framework.
-//! - **Linux** — polkit's `org.freedesktop.PolicyKit1.Authority`
+//! - **macOS** - Touch ID via the `LocalAuthentication` framework.
+//! - **Linux** - polkit's `org.freedesktop.PolicyKit1.Authority`
 //!   `CheckAuthorization` D-Bus method against the `dev.cloak.show-secret`
 //!   action (default policy `auth_self`, see
 //!   `scripts/polkit/dev.cloak.policy`).
-//! - **Other** — a stub that returns `Ok(false)`; the daemon then
+//! - **Other** - a stub that returns `Ok(false)`; the daemon then
 //!   refuses the reveal.
 //!
 //! Failure / cancel returns `Ok(false)` so the daemon can refuse the
@@ -42,12 +42,12 @@ mod imp {
     /// Trigger a Touch ID prompt with the given reason string.
     ///
     /// Returns:
-    /// - `Ok(true)` — user authenticated.
-    /// - `Ok(false)` — user cancelled, fell back to passphrase, no
+    /// - `Ok(true)` - user authenticated.
+    /// - `Ok(false)` - user cancelled, fell back to passphrase, no
     ///   biometric is enrolled, or the device-owner policy is
     ///   unavailable. Caller should treat this as "biometric was not
     ///   confirmed" and act accordingly.
-    /// - `Err(_)` — hard failure (channel poisoned, framework returned
+    /// - `Err(_)` - hard failure (channel poisoned, framework returned
     ///   something we can't classify).
     pub fn authenticate(reason: &str) -> Result<bool> {
         // SAFETY: `LAContext::new` is a class-method constructor with no
@@ -127,7 +127,7 @@ mod imp {
     /// Map an `LAError` code to a "did the user explicitly say no?"
     /// boolean. User-cancel / fallback / system-cancel all return
     /// `false`; anything else is "couldn't confirm" → also `false`. We
-    /// never propagate the underlying code to the user — it's leaked
+    /// never propagate the underlying code to the user - it's leaked
     /// info that wouldn't help anyway.
     fn classify_la_error(code: i64) -> bool {
         let code = code as i32;
@@ -140,7 +140,7 @@ mod imp {
             // Explicit no.
             return false;
         }
-        // Anything else (lockout, biometry-not-enrolled, etc.) — also
+        // Anything else (lockout, biometry-not-enrolled, etc.) - also
         // fail closed but log it so the user knows they should re-try
         // with `--no-biometric`.
         tracing::warn!(code, "biometric error code (treating as failure)");
@@ -171,7 +171,7 @@ mod imp {
     //!   either because the user dismissed/cancelled the prompt
     //!   (`details["polkit.dismissed"]` set) or because no polkit
     //!   authentication agent is registered for this session
-    //!   (`is_challenge = true`, no agent picked it up) — both are
+    //!   (`is_challenge = true`, no agent picked it up) - both are
     //!   treated as "user presence not confirmed" -> `Ok(false)`.
     //! - the system bus is unreachable or polkit is not running on this
     //!   host -> log a one-shot warning and fail closed with `Ok(false)`.
@@ -228,7 +228,7 @@ mod imp {
 
         // The `details` map can carry `polkit.message` to override the
         // prompt copy in the agent dialog. We pass the caller-supplied
-        // reason verbatim — it's a fixed-format human string, not the
+        // reason verbatim - it's a fixed-format human string, not the
         // secret value.
         let mut details: HashMap<&str, &str> = HashMap::new();
         details.insert("polkit.message", reason);
@@ -288,7 +288,7 @@ pub fn authenticate(_reason: &str) -> Result<bool> {
 // popping a real Touch ID dialog on a developer laptop). Production
 // builds compile out the override entirely.
 
-/// Boxed implementation of the biometric prompt — what tests inject in
+/// Boxed implementation of the biometric prompt - what tests inject in
 /// place of [`authenticate`].
 #[cfg(any(test, feature = "test-util"))]
 pub type Authenticator = std::sync::Arc<dyn Fn(&str) -> Result<bool> + Send + Sync>;
@@ -338,7 +338,7 @@ mod tests {
     fn action_id_matches_policy_file() {
         // The Rust-side action ID must match the `<action id="...">`
         // declared in scripts/polkit/dev.cloak.policy. Keep this string
-        // pinned — changing it requires repackaging the policy file.
+        // pinned - changing it requires repackaging the policy file.
         assert_eq!(ACTION_ID, "dev.cloak.show-secret");
     }
 
@@ -359,7 +359,7 @@ mod tests {
         }
     }
 
-    /// Real polkit round-trip. Interactive — requires a logged-in
+    /// Real polkit round-trip. Interactive - requires a logged-in
     /// session with a polkit agent and the policy file installed at
     /// `/usr/share/polkit-1/actions/dev.cloak.policy`. Skipped unless
     /// `RUN_POLKIT_TEST=1` is set; even then, `#[ignore]` keeps it out
@@ -377,7 +377,7 @@ mod tests {
     }
 }
 
-// Cross-platform unit tests — build everywhere, no syscalls.
+// Cross-platform unit tests - build everywhere, no syscalls.
 #[cfg(test)]
 mod cross_tests {
     /// Marker test so `cargo test --workspace` exercises this module on
@@ -386,7 +386,7 @@ mod cross_tests {
     /// `#[ignore]` gates above.
     #[test]
     fn module_is_linkable() {
-        // The function is intentionally not invoked here — calling it
+        // The function is intentionally not invoked here - calling it
         // would pop a Touch ID dialog on a developer laptop. We only
         // assert the module compiles and exposes `authenticate`.
         let _f: fn(&str) -> anyhow::Result<bool> = super::authenticate;

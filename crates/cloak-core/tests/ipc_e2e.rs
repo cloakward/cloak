@@ -4,7 +4,7 @@
 //!
 //! This test touches the real OS keychain (for the pepper) on macOS.
 //! On platforms where the keychain is unavailable, the
-//! `vault.initialize` step is skipped — the handshake + framing is
+//! `vault.initialize` step is skipped - the handshake + framing is
 //! still asserted.
 //!
 //! On environments where binding a UDS at all is impossible (e.g. some
@@ -66,7 +66,7 @@ async fn spawn_daemon(
     let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("ipc_e2e: skipping — cannot bind UDS: {e}");
+            eprintln!("ipc_e2e: skipping - cannot bind UDS: {e}");
             return None;
         }
     };
@@ -106,7 +106,7 @@ async fn rpc(stream: &mut UnixStream, req: Request) -> Response {
 /// parallel threads each save/restore the override and one drop's
 /// `None` lands in the middle of the other's `vault.show` call. The
 /// stub is "deny" so that every `vault.show` is rejected by the
-/// server-side gate — i.e., a same-UID attacker connecting to the daemon
+/// server-side gate - i.e., a same-UID attacker connecting to the daemon
 /// socket directly cannot bypass the prompt by lying in the payload.
 fn install_deny_authenticator_once() {
     use std::sync::Once;
@@ -254,8 +254,8 @@ async fn ipc_e2e_handshake_and_basic_flow() {
     //    on a CI runner, so `cloak_core::biometric::authenticate`
     //    returns `Ok(false)` and the daemon refuses with
     //    `biometric-failed`. CRITICAL: this is the v1.0 server-side
-    //    enforcement — a same-UID attacker who connects to the socket
-    //    directly (which is exactly what this test is doing — there
+    //    enforcement - a same-UID attacker who connects to the socket
+    //    directly (which is exactly what this test is doing - there
     //    is no `cloak` CLI in the loop) cannot bypass the prompt by
     //    supplying any "user already approved" assertion in the
     //    payload. The daemon ignores all client-supplied biometric flags.
@@ -346,7 +346,7 @@ async fn ipc_e2e_handshake_and_basic_flow() {
 async fn ipc_e2e_mcp_peer_cannot_call_cli_only_methods() {
     install_deny_authenticator_once();
     // Spawn the daemon with `cli_basenames` set to *something other than*
-    // our test binary — so the test peer is treated as MCP.
+    // our test binary - so the test peer is treated as MCP.
     let Some((socket_path, _dir, shutdown, handle)) = spawn_daemon("cloak".to_string()).await
     else {
         return;
@@ -448,7 +448,7 @@ async fn ipc_e2e_same_uid_attacker_cannot_bypass_biometric() {
         .expect("token")
         .to_string();
 
-    // Initialize + unlock + add — interactive (keychain) on macOS, may
+    // Initialize + unlock + add - interactive (keychain) on macOS, may
     // be skipped if the keychain isn't available on this runner.
     let resp = rpc(
         &mut stream,
@@ -512,7 +512,7 @@ async fn ipc_e2e_same_uid_attacker_cannot_bypass_biometric() {
     );
 
     // ---- Attacker round 2: try every "I already approved" wording
-    //      we can think of. None of them are honoured by the daemon —
+    //      we can think of. None of them are honoured by the daemon -
     //      the daemon ignores client-supplied biometric assertions.
     for bypass in [
         json!({"name": "the_secret", "biometric_ok": true}),

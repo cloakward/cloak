@@ -21,7 +21,7 @@
 //!   the peer. Cloak does not fall back to `pidfd_open(SO_PEERCRED.pid)`
 //!   for socket peers because that reintroduces a PID-reuse race. The
 //!   pidfd's inode (`fstat(pidfd).st_ino`) is the
-//!   non-recycling identity bytes we record on the [`PeerInfo`] —
+//!   non-recycling identity bytes we record on the [`PeerInfo`] -
 //!   it is stable for the life of the underlying task and the
 //!   kernel allocates a fresh inode for any later task that
 //!   inherits the recycled PID.
@@ -92,7 +92,7 @@ pub enum PeerIdentityKind {
     /// macOS `audit_token_t` (32 bytes, 8 × `u32` as returned by
     /// `getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)`).
     MacAuditToken,
-    /// Linux pidfd inode bytes — `u64::to_le_bytes(fstat(pidfd).st_ino)`
+    /// Linux pidfd inode bytes - `u64::to_le_bytes(fstat(pidfd).st_ino)`
     /// (8 bytes). The kernel allocates a unique inode per task; the
     /// value is stable for the life of the referenced task and any
     /// later task that inherits the recycled PID gets a different
@@ -127,7 +127,7 @@ pub struct TrustedPeerBinary {
 }
 
 impl PeerPolicy {
-    /// Default allowlist for tests and explicit embedding — `cloak` (CLI)
+    /// Default allowlist for tests and explicit embedding - `cloak` (CLI)
     /// and `cloak-mcp` (shim), same UID required. Production daemon startup
     /// uses [`Self::installed_v01`] so basename is not the only identity gate.
     pub fn default_v01() -> Self {
@@ -195,9 +195,9 @@ fn trusted_binary_from_path(basename: String, path: &std::path::Path) -> Result<
 /// Classification of a peer for routing purposes (CLI vs MCP).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerKind {
-    /// `cloak` CLI peer — full vault surface.
+    /// `cloak` CLI peer - full vault surface.
     Cli,
-    /// `cloak-mcp` peer — read-only + tool methods only.
+    /// `cloak-mcp` peer - read-only + tool methods only.
     Mcp,
     /// Unknown but allowlisted peer (e.g. `cloakd` self-test).
     Other,
@@ -376,7 +376,7 @@ fn trusted_peer_path(_path: &std::path::Path, _our_uid: u32) -> std::result::Res
 
 /// Resolve peer credentials from a connected `tokio::net::UnixStream`.
 ///
-/// This consults the kernel directly via libc — `tokio`'s `peer_cred()`
+/// This consults the kernel directly via libc - `tokio`'s `peer_cred()`
 /// helper exists but does not expose PID on macOS in our MSRV, so we
 /// roll our own.
 #[cfg(unix)]
@@ -445,7 +445,7 @@ fn peer_info_from_raw_fd(fd: std::os::fd::RawFd) -> Result<PeerInfo> {
     // the resolved `binary_path` by name (the previous behaviour) was a TOCTOU
     // that let an attacker restore trusted bytes at the path after launching a
     // different executable. The residual exec-after-connect race is inherent
-    // to the same-UID threat model — see docs/THREAT_MODEL.md.
+    // to the same-UID threat model - see docs/THREAT_MODEL.md.
     let binary_path = std::fs::read_link(&exe_link).ok();
     let code_sig_hash = hash_file(std::path::Path::new(&exe_link)).ok();
     Ok(PeerInfo {
@@ -506,12 +506,12 @@ pub(crate) mod macos {
 
     use crate::error::{Error, Result};
 
-    /// `LOCAL_PEERPID` socket option — see `<sys/un.h>`.
+    /// `LOCAL_PEERPID` socket option - see `<sys/un.h>`.
     const LOCAL_PEERPID: libc::c_int = 0x002;
-    /// `LOCAL_PEERTOKEN` socket option — see `<sys/un.h>`. Returns a
+    /// `LOCAL_PEERTOKEN` socket option - see `<sys/un.h>`. Returns a
     /// 32-byte `audit_token_t` (8 × `u32`) describing the peer.
     const LOCAL_PEERTOKEN: libc::c_int = 0x006;
-    /// `SOL_LOCAL` socket option level — see `<sys/un.h>`.
+    /// `SOL_LOCAL` socket option level - see `<sys/un.h>`.
     const SOL_LOCAL: libc::c_int = 0;
     /// `proc_pidpath` maximum buffer size, per Darwin's `<sys/proc_info.h>`.
     const PROC_PIDPATHINFO_MAXSIZE: usize = 4 * 1024;
@@ -612,7 +612,7 @@ pub(crate) mod macos {
 
     /// Extract the kernel's pidversion counter from a captured token.
     /// Bytes 28..32 (native endian) per the layout above. Reserved
-    /// for diagnostic logging — the full 32-byte token is what we
+    /// for diagnostic logging - the full 32-byte token is what we
     /// store in `SessionRecord` and constant-time-compare on every
     /// validate.
     #[allow(dead_code)]
@@ -748,7 +748,7 @@ impl PeerExitWatcher {
     /// immediately; await [`Self::wait`] for the exit event.
     ///
     /// Returns `Err(Error::Io(ESRCH))` if `pid` is already gone at
-    /// registration time — callers should treat that the same as
+    /// registration time - callers should treat that the same as
     /// "exited" and revoke straight away.
     pub fn new(pid: i32) -> Result<Self> {
         // SAFETY: `kqueue()` takes no arguments; returns a new fd or
@@ -885,7 +885,7 @@ impl PeerExitWatcher {
 // Linux impl
 // -------------------------------------------------------------------------
 
-/// Linux peer-auth helpers — `SO_PEERCRED` / `SO_PEERPIDFD` /
+/// Linux peer-auth helpers - `SO_PEERCRED` / `SO_PEERPIDFD` /
 /// `pidfd_open` syscalls plus the [`linux::PidfdWatcher`] over
 /// `tokio::io::unix::AsyncFd`. Public so the integration tests in
 /// `tests/peer_auth_linux.rs` can exercise the primitives directly.
@@ -901,7 +901,7 @@ pub mod linux {
     /// Defined in `<asm-generic/socket.h>` as decimal 77 (`0x4d`).
     const SO_PEERPIDFD: libc::c_int = 77;
 
-    /// Linux peer credentials triple — PID/UID/GID at the moment the
+    /// Linux peer credentials triple - PID/UID/GID at the moment the
     /// kernel snapshotted the connection.
     pub struct LinuxPeerCred {
         /// Peer process ID (recyclable; do not trust past handshake).
@@ -945,7 +945,7 @@ pub mod linux {
         // On Linux, `libc::pid_t == i32` and `libc::{uid_t, gid_t} ==
         // u32`, so these are no-op casts. Other unix-but-not-macos
         // targets (FreeBSD etc.) may differ, hence the `as` casts
-        // remain — clippy's `unnecessary_cast` is silenced because
+        // remain - clippy's `unnecessary_cast` is silenced because
         // the cast is a portability hedge.
         #[allow(clippy::unnecessary_cast)]
         Ok(LinuxPeerCred {
@@ -1003,8 +1003,8 @@ pub mod linux {
     }
 
     /// Fallback: open a pidfd by PID via the `pidfd_open(2)` syscall.
-    /// This races against PID reuse — by the time the syscall runs,
-    /// `pid` may already refer to a different process — but the
+    /// This races against PID reuse - by the time the syscall runs,
+    /// `pid` may already refer to a different process - but the
     /// caller's `SO_PEERCRED` snapshot was atomic with `accept(2)`,
     /// and we never reach this path on Linux 6.5+ where
     /// `SO_PEERPIDFD` succeeds.
@@ -1054,7 +1054,7 @@ pub mod linux {
             return Err(Error::Io(std::io::Error::last_os_error()));
         }
         // st_ino is `ino_t` which is `u64` on glibc/musl and `u32` on
-        // some other unix-but-not-macos targets — same portability
+        // some other unix-but-not-macos targets - same portability
         // hedge as the `LinuxPeerCred` casts above.
         #[allow(clippy::unnecessary_cast)]
         Ok(st.st_ino as u64)
@@ -1090,7 +1090,7 @@ pub mod linux {
         /// reaches `do_exit()`; there is nothing to read off the fd,
         /// we only care about the readiness edge. We confirm every
         /// wakeup with a non-blocking `poll(2)` for `POLLIN` and only
-        /// resolve when the kernel itself reports the bit set —
+        /// resolve when the kernel itself reports the bit set -
         /// AsyncFd has been observed to deliver spurious early-ready
         /// wakeups for freshly-registered pidfds on some kernels, so
         /// we re-check rather than treat any wakeup as exit.
@@ -1119,7 +1119,7 @@ pub mod linux {
                 if (pfd.revents & libc::POLLIN) != 0 {
                     return Ok(());
                 }
-                // Spurious wakeup — kernel says the pidfd is not yet
+                // Spurious wakeup - kernel says the pidfd is not yet
                 // readable. Acknowledge to tokio that the readiness
                 // didn't actually fire and re-arm.
                 guard.clear_ready();

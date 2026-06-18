@@ -9,9 +9,9 @@
 //! 3. `bind(2)` the UDS, chmod it to `0600`.
 //! 4. Open the vault (it may be locked / uninitialized; that's fine).
 //! 5. Install signal handlers for SIGINT/SIGTERM (graceful shutdown)
-//!    and SIGHUP (logged "reload requested" — actual reload lives in
-//!    the policy slice).
-//! 6. Accept loop: per connection — peer-auth, dispatch, write replies.
+//!    and SIGHUP, which reloads the policy in place (fail-closed: a bad
+//!    policy file is rejected and the live policy is kept).
+//! 6. Accept loop: per connection, peer-auth, dispatch, write replies.
 //!
 //! All `tracing` records carry `peer_pid`, `basename`, and `method`;
 //! they never carry params, since params can contain passphrases or
@@ -124,7 +124,7 @@ fn bind_listener(path: &Path) -> Result<UnixListener> {
                 ));
             }
             Err(_) => {
-                // Stale — clean it up.
+                // Stale - clean it up.
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -136,7 +136,7 @@ fn bind_listener(path: &Path) -> Result<UnixListener> {
     }
     let listener = UnixListener::bind(path)?;
     // chmod 0600 so only the daemon's own UID can connect (defense in
-    // depth — `getpeereid` is the real gate).
+    // depth - `getpeereid` is the real gate).
     let perms = std::fs::Permissions::from_mode(0o600);
     std::fs::set_permissions(path, perms)?;
     Ok(listener)
@@ -179,6 +179,18 @@ fn default_policy_path() -> PathBuf {
     crate::policy::default_policy_path()
 }
 
+/// Re-read, validate, and atomically swap the active policy from the policy
+/// file. On any parse or read error the current policy is kept (fail closed)
+/// and the error is returned. Returns the number of per-secret rules loaded.
+async fn reload_policy(ctx: &DaemonCtx) -> Result<usize> {
+    let path = default_policy_path();
+    let new_engine = PolicyEngine::from_path(&path)?;
+    let count = new_engine.secret_rule_count();
+    *ctx.policy_engine.lock().await = new_engine;
+    tracing::info!(rules = count, "policy reloaded");
+    Ok(count)
+}
+
 /// Default audit log path: `<data_dir>/cloak/audit.jsonl` (e.g.
 /// `~/Library/Application Support/cloak/audit.jsonl` on macOS).
 fn default_audit_path() -> Result<PathBuf> {
@@ -208,7 +220,12 @@ async fn handle_signals(ctx: Arc<DaemonCtx>) -> Result<()> {
                 return Ok(());
             }
             _ = sighup.recv() => {
-                tracing::info!("SIGHUP: policy reload requested (not yet implemented)");
+                if let Err(e) = reload_policy(&ctx).await {
+                    tracing::warn!(
+                        error = %e,
+                        "SIGHUP: policy reload failed; keeping current policy"
+                    );
+                }
             }
         }
     }
@@ -318,8 +335,8 @@ async fn serve_conn(stream: UnixStream, ctx: Arc<DaemonCtx>, our_uid: u32) -> Re
     );
 
     // 1b. Spawn a per-connection peer-exit watcher (kqueue NOTE_EXIT on
-    //     macOS, pidfd POLLIN on Linux). If the peer dies — even before
-    //     its socket FIN reaches us — we revoke every session bound to
+    //     macOS, pidfd POLLIN on Linux). If the peer dies - even before
+    //     its socket FIN reaches us - we revoke every session bound to
     //     this peer's identity AND every session bound to this conn-id
     //     immediately, closing the PID-recycle window (threat model
     //     A8). `peer_exit` lets the read loop break out of `read` the
@@ -552,7 +569,10 @@ fn spawn_peer_exit_watcher(
 
 /// Methods callable only by the CLI peer (basename == `cloak`).
 fn is_cli_only_method(m: &str) -> bool {
-    matches!(m, "vault.show" | "vault.unlock" | "vault.lock") || is_test_only_vault_write_method(m)
+    matches!(
+        m,
+        "vault.show" | "vault.unlock" | "vault.lock" | "policy.reload"
+    ) || is_test_only_vault_write_method(m)
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -584,6 +604,7 @@ fn known_method(m: &str) -> bool {
             | "tool.proxy_http"
             | "tool.mint_token"
             | "tool.query_audit"
+            | "policy.reload"
     ) || is_test_only_vault_write_method(m)
 }
 
@@ -794,6 +815,12 @@ async fn dispatch_method(
                 "format_version": s.format_version,
                 "locked": s.locked,
             }))
+        }
+
+        // ---- policy: hot-reload from the policy file (CLI-only) ----
+        "policy.reload" => {
+            let count = reload_policy(ctx).await?;
+            Ok(json!({ "reloaded": true, "rule_count": count }))
         }
 
         // ---- vault: test-only management fixture methods ----

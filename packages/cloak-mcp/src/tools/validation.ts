@@ -42,7 +42,6 @@ const SENSITIVE_FIELD_JSON_PATTERN = [
   "^(?:[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Cc][Oo][Oo][Kk][Ii][Ee]|[Pp][Rr][Oo][Xx][Yy]-[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Ss][Ee][Tt]-[Cc][Oo][Oo][Kk][Ii][Ee]|[Xx]-[Aa][Pp][Ii]-[Kk][Ee][Yy]|[Aa][Pp][Ii]-[Kk][Ee][Yy]|[Xx]-[Aa][Uu][Tt][Hh]-[Tt][Oo][Kk][Ee][Nn]|[Xx]-[Aa][Cc][Cc][Ee][Ss][Ss]-[Tt][Oo][Kk][Ee][Nn])$",
   "(?:[Aa][Pp][Ii][Kk][Ee][Yy]|[Aa][Cc][Cc][Ee][Ss][Ss][Tt][Oo][Kk][Ee][Nn]|[Cc][Ll][Ii][Ee][Nn][Tt][Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Rr][Ii][Vv][Aa][Tt][Ee][Kk][Ee][Yy]|[Rr][Ee][Ff][Rr][Ee][Ss][Hh][Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Ss][Ss][Ii][Oo][Nn][Tt][Oo][Kk][Ee][Nn])",
 ].join("|");
-const CONTROL_JSON_PATTERN = "[\\u0000-\\u001f\\u007f]";
 export const CREDENTIAL_URL_JSON_PATTERN =
   "://[^/?#]*@|[?&][^=&#]*(?:[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Aa][Pp][Ii][Kk][Ee][Yy]|[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Tt][Oo][Kk][Ee][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss][Tt][Oo][Kk][Ee][Nn]|[Cc][Ll][Ii][Ee][Nn][Tt][_-]?[Ss][Ee][Cc][Rr][Ee][Tt]|[Cc][Ll][Ii][Ee][Nn][Tt][Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Rr][Ii][Vv][Aa][Tt][Ee][_-]?[Kk][Ee][Yy]|[Pp][Rr][Ii][Vv][Aa][Tt][Ee][Kk][Ee][Yy]|[Rr][Ee][Ff][Rr][Ee][Ss][Hh][_-]?[Tt][Oo][Kk][Ee][Nn]|[Rr][Ee][Ff][Rr][Ee][Ss][Hh][Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Ss][Ss][Ii][Oo][Nn][_-]?[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Ss][Ss][Ii][Oo][Nn][Tt][Oo][Kk][Ee][Nn]|[Aa][Uu][Tt][Hh](?:[Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn])?|[Bb][Ee][Aa][Rr][Ee][Rr]|[Cc][Oo][Oo][Kk][Ii][Ee]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]|[Pp][Aa][Ss][Ss](?:[Ww][Oo][Rr][Dd])?|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn])(?:=|&|#|$)";
 const SENSITIVE_SINGLE_PARTS = new Set([
@@ -551,58 +550,20 @@ export const inputHeadersJsonSchema = {
   },
 } as const;
 
-function scopeValueJsonSchema(depth: number): unknown {
-  const scalar = [
-    {
-      type: "string",
-      maxLength: MAX_SCOPE_STRING_LENGTH,
-      not: { pattern: CONTROL_JSON_PATTERN },
-    },
-    { type: "number" },
-    { type: "boolean" },
-    { type: "null" },
-  ];
-  if (depth <= 0) {
-    return { anyOf: scalar };
-  }
-  const child = scopeValueJsonSchema(depth - 1);
-  return {
-    anyOf: [
-      ...scalar,
-      { type: "array", maxItems: MAX_SCOPE_ARRAY_ITEMS, items: child },
-      {
-        type: "object",
-        maxProperties: MAX_SCOPE_KEYS,
-        propertyNames: {
-          type: "string",
-          maxLength: 128,
-          not: {
-            anyOf: [
-              { pattern: CONTROL_JSON_PATTERN },
-              { pattern: SENSITIVE_FIELD_JSON_PATTERN },
-            ],
-          },
-        },
-        additionalProperties: child,
-      },
-    ],
-  };
-}
-
+// The advertised scope schema is intentionally lean. The runtime validator
+// (`scopeSchema` / `validateScopeValue` in this file) is the sole structural
+// enforcement of scope depth, key count, array limits, control-character
+// rejection, and credential-shaped-field rejection; it runs in this MCP process
+// before the request is sent to the daemon. Advertising the full recursive
+// schema (nested anyOf plus credential regexes at every depth) bloated this one
+// tool's input schema to ~14 KB, which made strict MCP clients (e.g. Codex)
+// time out parsing the tools/list response. The lean schema plus the field's
+// description gives the model what it needs; the real rules are enforced at the
+// boundary.
 export const scopeJsonSchema = {
   type: "object",
   maxProperties: MAX_SCOPE_KEYS,
-  propertyNames: {
-    type: "string",
-    maxLength: 128,
-    not: {
-      anyOf: [
-        { pattern: CONTROL_JSON_PATTERN },
-        { pattern: SENSITIVE_FIELD_JSON_PATTERN },
-      ],
-    },
-  },
-  additionalProperties: scopeValueJsonSchema(MAX_SCOPE_DEPTH - 1),
+  additionalProperties: true,
 } as const;
 
 export const signRequestOutputJsonSchema = {

@@ -3,14 +3,14 @@ resolver = "2"
 members = ["crates/cloak-core", "crates/cloak-cli"]
 
 [workspace.package]
-version = "1.0.8"
+version = "1.1.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/cloakward/cloak"
 rust-version = "1.80"
 
 [workspace.dependencies]
-# Crypto — libsodium only.
+# Crypto - libsodium only.
 libsodium-sys-stable = { version = "1.22", features = ["minimal"] }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 subtle = "2.6"

@@ -1,6 +1,6 @@
 {
   "name": "@cloak-ward/mcp",
-  "version": "1.0.8",
+  "version": "1.1.2",
   "description": "Cloak MCP server: the model surface that never sees plaintext secrets.",
   "license": "Apache-2.0",
   "homepage": "https://github.com/cloakward/cloak#readme",
@@ -48,7 +48,7 @@
   },
   "overrides": {
     "fast-uri": "3.1.2",
-    "hono": "4.12.21",
+    "hono": "4.12.25",
     "ip-address": "10.1.1",
     "qs": "6.15.2"
   }

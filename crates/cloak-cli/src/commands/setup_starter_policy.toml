@@ -1,4 +1,4 @@
-# Cloak starter policy — written by `cloak setup`.
+# Cloak starter policy - written by `cloak setup`.
 #
 # Posture: default-deny. Nothing is allowed until you opt in below.
 # Edit this file to allow specific (secret, tool, host) combinations.

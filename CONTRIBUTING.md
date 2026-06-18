@@ -56,7 +56,7 @@ cargo test --workspace
 
 ## Commit style
 
-`<workstream>: <imperative summary>` — e.g. `W1: replace SigV4 stub with
+`<workstream>: <imperative summary>` - e.g. `W1: replace SigV4 stub with
 aws-sigv4`. Body explains *why* and any non-obvious tradeoff.
 
 ## Escalation

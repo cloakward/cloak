@@ -1,4 +1,4 @@
-//! `cloak set NAME` — update an existing secret's value.
+//! `cloak set NAME` - update an existing secret's value.
 
 use anyhow::Result;
 use cloak_core::crypto::Secret;

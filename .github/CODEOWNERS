@@ -1,7 +1,7 @@
 # Default reviewer.
 *                                       @varun
 
-# Load-bearing security paths — varun reviews every change.
+# Load-bearing security paths - varun reviews every change.
 crates/cloak-core/src/crypto.rs         @varun
 crates/cloak-core/src/peer_auth.rs      @varun
 crates/cloak-core/src/handlers.rs       @varun

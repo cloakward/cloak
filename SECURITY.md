@@ -22,7 +22,7 @@ If we cannot meet these timelines we will tell you in writing and explain why.
 - Issues that require root on the user's machine.
 - Issues that depend on the user pasting a secret value into a chat.
 - Macros / shell aliases that wrap `cloak show`.
-- Side channels (cache timing, EM, power) — best-effort only.
+- Side channels (cache timing, EM, power) - best-effort only.
 - Windows release artifacts are deferred ([issue #2](https://github.com/cloakward/cloak/issues/2)). Issues against unfinished Windows code paths are not in-scope until Windows is a shipped target.
 
 ## Safe harbor

@@ -7,7 +7,7 @@
 //!    pepper and the rollback-counter mirror live next to the vault
 //!    (the production headless / CI fallback path).
 //! 2. Pokes a `MetaRow` straight into the SQLite store via the public
-//!    `SqliteStore` API rather than calling `Vault::initialize` —
+//!    `SqliteStore` API rather than calling `Vault::initialize` -
 //!    avoiding the real Argon2id autotune and any keychain ACL prompt.
 //! 3. Invokes `Vault::open_or_create` and asserts the documented
 //!    behaviour: equality is silent, any mismatch after a mirror exists
@@ -20,7 +20,7 @@
 //! them on parallel threads of the same process.
 //!
 //! NOTE: these tests deliberately do NOT set
-//! `CLOAK_DISABLE_ROLLBACK_MIRROR` — that knob is the cloak-core unit
+//! `CLOAK_DISABLE_ROLLBACK_MIRROR` - that knob is the cloak-core unit
 //! tests' hermetic shortcut, and would defeat the purpose here.
 
 use std::path::Path;

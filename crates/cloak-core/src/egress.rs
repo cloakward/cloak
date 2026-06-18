@@ -1,4 +1,4 @@
-//! Outbound HTTP — the *only* place outbound HTTP lives in the workspace.
+//! Outbound HTTP - the *only* place outbound HTTP lives in the workspace.
 //!
 //! `cloak-mcp` MUST NOT import any HTTP client. Every privileged tool that
 //! needs to talk to the network goes through this module.
@@ -10,11 +10,11 @@
 //! - a 30-second total timeout per request,
 //! - an SSRF guard that refuses to connect to any non-global IP address
 //!   (loopback, private, link-local incl. cloud-metadata `169.254.169.254`,
-//!   ULA, etc.) — for both IP-literal hosts *and* hostnames, validated at the
+//!   ULA, etc.) - for both IP-literal hosts *and* hostnames, validated at the
 //!   exact resolution reqwest connects to, so DNS-rebinding cannot slip a
 //!   private address past the host allowlist.
 //!
-//! Transport failures are surfaced as `Error::Other("egress: ...")` —
+//! Transport failures are surfaced as `Error::Other("egress: ...")` -
 //! short, static-ish strings; they never carry secret material.
 //!
 //! Defense-in-depth note: this module does NOT perform host *allowlist*
@@ -52,7 +52,7 @@ impl EgressClient {
             // SSRF backstop for hostnames: reqwest connects to exactly the
             // addresses this resolver returns, so a name that resolves to a
             // private/metadata address is dropped at the same resolution used
-            // for the connection — defeating DNS-rebinding.
+            // for the connection - defeating DNS-rebinding.
             .dns_resolver(Arc::new(GuardedResolver))
             .build()
             .map_err(|_| Error::Other("egress: failed to build http client"))?;
@@ -64,7 +64,7 @@ impl EgressClient {
     ///
     /// Errors:
     /// - DNS / connect / TLS / read errors → `Error::Other("egress: ...")`.
-    /// - HTTP 4xx/5xx are *not* errors here — the caller decides what to
+    /// - HTTP 4xx/5xx are *not* errors here - the caller decides what to
     ///   do with the status code.
     pub async fn execute(&self, req: PreparedRequest) -> Result<RawResponse> {
         self.execute_with_body_limit(req, usize::MAX).await
@@ -148,7 +148,7 @@ pub struct PreparedRequest {
     pub body: Option<Vec<u8>>,
 }
 
-/// A captured HTTP response — status, lowercase-keyed sorted header map,
+/// A captured HTTP response - status, lowercase-keyed sorted header map,
 /// and raw body bytes.
 #[derive(Debug, Clone)]
 pub struct RawResponse {
@@ -165,7 +165,7 @@ pub struct RawResponse {
 /// shape) into a real `HeaderMap`, lowercasing keys.
 ///
 /// Returns `Error::Other("egress: invalid header ...")` for any name/value
-/// that is not legal HTTP — this is a public-API safety net.
+/// that is not legal HTTP - this is a public-API safety net.
 pub fn header_map_from_btree(input: &BTreeMap<String, String>) -> Result<HeaderMap> {
     let mut out = HeaderMap::new();
     for (k, v) in input.iter() {
@@ -179,7 +179,7 @@ pub fn header_map_from_btree(input: &BTreeMap<String, String>) -> Result<HeaderM
 }
 
 // -------------------------------------------------------------------------
-// SSRF guard — refuse non-global destination addresses
+// SSRF guard - refuse non-global destination addresses
 // -------------------------------------------------------------------------
 
 /// Whether non-global destinations are permitted. **Always `false` in
@@ -199,7 +199,7 @@ fn egress_allows_non_global() -> bool {
 }
 
 /// True if `ip` is anything other than a normal, globally-routable unicast
-/// address — i.e. one we must refuse to connect to from a model-driven proxy.
+/// address - i.e. one we must refuse to connect to from a model-driven proxy.
 /// `Ipv4Addr::is_global`/`Ipv6Addr::is_global` are still unstable, so this is
 /// an explicit deny-list of the relevant special-use ranges.
 fn ip_is_disallowed(ip: &IpAddr) -> bool {
@@ -214,7 +214,7 @@ fn ipv4_disallowed(ip: Ipv4Addr) -> bool {
     ip.is_unspecified()        // 0.0.0.0
         || ip.is_loopback()    // 127.0.0.0/8
         || ip.is_private()     // 10/8, 172.16/12, 192.168/16
-        || ip.is_link_local()  // 169.254.0.0/16 — incl. 169.254.169.254 metadata
+        || ip.is_link_local()  // 169.254.0.0/16 - incl. 169.254.169.254 metadata
         || ip.is_broadcast()   // 255.255.255.255
         || ip.is_documentation() // 192.0.2/24, 198.51.100/24, 203.0.113/24
         || o[0] == 0                                   // 0.0.0.0/8 "this network"

@@ -1,4 +1,4 @@
-//! `cloak setup` — interactive first-time setup wizard.
+//! `cloak setup` - interactive first-time setup wizard.
 //!
 //! Walks the user from `brew install` to a working install in one
 //! command. Idempotent: every step checks current state and offers to
@@ -114,11 +114,13 @@ pub fn run(ctx: &Context, opts: SetupOptions) -> Result<u8> {
     println!("Setup complete.");
     println!();
     println!("What's next:");
-    println!("  cloak add <NAME>            add a secret, e.g. STRIPE_SECRET_KEY (input hidden)");
-    println!("  cloak daemon start          start cloakd for MCP clients");
-    println!("  cloak unlock                unlock cloakd after each daemon start");
-    println!("  cloak list                  see what's in the vault");
-    println!("  cloak doctor                verify everything is wired up");
+    println!("  cloak add <NAME>           add a secret, e.g. STRIPE_SECRET_KEY (input hidden)");
+    println!("  cloak allow <NAME> <HOST>  let a secret reach a host (cloak allow OPENAI_API_KEY api.openai.com)");
+    println!("  cloak daemon start         start cloakd for MCP clients");
+    println!("  cloak unlock               unlock cloakd after each daemon start");
+    println!("  cloak list                 see what's in the vault");
+    println!("  cloak policy               see what each secret is allowed to reach");
+    println!("  cloak doctor               verify everything is wired up");
     println!();
     println!("After the daemon is running and unlocked, open Claude Desktop / Cursor");
     println!("or any MCP client you registered and try asking it to call an API.");
@@ -132,9 +134,10 @@ pub fn run(ctx: &Context, opts: SetupOptions) -> Result<u8> {
                     "Heads up: I wrote a default-deny policy at {}.",
                     p.display()
                 );
-                println!("Edit it to allow specific secrets/hosts before any MCP tool");
-                println!("call will succeed. `scripts/policy.example.toml` is a worked");
-                println!("example you can copy from.");
+                println!("Every secret starts denied, so the first API call is blocked");
+                println!("until you allow a host. It is one live command (no restart):");
+                println!("  cloak allow OPENAI_API_KEY api.openai.com");
+                println!("See what each secret can reach with `cloak policy`.");
             }
             PolicyWriteOutcome::AlreadyExists(_) => {}
         }

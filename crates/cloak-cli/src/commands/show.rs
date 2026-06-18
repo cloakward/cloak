@@ -1,4 +1,4 @@
-//! `cloak show NAME [--allow-redirect] [--newline]` — reveal plaintext.
+//! `cloak show NAME [--allow-redirect] [--newline]` - reveal plaintext.
 //!
 //! This is the *only* place in the CLI that prints secret material. The
 //! discipline here is heavy:
@@ -42,7 +42,7 @@ pub fn run(ctx: &Context, name: &str, allow_redirect: bool, newline: bool) -> Re
     //    is passed. On macOS this is Touch ID; on Linux it's a polkit
     //    confirmation against the `dev.cloak.show-secret` action. On
     //    other targets the gate fails closed. The same gate lives in
-    //    `cloakd`'s `vault.show` handler — a same-UID attacker who
+    //    `cloakd`'s `vault.show` handler - a same-UID attacker who
     //    bypasses this CLI by talking to the daemon socket directly
     //    still has to face the prompt server-side.
     if !ctx.no_biometric {

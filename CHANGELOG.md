@@ -4,6 +4,64 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-06-18
+
+### Fixed
+- Bumped the MCP server's pinned `hono` override from `4.12.21` to `4.12.25`
+  after OSV reported multiple advisories against the transitive SDK dependency.
+  `hono` is not used for Cloak's local stdio/UDS MCP path, but the override now
+  resolves to a non-vulnerable version and the OSV dependency scan is green.
+
+### Changed
+- Added the new README hero assets for the launch page: a short Stripe proxy
+  demo as the first visual, with the original full-flow GIF preserved below it.
+  The caption is intentionally framed as a demo flow, not a literal live capture.
+
+## [1.1.1] - 2026-06-12
+
+### Fixed
+- `mint_short_lived_token` advertised a large recursive input schema (~14 KB)
+  for its `scope` parameter, which bloated the MCP `tools/list` response to
+  ~29.6 KB, enough that strict clients parsing it could still time out on first
+  connect even after the 1.1.0 lazy-initialize fix. The advertised scope schema
+  is now lean and `tools/list` is ~16.4 KB; the depth, size, control-character,
+  and credential-shaped-field limits are unchanged and still enforced at the
+  boundary by the runtime validator. Codex and other strict MCP clients now
+  connect on the first try.
+- `cloak allow <SECRET> <HOST>` on a not-yet-configured secret no longer writes
+  a hardcoded `kind = "api_key"`. A secret stored under a different kind would
+  have been silently and permanently denied; new rules now carry no kind
+  constraint and match the secret whatever its kind.
+- `cloak-mcp` drops its cached daemon session when the socket closes and
+  re-handshakes on the next call, so it keeps working across a
+  `cloak daemon restart` instead of failing until the client is restarted.
+
+### Changed
+- When a proxy call is blocked because the host is not on a secret's allowlist,
+  the error now names the exact command that grants access
+  (`cloak allow <SECRET> <HOST>`). `cloak setup` and `cloak import` point at
+  `cloak allow`, and the README and quickstart lead with the live `cloak allow`
+  command instead of hand-editing the policy file and restarting the daemon.
+
+## [1.1.0] - 2026-06-11
+
+### Added
+- `cloak allow <SECRET> <HOST>` and `cloak deny <SECRET> <HOST>` manage a
+  secret's proxy allowlist from the command line instead of hand-editing the
+  policy file, and `cloak policy` prints the active policy in plain English.
+  The daemon hot-reloads the policy when it changes (a new `policy.reload` IPC
+  method, also wired to SIGHUP), so allowlist changes apply immediately with no
+  `cloak daemon restart` and no re-unlock. A reload validates the new policy and
+  keeps the previous one if the file is malformed (fail closed).
+
+### Fixed
+- `cloak-mcp` answers the MCP `initialize` request immediately and performs the
+  daemon handshake lazily on the first tool call, instead of blocking startup on
+  a synchronous daemon status check. Strict MCP clients that time out server
+  startup after 30 seconds (for example Codex) could not connect and now do.
+  `tools/list` needs no daemon and stays instant; a tool call with the daemon
+  down returns a clean error instead of failing startup.
+
 ## [1.0.8] - 2026-06-11
 
 ### Fixed
@@ -159,17 +217,17 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 - Updated the smoke test environment guard so test-only passphrase injection requires `CLOAK_UNSAFE_TEST_MODE=1`.
 - Refreshed README and launch docs around open-source installation, prerelease trust, Apple signing/notarization expectations, and publisher naming constraints.
 
-## [1.0.0] — 2026-05-08
+## [1.0.0] - 2026-05-08
 
 ### Security
-- Read-side rollback detection. The vault's monotonic counter is now mirrored into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`, 8 bytes big-endian) on every successful write, and `Vault::open_or_create` compares the file counter to the mirror before any record is decrypted. A file counter older than the mirror (backup-restore mishap, malware, bit-flip) is rejected with `Error::VaultRollbackDetected`; a newer file counter is accepted and refreshes the mirror (legitimate cross-device rsync); a missing mirror is seeded from the file (first run after upgrade). With `CLOAK_PEPPER_FILE` set the mirror falls back to a 0600 sibling file (`<vault_dir>/rollback-counter`) — see `docs/THREAT_MODEL.md` for the file-fallback caveat. This was a documented residual risk in v0.9.0-rc1/rc2; deferral note removed.
-- Biometric / user-presence is now enforced by `cloakd` directly, not the `cloak` CLI. The daemon fires the Touch ID (macOS) / polkit (Linux) prompt itself before serving `vault.show`, and ignores any client-supplied "user already approved" assertion. A same-UID attacker who connects to the daemon socket directly — bypassing the CLI — no longer skips the prompt; the only documented escape hatch is the explicit `skip_biometric: true` opt-out forwarded by `cloak --no-biometric show NAME` for headless contexts. New `biometric-failed` IPC error code is returned on cancel / failure / unavailable. Threat-model row A9 in `docs/THREAT_MODEL.md`.
+- Read-side rollback detection. The vault's monotonic counter is now mirrored into a separate OS-keychain item (`dev.cloak` / `vault.rollback-counter.v1`, 8 bytes big-endian) on every successful write, and `Vault::open_or_create` compares the file counter to the mirror before any record is decrypted. A file counter older than the mirror (backup-restore mishap, malware, bit-flip) is rejected with `Error::VaultRollbackDetected`; a newer file counter is accepted and refreshes the mirror (legitimate cross-device rsync); a missing mirror is seeded from the file (first run after upgrade). With `CLOAK_PEPPER_FILE` set the mirror falls back to a 0600 sibling file (`<vault_dir>/rollback-counter`) - see `docs/THREAT_MODEL.md` for the file-fallback caveat. This was a documented residual risk in v0.9.0-rc1/rc2; deferral note removed.
+- Biometric / user-presence is now enforced by `cloakd` directly, not the `cloak` CLI. The daemon fires the Touch ID (macOS) / polkit (Linux) prompt itself before serving `vault.show`, and ignores any client-supplied "user already approved" assertion. A same-UID attacker who connects to the daemon socket directly - bypassing the CLI - no longer skips the prompt; the only documented escape hatch is the explicit `skip_biometric: true` opt-out forwarded by `cloak --no-biometric show NAME` for headless contexts. New `biometric-failed` IPC error code is returned on cancel / failure / unavailable. Threat-model row A9 in `docs/THREAT_MODEL.md`.
 
 ### Added
 - macOS binaries are now Apple Developer ID signed and submitted to Apple's notary service. Bare Mach-O command-line binaries cannot always be stapled in-place, so Gatekeeper may fetch the ticket online on first launch; packaged installers remain the path for offline-stapled tickets. Cosign keyless signing still happens after notarization so the cosign cert covers the notarized bytes. Steps gracefully skip (with a `::warning::`) when the Apple secrets aren't configured (e.g. forks).
-- **BIP-39 24-word recovery seed.** `cloak init` / `cloak setup` now generate a fresh 256-bit entropy, encode it as a 24-word English BIP-39 mnemonic, and store a *second* wrap of the master key under the recovery key (BIP-39 seed via PBKDF2-HMAC-SHA512, first 32 bytes). The mnemonic is shown once with a "WRITE THIS DOWN" warning and is never persisted. New `cloak restore` re-derives the master from the seed and re-wraps it under a freshly chosen passphrase — recovery from a lost passphrase is now possible. New `cloak backup verify` round-trips a candidate seed against the stored recovery wrap. New `cloak backup mnemonic` confirms a vault has a recovery wrap (Touch ID gated + audit-logged). Vaults created before this release do not carry a recovery wrap; `cloak restore` / `cloak backup *` return a clear error on those vaults — in-place migration is queued for v1.1. Schema bumped via migration `0002_recovery_wrap.sql`; the recovery columns are nullable so older vaults continue to open. Recovery is **CLI-only**: no IPC method or MCP tool can access the recovery wrap. The "no passphrase recovery" caveat from rc1 is now resolved.
-- release tarballs include cloak-mcp at bin/cloak-mcp on macOS arm64, macOS x64, and Linux gnu amd64; brew/curl installs ship all three binaries with no npm dependency. (Linux musl + Linux arm64 ship cloak + cloakd only because bun --compile can't cross-target those triples — track in a follow-up issue if needed.)
-- `Cloak.dxt` extension for Claude Desktop — drag-and-drop install, native setup dialogs. Bundles `cloak-mcp` and runs `cloak setup` via OS-native dialog flow on first activation (no terminal commands required). One `.dxt` per supported MCP-binary platform (macOS arm64/x64 and Linux x64) ships with the GitHub release. Windows and Linux arm64 `.dxt` packages are deferred until their MCP binary builds are supported.
+- **BIP-39 24-word recovery seed.** `cloak init` / `cloak setup` now generate a fresh 256-bit entropy, encode it as a 24-word English BIP-39 mnemonic, and store a *second* wrap of the master key under the recovery key (BIP-39 seed via PBKDF2-HMAC-SHA512, first 32 bytes). The mnemonic is shown once with a "WRITE THIS DOWN" warning and is never persisted. New `cloak restore` re-derives the master from the seed and re-wraps it under a freshly chosen passphrase - recovery from a lost passphrase is now possible. New `cloak backup verify` round-trips a candidate seed against the stored recovery wrap. New `cloak backup mnemonic` confirms a vault has a recovery wrap (Touch ID gated + audit-logged). Vaults created before this release do not carry a recovery wrap; `cloak restore` / `cloak backup *` return a clear error on those vaults - in-place migration is queued for v1.1. Schema bumped via migration `0002_recovery_wrap.sql`; the recovery columns are nullable so older vaults continue to open. Recovery is **CLI-only**: no IPC method or MCP tool can access the recovery wrap. The "no passphrase recovery" caveat from rc1 is now resolved.
+- release tarballs include cloak-mcp at bin/cloak-mcp on macOS arm64, macOS x64, and Linux gnu amd64; brew/curl installs ship all three binaries with no npm dependency. (Linux musl + Linux arm64 ship cloak + cloakd only because bun --compile can't cross-target those triples - track in a follow-up issue if needed.)
+- `Cloak.dxt` extension for Claude Desktop - drag-and-drop install, native setup dialogs. Bundles `cloak-mcp` and runs `cloak setup` via OS-native dialog flow on first activation (no terminal commands required). One `.dxt` per supported MCP-binary platform (macOS arm64/x64 and Linux x64) ships with the GitHub release. Windows and Linux arm64 `.dxt` packages are deferred until their MCP binary builds are supported.
 
 ### Fixed (release-engineering follow-ups, post-tag)
 - `release.yml` verify job now downloads the `signed-bundle` and SLSA provenance artifacts via `actions/download-artifact` instead of `gh release download`, because `gh release download` cannot see DRAFT releases (and the workflow design keeps the release in DRAFT until verify passes). The bytes verified are identical to those uploaded to the draft.
@@ -186,18 +244,18 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 ### Notes
 - The "deferred to v1.0.0" Docker multi-arch line from rc1 is resolved: `docker-push.yml` now splits into native-runner jobs (`ubuntu-24.04` for amd64, `ubuntu-24.04-arm` for arm64) and merges via `docker buildx imagetools create`. `:VERSION`, `:MAJOR_MINOR`, and `:latest` (stable tags only) are pushed to `ghcr.io/cloakward/cloakd`.
 
-## [0.9.0-rc1] — 2026-05-06
+## [0.9.0-rc1] - 2026-05-06
 
-First release candidate for v1.0. Ships macOS arm64/x86_64 + Linux glibc/musl; Windows is deferred to v1.0.1 ([#2](https://github.com/cloakward/cloak/issues/2)). All 11 v1.0 critical-path workstreams (W1, W3–W10, W9b/c/d/e/f) are on `beta`.
+First release candidate for v1.0. Ships macOS arm64/x86_64 + Linux glibc/musl; Windows is deferred to v1.0.1 ([#2](https://github.com/cloakward/cloak/issues/2)). All 11 v1.0 critical-path workstreams (W1, W3-W10, W9b/c/d/e/f) are on `beta`.
 
 ### Known caveats
 
 - **Linux pidfd peer-exit watcher** is implemented in source but disabled at the daemon's `serve_conn` call site for this RC; the captured pidfd path tripped a tokio `AsyncFd` registration error on the GitHub Actions runner kernel that we couldn't reproduce locally. Re-enable tracked in [#21](https://github.com/cloakward/cloak/issues/21). macOS kqueue + audit-token path is fully wired and gives full A8 coverage; Linux falls back to socket-FIN-driven session revocation, same surface as v0.1.
 - **npm publish two-leg fallback.** OIDC trusted publishing is preferred and attaches `--provenance`. If the npm-side trusted-publisher relationship for `@cloak-ward/mcp` is not yet configured (tracked in [#6](https://github.com/cloakward/cloak/issues/6)), the workflow falls back to a static `NPM_TOKEN` and publishes WITHOUT provenance, with a `::warning::` flagging the gap. Migration to trusted-publishing-only is a v1.0.x follow-up.
 - **macos-26-intel (x86_64) release row is prerelease-best-effort only.** macOS x86_64 free-tier runners can take a long time to allocate; prerelease previews may continue without the Intel row, but stable tags fail if either macOS architecture is missing. (Matrix replaces the v0.9.0-rc1-pre macos-13 / macos-14 split.)
-- **Biometric (Touch ID / polkit) is enforced by the `cloak` CLI binary, not by `cloakd`.** A same-UID attacker who calls the daemon directly via the IPC socket — bypassing the CLI — gets through with no biometric prompt. v1.0.1 moves the LocalAuthentication / polkit calls into `cloakd` itself so the prompt fires regardless of which peer requested `vault.show`.
+- **Biometric (Touch ID / polkit) is enforced by the `cloak` CLI binary, not by `cloakd`.** A same-UID attacker who calls the daemon directly via the IPC socket - bypassing the CLI - gets through with no biometric prompt. v1.0.1 moves the LocalAuthentication / polkit calls into `cloakd` itself so the prompt fires regardless of which peer requested `vault.show`.
 - **Rollback counter lives in the vault file only**, not the OS keychain. Read-side rollback (`cloak show` against a restored older snapshot) is not detected; write-side is. v1.0.1 mirrors the counter into the keychain so reads also detect rollback.
-- **No passphrase recovery.** v0.9.0-rc1 ships without BIP-39 24-word recovery — if you lose your passphrase, every secret in the vault is permanently unrecoverable. Back up your passphrase out-of-band before adding any secret.
+- **No passphrase recovery.** v0.9.0-rc1 ships without BIP-39 24-word recovery - if you lose your passphrase, every secret in the vault is permanently unrecoverable. Back up your passphrase out-of-band before adding any secret.
 
 ### Added
 - v0.1 source drop:
@@ -211,19 +269,19 @@ First release candidate for v1.0. Ships macOS arm64/x86_64 + Linux glibc/musl; W
   - TOML policy DSL with default-deny, allowed_hosts, and rate limits. `require_confirmation` is parsed but was not an allow path.
   - `tool.sign_request` (HMAC-SHA256, AWS SigV4), `tool.proxy_http` (reqwest+rustls + allowlist), `tool.mint_token` (AWS STS), `tool.query_audit`.
 - Privileged tool handlers wired end-to-end through the daemon:
-  - `tool.sign_request` — HMAC-SHA256 over `"{METHOD}\n{URL}\n{sha256_hex(body)}\n"`, returning only `X-Cloak-Signature`.
-  - `tool.proxy_http` — strips caller-supplied `Authorization`/`Cookie`/`X-Api-Key`, attaches auth via bearer/basic/header/query, never echoes the auth header back.
-  - `tool.mint_token` — `aws-sts` kind calls real STS `GetSessionToken` (post-W1) and returns a base64'd JSON envelope of the temporary credentials with RFC3339 `expires_at`; other kinds return a typed not-supported error (still audited).
-  - `tool.query_audit` — filters audit entries by time/tool/secret/result/limit; never returns secret values.
-- `crates/cloak-core/src/egress.rs` — single workspace outbound-HTTP module. `reqwest` with rustls TLS, redirects disabled, 30s timeout. `cloak-mcp` remains HTTP-free.
+  - `tool.sign_request` - HMAC-SHA256 over `"{METHOD}\n{URL}\n{sha256_hex(body)}\n"`, returning only `X-Cloak-Signature`.
+  - `tool.proxy_http` - strips caller-supplied `Authorization`/`Cookie`/`X-Api-Key`, attaches auth via bearer/basic/header/query, never echoes the auth header back.
+  - `tool.mint_token` - `aws-sts` kind calls real STS `GetSessionToken` (post-W1) and returns a base64'd JSON envelope of the temporary credentials with RFC3339 `expires_at`; other kinds return a typed not-supported error (still audited).
+  - `tool.query_audit` - filters audit entries by time/tool/secret/result/limit; never returns secret values.
+- `crates/cloak-core/src/egress.rs` - single workspace outbound-HTTP module. `reqwest` with rustls TLS, redirects disabled, 30s timeout. `cloak-mcp` remains HTTP-free.
 - `HandlerCtx` bundles vault / policy / audit / egress / peer for every privileged tool call. The daemon dispatcher builds it per-call and passes it down.
 - Daemon now resolves a default policy at `~/.config/cloak/policy.toml` (missing file ⇒ default-deny) and a default audit log at `<data_dir>/cloak/audit.jsonl`. Test entry `daemon::run_with` accepts explicit `policy_path` and `audit_path` parameters.
 
 ### Security
-- No tool returns plaintext secret material — property test asserts.
-- Daemon owns all outbound HTTP; MCP shim has zero HTTP imports — CI grep enforces.
+- No tool returns plaintext secret material - property test asserts.
+- Daemon owns all outbound HTTP; MCP shim has zero HTTP imports - CI grep enforces.
 - Peer auth runs *before* any session token issuance.
-- Policy is checked **before** vault read for every privileged tool call — a denied call never decrypts the secret.
+- Policy is checked **before** vault read for every privileged tool call - a denied call never decrypts the secret.
 - Every privileged tool call writes exactly one audit entry (`Ok` / `Denied` / `Error`).
 
 ### Added (post-v0.1, W1, decision: option A)
@@ -234,14 +292,14 @@ First release candidate for v1.0. Ships macOS arm64/x86_64 + Linux glibc/musl; W
 
 ### Deferred from 8-week plan
 - Cross-platform: Linux/Windows compile but Keychain/biometric/peer-auth are stubs.
-- Signed releases (SLSA L3 / cosign / SignPath) — dev builds only in v0.1.
+- Signed releases (SLSA L3 / cosign / SignPath) - dev builds only in v0.1.
 - BIP-39 24-word recovery, `.env` import, GitHub App / GitLab PAT rotation handlers.
 - Mintlify docs site, fuzz harnesses, full property-test KAT vector suite, chaos tests.
 
 ### Operational additions on top of the 8-week scope
 - `CLOAK_PEPPER_FILE` env override for environments where the OS keychain is unavailable (CI runners, headless servers, sandboxed dev). File is enforced 0600; world/group readable refuses to load. Documented as a residual risk in `THREAT_MODEL.md`.
-- `cloak daemon-unlock` — a CLI bridge that pushes the vault passphrase to a running `cloakd` over IPC so MCP peers can serve requests in v0.1 (where the CLI is library-direct rather than an IPC client). v1.x absorbs this into `cloak unlock` once the CLI moves fully onto IPC.
-- `scripts/smoke-test.sh` — end-to-end real-binary verification: builds release artifacts, hermetic HOME, init/add/list/show round-trip, daemon up, daemon-unlock over IPC, MCP `--self-test`. Green on macOS arm64.
+- `cloak daemon-unlock` - a CLI bridge that pushes the vault passphrase to a running `cloakd` over IPC so MCP peers can serve requests in v0.1 (where the CLI is library-direct rather than an IPC client). v1.x absorbs this into `cloak unlock` once the CLI moves fully onto IPC.
+- `scripts/smoke-test.sh` - end-to-end real-binary verification: builds release artifacts, hermetic HOME, init/add/list/show round-trip, daemon up, daemon-unlock over IPC, MCP `--self-test`. Green on macOS arm64.
 
 ### Test counts (v0.1)
 - 114 cloak-core unit + property tests

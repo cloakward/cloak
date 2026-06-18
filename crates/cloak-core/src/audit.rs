@@ -133,7 +133,7 @@ impl AuditLog {
 
     /// Open for a vault profile. When `profile_established` is true (the vault
     /// already has a master key), a **missing** external anchor over an
-    /// empty/absent log is NOT silently re-seeded — that combination is the
+    /// empty/absent log is NOT silently re-seeded - that combination is the
     /// audit-erasure signature (both `audit.jsonl` and the keychain anchor
     /// gone), so the daemon fails closed and the operator must consciously run
     /// `cloak audit adopt-head --yes` after reviewing. A fresh profile still
@@ -142,7 +142,7 @@ impl AuditLog {
         Self::open_inner(path, !profile_established)
     }
 
-    /// Open for read-only inspection (`cloak audit verify`) — **never** seeds a
+    /// Open for read-only inspection (`cloak audit verify`) - **never** seeds a
     /// missing anchor. Running verify on an erased chain (empty log + no
     /// anchor) must report the problem, not silently re-establish the anchor:
     /// otherwise an unauthenticated `cloak audit verify` would launder a
@@ -205,7 +205,7 @@ impl AuditLog {
 
         // Pretty-on-disk uses serde_json single-line; the hash is over JCS.
         let line = serde_json::to_string(&entry)?;
-        // Sanity — never embed a newline in a single record.
+        // Sanity - never embed a newline in a single record.
         debug_assert!(!line.contains('\n'));
 
         // Compute new chain head hash from the entry's canonical form.
@@ -248,7 +248,7 @@ impl AuditLog {
 
     /// Verify the full chain. Returns the number of entries.
     ///
-    /// On any mismatch — bad JSON, non-monotonic seq, or hash break — returns
+    /// On any mismatch - bad JSON, non-monotonic seq, or hash break - returns
     /// [`Error::AuditChainBroken`] with the 1-based line number.
     pub fn verify(&self) -> Result<u64> {
         let f = match File::open(&self.path) {

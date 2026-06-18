@@ -65,7 +65,7 @@ pub struct SessionRecord {
     pub token: SessionToken,
     /// Peer PID at the time of issuance (recorded for audit).
     pub peer_pid: i32,
-    /// Peer binary basename — used by handlers to route CLI vs MCP.
+    /// Peer binary basename - used by handlers to route CLI vs MCP.
     pub peer_basename: String,
     /// Unique per-connection ID assigned by the daemon.
     pub conn_id: u64,
@@ -222,7 +222,7 @@ impl SessionStore {
     /// Revoke every session bound to the given non-recycling peer
     /// identity. Called by the per-connection peer-exit watcher
     /// (kqueue on macOS, pidfd on Linux) the moment the kernel reports
-    /// the peer task has exited — closes the PID-recycle window before
+    /// the peer task has exited - closes the PID-recycle window before
     /// any other process at the same UID can present a stale token.
     /// The compare is constant-time on the bytes; identities of a
     /// different `kind` or length never match.

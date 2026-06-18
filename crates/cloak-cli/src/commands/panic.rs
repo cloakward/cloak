@@ -1,4 +1,4 @@
-//! `cloak panic` — emergency lockdown.
+//! `cloak panic` - emergency lockdown.
 //!
 //! Walk-through:
 //! 1. Append a `cli.panic` audit entry naming every secret in the vault
@@ -52,12 +52,12 @@ pub fn run(ctx: &Context) -> Result<()> {
     }
 
     // 3. Rotation worksheet.
-    println!("# Cloak panic — rotation worksheet");
+    println!("# Cloak panic - rotation worksheet");
     println!("# Generated: {}", chrono::Utc::now().to_rfc3339());
     println!("# Daemon: stopped. Re-enable with `cloak daemon start`.");
     println!();
     if names.is_empty() {
-        println!("(vault is empty — nothing to rotate)");
+        println!("(vault is empty - nothing to rotate)");
         return Ok(());
     }
     println!("Rotate every secret below. Tick each off as you regenerate it");

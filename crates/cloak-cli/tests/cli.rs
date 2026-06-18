@@ -18,7 +18,7 @@ const TEST_MODE_ENV: &str = "CLOAK_UNSAFE_TEST_MODE";
 /// owns the `TempDir` so the vault file is cleaned up at end-of-test.
 ///
 /// The CLI workflow sets `CLOAK_PEPPER_FILE: target/cloak-ci-pepper`
-/// once per job, but cargo runs these tests in parallel — so multiple
+/// once per job, but cargo runs these tests in parallel - so multiple
 /// `cloak init` invocations race on `OpenOptions::create_new(true)`
 /// for that single shared file and one of them fails with
 /// `File exists (os error 17)`. Override the env var per test with a
@@ -211,7 +211,7 @@ fn rm_yes_removes_secret() {
 }
 
 // -------------------------------------------------------------------------
-// show against an uninitialized vault — no panic, non-zero exit
+// show against an uninitialized vault - no panic, non-zero exit
 // -------------------------------------------------------------------------
 
 #[test]

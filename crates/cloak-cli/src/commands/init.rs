@@ -1,4 +1,4 @@
-//! `cloak init` — create a fresh vault.
+//! `cloak init` - create a fresh vault.
 
 use anyhow::Result;
 use cloak_core::audit::AuditResult;

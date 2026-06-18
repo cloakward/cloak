@@ -1,4 +1,4 @@
-//! `cloak doctor` — read-only diagnostic.
+//! `cloak doctor` - read-only diagnostic.
 //!
 //! Walks the install: binaries on PATH, daemon up + socket sane, vault
 //! initialized, daemon vault unlocked, biometric available, every detected

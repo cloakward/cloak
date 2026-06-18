@@ -1,4 +1,4 @@
-# W3 — end-to-end smoke test on macOS arm64 and Linux glibc.
+# W3 - end-to-end smoke test on macOS arm64 and Linux glibc.
 # Builds the workspace, drives the daemon + CLI + MCP shim through the
 # init/add/list/show/daemon-unlock/mcp-self-test flow under a hermetic
 # HOME, with CLOAK_PEPPER_FILE in lieu of an OS keychain.

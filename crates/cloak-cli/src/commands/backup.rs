@@ -25,7 +25,7 @@ use cloak_core::Error;
 use super::audit_log;
 use super::{open_vault, unlock::unlock_interactive, Context, SystemError};
 
-/// `cloak backup mnemonic`. The phrase itself is not stored — Cloak
+/// `cloak backup mnemonic`. The phrase itself is not stored - Cloak
 /// shows it once at creation and never again. This command surfaces
 /// that contract: it confirms the vault carries a recovery wrap (so a
 /// pre-v1.0 vault can be detected) and reminds the user where to find
@@ -68,7 +68,7 @@ pub fn run_mnemonic(ctx: &Context) -> Result<()> {
     println!();
     println!("If you have the words: confirm them with `cloak backup verify`.");
     println!("If you have lost the words but still know the passphrase: there is no");
-    println!("way to re-display them — create a new vault with a fresh seed and");
+    println!("way to re-display them - create a new vault with a fresh seed and");
     println!("re-import your secrets.");
 
     audit_log::append_required(

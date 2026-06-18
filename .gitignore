@@ -15,7 +15,7 @@ dist/
 *.cloak-bundle
 audit.jsonl
 .cloak-state/
-# Plaintext dotenv files — the very thing Cloak exists to replace.
+# Plaintext dotenv files - the very thing Cloak exists to replace.
 .env
 .env.*
 
@@ -25,7 +25,7 @@ audit.jsonl
 .idea/
 *.swp
 
-# Internal planning / process docs — local only, not for the public repo.
+# Internal planning / process docs - local only, not for the public repo.
 PLAN.md
 PLAN_V1.md
 compass_artifact_*.md

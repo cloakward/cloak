@@ -11,17 +11,29 @@
 </p>
 
 <p align="center">
-  <img src="docs/cloak-demo.gif" alt="Store an API key in Cloak's encrypted vault, then let an agent use it without the model ever seeing the key" width="820">
+  <img src="docs/cloak-stripe-demo.gif" alt="A Cloak demo showing an agent use a Stripe key by name without seeing the key value" width="900">
+</p>
+
+<p align="center">
+  <sub><em>An agent using your Stripe key without ever seeing it. The model only handled the name; the value never left Cloak. <a href="docs/cloak-stripe-demo.mp4">Watch in HD</a>.</em></sub>
 </p>
 
 Hand an AI agent an API key and you've handed it to the model: its context, its provider's logs, and anyone who can read them. One prompt injection and the key walks out the door.
 
-Cloak keeps your keys in an encrypted vault on your machine. The agent never receives the stored key. It asks Cloak to use the key, and gets back only the result.
+Cloak keeps your keys in an encrypted vault on your machine, where your agent can use them but never read them. It asks Cloak to make the call, Cloak attaches the key and returns only the result, and the value never enters the model.
 
 - **No `read_secret` tool.** The agent can list, sign, proxy, and mint. It cannot read a stored value.
 - **Allowlisted by default.** A key reaches a host only if you approved it.
 - **Local only.** No account, no cloud, no telemetry.
 - **Signed releases.** macOS-notarized, cosign-signed, SLSA L3-attested.
+
+<details>
+<summary><b>&#9654; See the full flow: store a key, then let an agent use it</b></summary>
+<br>
+<p align="center">
+  <img src="docs/cloak-demo.gif" alt="Store an API key in Cloak's encrypted vault, then let an agent use it without the model ever seeing the key" width="820">
+</p>
+</details>
 
 ## Quickstart
 
@@ -35,25 +47,15 @@ cloak import .env               # pull every key you already have into the encry
 
 That works for any secret: an LLM key, a payments key, a cloud credential, a git token. Add them one at a time instead with `cloak add OPENAI_API_KEY`.
 
-Allowlist where each key is allowed to go in your `policy.toml`, one block per secret:
-
-```toml
-[[secrets]]
-name = "OPENAI_API_KEY"
-[secrets.tools.proxy_authenticated_http_request]
-allowed_hosts = ["api.openai.com"]
-
-[[secrets]]
-name = "STRIPE_SECRET_KEY"
-[secrets.tools.proxy_authenticated_http_request]
-allowed_hosts = ["api.stripe.com"]
-```
-
-Pick up the policy and unlock the daemon so your agent can use the vault:
+Every secret starts denied. Allow each key to reach a host with one command, applied live with no daemon restart:
 
 ```sh
-cloak daemon restart && cloak unlock
+cloak allow OPENAI_API_KEY api.openai.com
+cloak allow STRIPE_SECRET_KEY api.stripe.com
+cloak policy                    # see what each key can reach
 ```
+
+Prefer a file? The same rules live in `policy.toml`, one `[[secrets]]` block per secret. Remove a host with `cloak deny`.
 
 Your agent can now use any of them, in plain English. One worked example:
 
