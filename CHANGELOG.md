@@ -4,6 +4,19 @@ All notable changes to Cloak. Format follows Keep-a-Changelog; we use SemVer.
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-06-18
+
+### Fixed
+- Bumped the MCP server's pinned `hono` override from `4.12.21` to `4.12.25`
+  after OSV reported multiple advisories against the transitive SDK dependency.
+  `hono` is not used for Cloak's local stdio/UDS MCP path, but the override now
+  resolves to a non-vulnerable version and the OSV dependency scan is green.
+
+### Changed
+- Added the new README hero assets for the launch page: a short Stripe proxy
+  demo as the first visual, with the original full-flow GIF preserved below it.
+  The caption is intentionally framed as a demo flow, not a literal live capture.
+
 ## [1.1.1] - 2026-06-12
 
 ### Fixed
