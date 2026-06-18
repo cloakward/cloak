@@ -11,17 +11,29 @@
 </p>
 
 <p align="center">
-  <img src="docs/cloak-demo.gif" alt="Store an API key in Cloak's encrypted vault, then let an agent use it without the model ever seeing the key" width="820">
+  <img src="docs/cloak-stripe-demo.gif" alt="A Cloak demo showing an agent use a Stripe key by name without seeing the key value" width="900">
+</p>
+
+<p align="center">
+  <sub><em>An agent using your Stripe key without ever seeing it. The model only handled the name; the value never left Cloak. <a href="docs/cloak-stripe-demo.mp4">Watch in HD</a>.</em></sub>
 </p>
 
 Hand an AI agent an API key and you've handed it to the model: its context, its provider's logs, and anyone who can read them. One prompt injection and the key walks out the door.
 
-Cloak keeps your keys in an encrypted vault on your machine. The agent never receives the stored key. It asks Cloak to use the key, and gets back only the result.
+Cloak keeps your keys in an encrypted vault on your machine, where your agent can use them but never read them. It asks Cloak to make the call, Cloak attaches the key and returns only the result, and the value never enters the model.
 
 - **No `read_secret` tool.** The agent can list, sign, proxy, and mint. It cannot read a stored value.
 - **Allowlisted by default.** A key reaches a host only if you approved it.
 - **Local only.** No account, no cloud, no telemetry.
 - **Signed releases.** macOS-notarized, cosign-signed, SLSA L3-attested.
+
+<details>
+<summary><b>&#9654; See the full flow: store a key, then let an agent use it</b></summary>
+<br>
+<p align="center">
+  <img src="docs/cloak-demo.gif" alt="Store an API key in Cloak's encrypted vault, then let an agent use it without the model ever seeing the key" width="820">
+</p>
+</details>
 
 ## Quickstart
 
